@@ -146,7 +146,9 @@ public:
                                                 const InteractionDefinitions& idef,
                                                 DeviceBuffer<Float4>          d_xqPtr,
                                                 DeviceBuffer<RVec>            d_fPtr,
-                                                DeviceBuffer<RVec>            d_fShiftPtr);
+                                                DeviceBuffer<RVec>            d_fShiftPtr,
+                                                DeviceBuffer<float>           d_nbLJEnergyPtr,
+                                                DeviceBuffer<float>           d_nbElecEnergyPtr);
     /*! \brief
      * Update PBC data.
      *
@@ -188,6 +190,16 @@ public:
     bool gamdDihedralShadowEnabled() const;
     /*! \brief Returns whether device GaMD dihedral-force production is enabled. */
     bool gamdDihedralBufferEnabled() const;
+    /*! \brief Returns whether the diagnostic device GaMD energy path is enabled. */
+    bool gamdEnergyShadowEnabled() const;
+    /*! \brief Returns PME reciprocal-energy staging owned by this consumer. */
+    DeviceBuffer<float> gamdPmeEnergyStagingBuffer();
+    /*! \brief Returns the event marked after PME reciprocal-energy staging. */
+    GpuEventSynchronizer* gamdPmeEnergyReadyEvent();
+    /*! \brief Reduces raw total/dihedral GaMD energies from device producers. */
+    void launchGamdEnergyShadowReduction();
+    /*! \brief Returns the diagnostic raw total/dihedral GaMD energies. */
+    std::array<double, 2> gamdEnergyShadowValues();
     /*! \brief Copies the state-order diagnostic GaMD dihedral force buffer to the host. */
     void copyGamdDihedralShadowForces(ArrayRef<RVec> forces);
     /*! \brief Copies the device-reduced raw GaMD dihedral virial to the host. */
@@ -231,6 +243,9 @@ private:
     DeviceBuffer<Float3> d_f_ = nullptr;
     //! Shift force vector on the device.
     DeviceBuffer<Float3> d_fShift_ = nullptr;
+    //! Short-range LJ and electrostatic energy scalars owned by NBNXM.
+    DeviceBuffer<float> d_nbLJEnergy_   = nullptr;
+    DeviceBuffer<float> d_nbElecEnergy_ = nullptr;
     //! Diagnostic raw GaMD dihedral forces in nbnxn atom order.
     DeviceBuffer<Float3> d_gamdDihedralForcesNbnxn_ = nullptr;
     //! Diagnostic raw GaMD dihedral forces in state atom order.
@@ -256,6 +271,11 @@ private:
     bool              gamdDihedralShadowEnabled_     = false;
     bool              gamdDihedralBufferEnabled_     = false;
     bool              gamdForceCorrectionEnabled_    = false;
+    bool                gamdEnergyShadowEnabled_ = false;
+    DeviceBuffer<float> d_gamdPmeEnergy_         = nullptr;
+    DeviceBuffer<float> d_gamdEnergyShadow_      = nullptr;
+    HostVector<float>   h_gamdEnergyShadow_ = { {}, gmx::HostAllocationPolicy(gmx::PinningPolicy::PinnedIfSupported) };
+    std::unique_ptr<GpuEventSynchronizer> gamdPmeEnergyReadyEvent_;
     std::unique_ptr<GpuEventSynchronizer> gamdForcesReadyEvent_;
     //! \brief Host-side virial buffer
     HostVector<float> vTot_ = { {}, gmx::HostAllocationPolicy(gmx::PinningPolicy::PinnedIfSupported) };

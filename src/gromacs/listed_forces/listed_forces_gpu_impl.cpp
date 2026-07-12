@@ -208,6 +208,28 @@ bool ListedForcesGpu::gamdDihedralBufferEnabled() const
     return false;
 }
 
+bool ListedForcesGpu::gamdEnergyShadowEnabled() const
+{
+    return false;
+}
+
+DeviceBuffer<float> ListedForcesGpu::gamdPmeEnergyStagingBuffer()
+{
+    return nullptr;
+}
+
+GpuEventSynchronizer* ListedForcesGpu::gamdPmeEnergyReadyEvent()
+{
+    return nullptr;
+}
+
+void ListedForcesGpu::launchGamdEnergyShadowReduction() {}
+
+std::array<double, 2> ListedForcesGpu::gamdEnergyShadowValues()
+{
+    return { 0.0, 0.0 };
+}
+
 void ListedForcesGpu::copyGamdDihedralShadowForces(ArrayRef<RVec> /* forces */) {}
 
 void ListedForcesGpu::copyGamdDihedralVirial(std::array<real, DIM * DIM>* /* virial */) {}

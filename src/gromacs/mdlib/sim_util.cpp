@@ -557,6 +557,41 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*              cr,
     const double rawDihedralEnergy  = enerd->term[F_PDIHS] + enerd->term[F_RBDIHS]
                                      + enerd->term[F_FOURDIHS] + enerd->term[F_CMAP];
 
+    if (fr->listedForcesGpu != nullptr && fr->listedForcesGpu->gamdEnergyShadowEnabled())
+    {
+        const std::array<double, 2> deviceEnergies =
+                fr->listedForcesGpu->gamdEnergyShadowValues();
+        const double totalDifference    = deviceEnergies[0] - rawPotentialEnergy;
+        const double dihedralDifference = deviceEnergies[1] - rawDihedralEnergy;
+        std::fprintf(stderr,
+                     "[GaMD GPU energy shadow] step=%lld total_host=%.12g total_device=%.12g "
+                     "total_diff=%.9g dihedral_host=%.12g dihedral_device=%.12g "
+                     "dihedral_diff=%.9g\n",
+                     static_cast<long long>(step),
+                     rawPotentialEnergy,
+                     deviceEnergies[0],
+                     totalDifference,
+                     rawDihedralEnergy,
+                     deviceEnergies[1],
+                     dihedralDifference);
+        // At the TC5b potential magnitude, one single-precision ULP is 0.0625 kJ/mol.
+        // Allow four ULPs for the different but deterministic summation order.
+        constexpr double c_totalEnergyTolerance    = 0.25;
+        constexpr double c_dihedralEnergyTolerance = 0.001;
+        if (std::abs(totalDifference) > c_totalEnergyTolerance
+            || std::abs(dihedralDifference) > c_dihedralEnergyTolerance)
+        {
+            gmx_fatal(FARGS,
+                      "GaMD GPU raw-energy shadow mismatch at step %lld: total difference %.9g "
+                      "(tolerance %.9g), dihedral difference %.9g (tolerance %.9g).",
+                      static_cast<long long>(step),
+                      totalDifference,
+                      c_totalEnergyTolerance,
+                      dihedralDifference,
+                      c_dihedralEnergyTolerance);
+        }
+    }
+
     gmx::gamdFinalizeCurrentStep(
             static_cast<long>(step), cr->nodeid, rawPotentialEnergy, rawDihedralEnergy, wcycle);
 
@@ -3126,6 +3161,16 @@ void do_force(FILE*                         fplog,
         /* The same fReadyOnDevice device synchronizer is later used to track buffer clearing,
          * so we reset the expected consumption value back to the default (1). */
         stateGpu->setFReadyOnDeviceEventExpectedConsumptionCount(AtomLocality::Local, 1);
+    }
+
+    if (stepWork.computeEnergy && fr->listedForcesGpu != nullptr
+        && fr->listedForcesGpu->gamdEnergyShadowEnabled())
+    {
+        pme_gpu_stage_gamd_reciprocal_energy(
+                fr->pmedata,
+                fr->listedForcesGpu->gamdPmeEnergyStagingBuffer(),
+                fr->listedForcesGpu->gamdPmeEnergyReadyEvent());
+        fr->listedForcesGpu->launchGamdEnergyShadowReduction();
     }
 
     launchGpuEndOfStepTasks(

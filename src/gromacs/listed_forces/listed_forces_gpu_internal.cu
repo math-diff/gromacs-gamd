@@ -1186,6 +1186,31 @@ __global__ void mapNbnxnToStateForceKernel(const int     numAtoms,
     }
 }
 
+__global__ void reduceGamdRawEnergiesKernel(const float* gm_nbLJEnergy,
+                                            const float* gm_nbElecEnergy,
+                                            const float* gm_pmeEnergy,
+                                            const float* gm_listedEnergies,
+                                            float*       gm_gamdEnergies)
+{
+    if (blockIdx.x == 0 && threadIdx.x == 0)
+    {
+        float totalEnergy = gm_nbLJEnergy[0] + gm_nbElecEnergy[0] + gm_pmeEnergy[0];
+        for (int fType = 0; fType < F_EPOT; ++fType)
+        {
+            if (fType != F_DISRESVIOL && fType != F_ORIRESDEV)
+            {
+                totalEnergy += gm_listedEnergies[fType];
+            }
+        }
+
+        const float dihedralEnergy = gm_listedEnergies[F_PDIHS] + gm_listedEnergies[F_RBDIHS]
+                                     + gm_listedEnergies[F_FOURDIHS]
+                                     + gm_listedEnergies[F_CMAP];
+        gm_gamdEnergies[0] = totalEnergy;
+        gm_gamdEnergies[1] = dihedralEnergy;
+    }
+}
+
 __global__ void gamdForceCorrectionShadowKernel(const int     numAtoms,
                                                 const float   totalScale,
                                                 const float   dihedralCorrectionScale,
@@ -1382,6 +1407,63 @@ void ListedForcesGpu::Impl::finishGamdDihedralBuffers()
 
     wallcycle_sub_stop(wcycle_, WallCycleSubCounter::LaunchGpuBonded);
     wallcycle_stop(wcycle_, WallCycleCounter::LaunchGpuPp);
+}
+
+DeviceBuffer<float> ListedForcesGpu::Impl::gamdPmeEnergyStagingBuffer()
+{
+    GMX_ASSERT(gamdEnergyShadowEnabled_, "GaMD device energy shadow requested while disabled");
+    return d_gamdPmeEnergy_;
+}
+
+GpuEventSynchronizer* ListedForcesGpu::Impl::gamdPmeEnergyReadyEvent()
+{
+    GMX_ASSERT(gamdPmeEnergyReadyEvent_ != nullptr,
+               "GaMD PME energy event requested while device energy shadow is disabled");
+    return gamdPmeEnergyReadyEvent_.get();
+}
+
+void ListedForcesGpu::Impl::launchGamdEnergyShadowReduction()
+{
+    GMX_ASSERT(gamdEnergyShadowEnabled_, "GaMD device energy shadow requested while disabled");
+    GMX_ASSERT(d_nbLJEnergy_ != nullptr && d_nbElecEnergy_ != nullptr && d_vTot_ != nullptr
+                       && d_gamdPmeEnergy_ != nullptr && d_gamdEnergyShadow_ != nullptr,
+               "GaMD device energy shadow buffers have not been initialized");
+
+    gamdPmeEnergyReadyEvent_->enqueueWaitEvent(deviceStream_);
+
+    KernelLaunchConfig config;
+    config.blockSize[0]     = 1;
+    config.blockSize[1]     = 1;
+    config.blockSize[2]     = 1;
+    config.gridSize[0]      = 1;
+    config.gridSize[1]      = 1;
+    config.gridSize[2]      = 1;
+    config.sharedMemorySize = 0;
+
+    auto kernel = reduceGamdRawEnergiesKernel;
+    const auto kernelArgs = prepareGpuKernelArguments(kernel,
+                                                      config,
+                                                      &d_nbLJEnergy_,
+                                                      &d_nbElecEnergy_,
+                                                      &d_gamdPmeEnergy_,
+                                                      &d_vTot_,
+                                                      &d_gamdEnergyShadow_);
+    launchGpuKernel(
+            kernel, config, deviceStream_, nullptr, "Reduce GaMD raw energies", kernelArgs);
+    copyFromDeviceBuffer(h_gamdEnergyShadow_.data(),
+                         &d_gamdEnergyShadow_,
+                         0,
+                         2,
+                         deviceStream_,
+                         GpuApiCallBehavior::Async,
+                         nullptr);
+}
+
+std::array<double, 2> ListedForcesGpu::Impl::gamdEnergyShadowValues()
+{
+    GMX_ASSERT(gamdEnergyShadowEnabled_, "GaMD device energy shadow requested while disabled");
+    deviceStream_.synchronize();
+    return { h_gamdEnergyShadow_[0], h_gamdEnergyShadow_[1] };
 }
 
 void ListedForcesGpu::Impl::launchGamdVirialReductionKernel(DeviceBuffer<Float3> forces,

@@ -444,6 +444,12 @@ GPU_FUNC_QUALIFIER void pme_gpu_set_kernelparam_coordinates(const PmeGpu* GPU_FU
 GPU_FUNC_QUALIFIER DeviceBuffer<gmx::RVec> pme_gpu_get_kernelparam_forces(const PmeGpu* GPU_FUNC_ARGUMENT(pmeGpu))
         GPU_FUNC_TERM_WITH_RETURN(DeviceBuffer<gmx::RVec>{});
 
+/*! \brief Stage scaled primary-grid reciprocal energy for a device consumer. */
+GPU_FUNC_QUALIFIER void pme_gpu_stage_gamd_reciprocal_energy(
+        const PmeGpu*              GPU_FUNC_ARGUMENT(pmeGpu),
+        DeviceBuffer<float>        GPU_FUNC_ARGUMENT(destination),
+        GpuEventSynchronizer*      GPU_FUNC_ARGUMENT(readyEvent)) GPU_FUNC_TERM;
+
 GPU_FUNC_QUALIFIER void pme_gpu_set_kernelparam_useNvshmem(const PmeGpu* GPU_FUNC_ARGUMENT(pmeGpu),
                                                            bool GPU_FUNC_ARGUMENT(useNvshmem)) GPU_FUNC_TERM;
 

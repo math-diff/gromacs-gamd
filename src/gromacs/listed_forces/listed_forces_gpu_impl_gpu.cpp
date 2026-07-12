@@ -177,6 +177,7 @@ ListedForcesGpu::Impl::Impl(const gmx_ffparams_t& ffparams,
 
 #if GMX_GPU_CUDA
     gamdDihedralShadowEnabled_ = (std::getenv("GMX_GAMD_GPU_DIH_SHADOW") != nullptr);
+    gamdEnergyShadowEnabled_ = (std::getenv("GMX_GAMD_GPU_ENERGY_SHADOW") != nullptr);
     const char* gamdGpuRequest = std::getenv("GMX_GAMD_GPU");
     gamdForceCorrectionEnabled_ =
             (gamdGpuRequest != nullptr && std::strcmp(gamdGpuRequest, "1") == 0);
@@ -193,6 +194,13 @@ ListedForcesGpu::Impl::Impl(const gmx_ffparams_t& ffparams,
         allocateDeviceBuffer(&d_gamdDihedralShiftForces_, c_numShiftVectors, deviceContext_);
         allocateDeviceBuffer(&d_gamdDihedralVirial_, DIM * DIM, deviceContext_);
         allocateDeviceBuffer(&d_gamdShortRangeVirial_, DIM * DIM, deviceContext_);
+    }
+    if (gamdEnergyShadowEnabled_)
+    {
+        allocateDeviceBuffer(&d_gamdPmeEnergy_, 1, deviceContext_);
+        allocateDeviceBuffer(&d_gamdEnergyShadow_, 2, deviceContext_);
+        h_gamdEnergyShadow_.resize(2);
+        gamdPmeEnergyReadyEvent_ = std::make_unique<GpuEventSynchronizer>();
     }
 #endif
 
@@ -303,6 +311,14 @@ ListedForcesGpu::Impl::~Impl()
     {
         freeDeviceBuffer(&d_nbnxnAtomOrder_);
     }
+    if (d_gamdEnergyShadow_ != nullptr)
+    {
+        freeDeviceBuffer(&d_gamdEnergyShadow_);
+    }
+    if (d_gamdPmeEnergy_ != nullptr)
+    {
+        freeDeviceBuffer(&d_gamdPmeEnergy_);
+    }
 }
 
 //! Return whether function type \p fType in \p idef has perturbed interactions
@@ -387,7 +403,9 @@ void ListedForcesGpu::Impl::updateInteractionListsAndDeviceBuffers(ArrayRef<cons
                                                                    const InteractionDefinitions& idef,
                                                                    DeviceBuffer<Float4> d_xqPtr,
                                                                    DeviceBuffer<RVec>   d_fPtr,
-                                                                   DeviceBuffer<RVec>   d_fShiftPtr)
+                                                                   DeviceBuffer<RVec>   d_fShiftPtr,
+                                                                   DeviceBuffer<float>  d_nbLJEnergyPtr,
+                                                                   DeviceBuffer<float>  d_nbElecEnergyPtr)
 {
     wallcycle_sub_start(wcycle_, WallCycleSubCounter::GpuBondedListUpdate);
 
@@ -516,6 +534,8 @@ void ListedForcesGpu::Impl::updateInteractionListsAndDeviceBuffers(ArrayRef<cons
     d_xq_     = d_xqPtr;
     d_f_      = d_fPtr;
     d_fShift_ = d_fShiftPtr;
+    d_nbLJEnergy_   = d_nbLJEnergyPtr;
+    d_nbElecEnergy_ = d_nbElecEnergyPtr;
 
     kernelBuffers_.d_forceParams = d_forceParams_;
     kernelBuffers_.d_vTot        = d_vTot_;
@@ -592,6 +612,11 @@ bool ListedForcesGpu::Impl::gamdDihedralShadowEnabled() const
 bool ListedForcesGpu::Impl::gamdDihedralBufferEnabled() const
 {
     return gamdDihedralBufferEnabled_;
+}
+
+bool ListedForcesGpu::Impl::gamdEnergyShadowEnabled() const
+{
+    return gamdEnergyShadowEnabled_;
 }
 
 void ListedForcesGpu::Impl::copyGamdDihedralShadowForces(ArrayRef<RVec> forces)
@@ -708,7 +733,13 @@ void ListedForcesGpu::updateInteractionListsAndDeviceBuffers(ArrayRef<const int>
                                                              NBAtomDataGpu* nbnxmAtomDataGpu)
 {
     impl_->updateInteractionListsAndDeviceBuffers(
-            nbnxnAtomOrder, idef, nbnxmAtomDataGpu->xq, nbnxmAtomDataGpu->f, nbnxmAtomDataGpu->fShift);
+            nbnxnAtomOrder,
+            idef,
+            nbnxmAtomDataGpu->xq,
+            nbnxmAtomDataGpu->f,
+            nbnxmAtomDataGpu->fShift,
+            nbnxmAtomDataGpu->eLJ,
+            nbnxmAtomDataGpu->eElec);
 }
 
 void ListedForcesGpu::setPbc(PbcType pbcType, const matrix box, bool canMoleculeSpanPbc)
@@ -753,6 +784,31 @@ bool ListedForcesGpu::gamdDihedralShadowEnabled() const
 bool ListedForcesGpu::gamdDihedralBufferEnabled() const
 {
     return impl_->gamdDihedralBufferEnabled();
+}
+
+bool ListedForcesGpu::gamdEnergyShadowEnabled() const
+{
+    return impl_->gamdEnergyShadowEnabled();
+}
+
+DeviceBuffer<float> ListedForcesGpu::gamdPmeEnergyStagingBuffer()
+{
+    return impl_->gamdPmeEnergyStagingBuffer();
+}
+
+GpuEventSynchronizer* ListedForcesGpu::gamdPmeEnergyReadyEvent()
+{
+    return impl_->gamdPmeEnergyReadyEvent();
+}
+
+void ListedForcesGpu::launchGamdEnergyShadowReduction()
+{
+    impl_->launchGamdEnergyShadowReduction();
+}
+
+std::array<double, 2> ListedForcesGpu::gamdEnergyShadowValues()
+{
+    return impl_->gamdEnergyShadowValues();
 }
 
 void ListedForcesGpu::copyGamdDihedralShadowForces(ArrayRef<RVec> forces)

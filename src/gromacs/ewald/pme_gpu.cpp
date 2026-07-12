@@ -447,6 +447,15 @@ DeviceBuffer<gmx::RVec> pme_gpu_get_device_f(const gmx_pme_t* pme)
     return pme_gpu_get_kernelparam_forces(pme->gpu);
 }
 
+void pme_gpu_stage_gamd_reciprocal_energy(const gmx_pme_t*      pme,
+                                          DeviceBuffer<float>   destination,
+                                          GpuEventSynchronizer* readyEvent)
+{
+    GMX_ASSERT(pme != nullptr && pme_gpu_active(pme),
+               "GaMD reciprocal-energy staging requires active GPU PME");
+    pme_gpu_stage_gamd_reciprocal_energy(pme->gpu, destination, readyEvent);
+}
+
 void pme_gpu_set_device_x(const gmx_pme_t* pme, DeviceBuffer<gmx::RVec> d_x)
 {
     GMX_ASSERT(pme != nullptr, "Null pointer is passed as a PME to the set coordinates function.");
