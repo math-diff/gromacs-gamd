@@ -254,10 +254,12 @@ void gmx::LegacySimulator::do_md()
     matrix            lastbox;
     int               lamnew = 0;
     /* for FEP */
-    real      saved_conserved_quantity = 0;
-    real      last_ekin                = 0;
-    t_extmass MassQ;
-    char      sbuf[STEPSTRSIZE], sbuf2[STEPSTRSIZE];
+    real                                     saved_conserved_quantity = 0;
+    real                                     last_ekin                = 0;
+    t_extmass                                MassQ;
+    char                                     sbuf[STEPSTRSIZE], sbuf2[STEPSTRSIZE];
+    std::vector<std::array<real, DIM * DIM>> deferredKineticTensors;
+    std::vector<std::array<real, DIM * DIM>> deferredPressureBoxes;
 
     /* PME load balancing data for GPU kernels */
     gmx_bool bPMETune         = FALSE;
@@ -919,13 +921,26 @@ void gmx::LegacySimulator::do_md()
     }
 
     bool        usedMdGpuGraphLastStep = false;
+    const bool  useCurrentStepGaMD     = ir->bDoGaMD || getenv("GMX_USE_GAMD") != nullptr;
     const char* residentEnergyRequest  = std::getenv("GMX_GAMD_GPU_RESIDENT_ENERGY");
     const bool useResidentEnergy = residentEnergyRequest != nullptr && residentEnergyRequest[0] == '1'
                                    && residentEnergyRequest[1] == '\0';
+    const char* deviceGlobalsRequest = std::getenv("GMX_GAMD_GPU_DEVICE_GLOBALS");
+    const bool  useDeviceGlobals = deviceGlobalsRequest != nullptr && deviceGlobalsRequest[0] == '1'
+                                  && deviceGlobalsRequest[1] == '\0';
     if (residentEnergyRequest != nullptr && !useResidentEnergy
         && !(residentEnergyRequest[0] == '0' && residentEnergyRequest[1] == '\0'))
     {
         gmx_fatal(FARGS, "GMX_GAMD_GPU_RESIDENT_ENERGY must be exactly 0 or 1; got '%s'.", residentEnergyRequest);
+    }
+    if (deviceGlobalsRequest != nullptr && !useDeviceGlobals
+        && !(deviceGlobalsRequest[0] == '0' && deviceGlobalsRequest[1] == '\0'))
+    {
+        gmx_fatal(FARGS, "GMX_GAMD_GPU_DEVICE_GLOBALS must be exactly 0 or 1; got '%s'.", deviceGlobalsRequest);
+    }
+    if (useDeviceGlobals && !useResidentEnergy)
+    {
+        gmx_fatal(FARGS, "GMX_GAMD_GPU_DEVICE_GLOBALS=1 requires GMX_GAMD_GPU_RESIDENT_ENERGY=1.");
     }
     /* and stop now if we should */
     bLastStep = (bLastStep || (ir->nsteps >= 0 && step_rel > ir->nsteps));
@@ -1152,6 +1167,38 @@ void gmx::LegacySimulator::do_md()
         checkpointHandler->decideIfCheckpointingThisStep(bNS, bFirstStep, bLastStep);
         gmx::gamdSetCheckpointingThisStep(checkpointHandler->isCheckpointingStep());
 
+        if (useCurrentStepGaMD)
+        {
+            // Current-step GaMD requires raw energies every MD step.
+            static bool gamdWarnedAboutNstcalcenergy = false;
+            if (!gamdWarnedAboutNstcalcenergy)
+            {
+                gamdWarnedAboutNstcalcenergy = true;
+
+                if (cr_->nodeid == 0)
+                {
+                    if (ir->nstcalcenergy > 1)
+                    {
+                        fprintf(stderr,
+                                "\n[GaMD WARNING] nstcalcenergy = %d > 1.\n"
+                                "Current-step GaMD requires raw energies every step.\n"
+                                "Set nstcalcenergy = 1 for a supported production path.\n\n",
+                                ir->nstcalcenergy);
+                    }
+                    else
+                    {
+                        fprintf(stderr,
+                                "\n[GaMD INFO] nstcalcenergy = %d.\n"
+                                "GaMD is using current-step energies.\n\n",
+                                ir->nstcalcenergy);
+                    }
+                }
+            }
+
+            gmx::gamdPrepareStep(step, cr_->nodeid);
+            gmx::gamdWarnIfRunTooShort(ir->init_step, ir->nsteps, cr_->nodeid);
+        }
+
         /* Determine the energy and pressure:
          * at nstcalcenergy steps and at energy output steps (set below).
          */
@@ -1215,6 +1262,37 @@ void gmx::LegacySimulator::do_md()
         runScheduleWork_->stepWork = setupStepWorkload(
                 legacyForceFlags, ir->mtsLevels, step, runScheduleWork_->domainWork, simulationWork);
 
+        if (useCurrentStepGaMD && useResidentEnergy)
+        {
+            if (simulationWork.gamdExecutionMode != GaMDExecutionMode::GpuScalarSynchronized
+                || fr_->listedForcesGpu == nullptr || !fr_->listedForcesGpu->gamdScaleFromDeviceEnabled())
+            {
+                gmx_fatal(FARGS,
+                          "GMX_GAMD_GPU_RESIDENT_ENERGY=1 requires the supported single-rank "
+                          "GPU GaMD path and GMX_GAMD_GPU_SCALE_FROM_DEVICE=1.");
+            }
+
+            const bool diagnosticHostState = fr_->listedForcesGpu->gamdEnergyShadowDiagnosticsEnabled()
+                                             || fr_->listedForcesGpu->gamdDihedralShadowEnabled();
+            const bool needHostEnergy = needEnergyAndVirial || diagnosticHostState
+                                        || gmx::gamdRequiresHostEnergyThisStep(step);
+            runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost = needHostEnergy;
+
+            static bool loggedResidentEnergyMode = false;
+            if (!loggedResidentEnergyMode && cr_->nodeid == 0)
+            {
+                loggedResidentEnergyMode = true;
+                std::fprintf(stderr,
+                             "[GaMD GPU INFO] Device-resident production energy enabled; host "
+                             "staging is retained for output, log, checkpoint, adaptive-stage, "
+                             "and diagnostic steps.\n");
+            }
+        }
+
+        const bool useResidentOrdinaryStep = useCurrentStepGaMD && useResidentEnergy
+                                             && !runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost;
+        const bool useResidentGpuGraphThisStep = useResidentOrdinaryStep && useDeviceGlobals;
+
         const bool doTemperatureScaling = (ir->etc != TemperatureCoupling::No
                                            && do_per_step(step + ir->nsttcouple - 1, ir->nsttcouple));
 
@@ -1239,7 +1317,7 @@ void gmx::LegacySimulator::do_md()
         {
             // Reset graph on search step (due to changing neighbour list etc)
             // or virial step (due to changing shifts and box).
-            if (bNS || bCalcVir)
+            if (bNS || (bCalcVir && !useResidentGpuGraphThisStep))
             {
                 fr_->mdGraph[MdGraphEvenOrOddStep::EvenStep]->reset();
                 fr_->mdGraph[MdGraphEvenOrOddStep::OddStep]->reset();
@@ -1247,10 +1325,12 @@ void gmx::LegacySimulator::do_md()
             else
             {
                 mdGraph->setUsedGraphLastStep(usedMdGpuGraphLastStep);
-                bool canUseMdGpuGraphThisStep =
-                        !bNS && !bCalcVir && !doTemperatureScaling && !doParrinelloRahman && !bGStat
-                        && !needHalfStepKineticEnergy && !do_per_step(step, ir->nstxout)
-                        && !do_per_step(step, ir->nstxout_compressed)
+                const bool hostGlobalWorkCompatibleWithGraph = useResidentGpuGraphThisStep;
+                bool       canUseMdGpuGraphThisStep =
+                        !bNS && (!bCalcVir || useResidentGpuGraphThisStep) && !doTemperatureScaling
+                        && !doParrinelloRahman && (!bGStat || hostGlobalWorkCompatibleWithGraph)
+                        && (!needHalfStepKineticEnergy || hostGlobalWorkCompatibleWithGraph)
+                        && !do_per_step(step, ir->nstxout) && !do_per_step(step, ir->nstxout_compressed)
                         && !do_per_step(step, ir->nstvout) && !do_per_step(step, ir->nstfout)
                         && !checkpointHandler->isCheckpointingStep();
                 if (mdGraph->captureThisStep(canUseMdGpuGraphThisStep))
@@ -1321,69 +1401,6 @@ void gmx::LegacySimulator::do_md()
                  * This is parallellized as well, and does communication too.
                  * Check comments in sim_util.c
                  */
-                if (ir->bDoGaMD || getenv("GMX_USE_GAMD") != nullptr)
-                {
-                    // Current-step GaMD requires raw energies every MD step.
-                    static bool gamdWarnedAboutNstcalcenergy = false;
-                    if (!gamdWarnedAboutNstcalcenergy)
-                    {
-                        gamdWarnedAboutNstcalcenergy = true;
-
-                        if (cr_->nodeid == 0)
-                        {
-                            if (ir->nstcalcenergy > 1)
-                            {
-                                fprintf(stderr,
-                                        "\n[GaMD WARNING] nstcalcenergy = %d > 1.\n"
-                                        "Current-step GaMD requires raw energies every step.\n"
-                                        "Set nstcalcenergy = 1 for a supported production "
-                                        "path.\n\n",
-                                        ir->nstcalcenergy);
-                            }
-                            else
-                            {
-                                fprintf(stderr,
-                                        "\n[GaMD INFO] nstcalcenergy = %d.\n"
-                                        "GaMD is using current-step energies.\n\n",
-                                        ir->nstcalcenergy);
-                            }
-                        }
-                    }
-
-                    gmx::gamdPrepareStep(step, cr_->nodeid);
-                    gmx::gamdWarnIfRunTooShort(ir->init_step, ir->nsteps, cr_->nodeid);
-
-                    if (useResidentEnergy)
-                    {
-                        if (simulationWork.gamdExecutionMode != GaMDExecutionMode::GpuScalarSynchronized
-                            || fr_->listedForcesGpu == nullptr
-                            || !fr_->listedForcesGpu->gamdScaleFromDeviceEnabled())
-                        {
-                            gmx_fatal(FARGS,
-                                      "GMX_GAMD_GPU_RESIDENT_ENERGY=1 requires the supported "
-                                      "single-rank GPU GaMD path and "
-                                      "GMX_GAMD_GPU_SCALE_FROM_DEVICE=1.");
-                        }
-
-                        const bool diagnosticHostState =
-                                fr_->listedForcesGpu->gamdEnergyShadowDiagnosticsEnabled()
-                                || fr_->listedForcesGpu->gamdDihedralShadowEnabled();
-                        const bool needHostEnergy = needEnergyAndVirial || diagnosticHostState
-                                                    || gmx::gamdRequiresHostEnergyThisStep(step);
-                        runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost = needHostEnergy;
-
-                        static bool loggedResidentEnergyMode = false;
-                        if (!loggedResidentEnergyMode && cr_->nodeid == 0)
-                        {
-                            loggedResidentEnergyMode = true;
-                            std::fprintf(stderr,
-                                         "[GaMD GPU INFO] Device-resident production energy "
-                                         "enabled; host staging is retained for output, log, "
-                                         "checkpoint, adaptive-stage, and diagnostic steps.\n");
-                        }
-                    }
-                }
-
                 g_gamd_debug_current_step = step;
 
                 gmx_gamd_dih_force_debug_prepare_step(state_->numAtoms());
@@ -1858,11 +1875,29 @@ void gmx::LegacySimulator::do_md()
                                      : stateGpu->getLocalForcesReadyOnDeviceEvent(
                                                runScheduleWork_->stepWork, runScheduleWork_->simulationWork));
 
+                    if (useCurrentStepGaMD && useResidentEnergy && useDeviceGlobals
+                        && runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost
+                        && !deferredPressureBoxes.empty())
+                    {
+                        const auto previousHalfKinetic = integrator->previousHalfStepKineticEnergy();
+                        GMX_RELEASE_ASSERT(previousHalfKinetic.size() == ekind_->tcstat.size(),
+                                           "GPU and host temperature-group counts must match");
+                        for (std::size_t group = 0; group < previousHalfKinetic.size(); ++group)
+                        {
+                            std::copy_n(previousHalfKinetic[group].data(),
+                                        DIM * DIM,
+                                        ekind_->tcstat[group].ekinh[0]);
+                        }
+                    }
+
+                    const bool deferConstraintVirialToHost = useResidentOrdinaryStep;
+
                     // This applies Leap-Frog, LINCS and SETTLE in succession
                     integrator->integrate(forcesReadyForUpdate,
                                           ir->delta_t,
                                           true,
                                           bCalcVir,
+                                          deferConstraintVirialToHost,
                                           shake_vir,
                                           doTemperatureScaling,
                                           ekind_->tcstat,
@@ -2006,6 +2041,9 @@ void gmx::LegacySimulator::do_md()
          * the kinetic energy one step before communication.
          */
         {
+            const bool performHostGlobalReduction = bGStat && !useResidentGpuGraphThisStep;
+            const bool performHostHalfStepKinetic =
+                    needHalfStepKineticEnergy && !useResidentGpuGraphThisStep;
             // Organize to do inter-simulation signalling on steps if
             // and when algorithms require it.
             const bool doInterSimSignal = (simulationsShareState && do_per_step(step, nstSignalComm));
@@ -2028,14 +2066,14 @@ void gmx::LegacySimulator::do_md()
                 // - Temperature is needed for the next step.
                 // - This is a replica exchange step (even though we will only need
                 //     the velocities if an exchange succeeds)
-                if (bGStat || needHalfStepKineticEnergy || bDoReplEx)
+                if (performHostGlobalReduction || performHostHalfStepKinetic || bDoReplEx)
                 {
                     stateGpu->copyVelocitiesFromGpu(state_->v, AtomLocality::Local);
                     stateGpu->waitVelocitiesReadyOnHost(AtomLocality::Local);
                 }
             }
 
-            if (bGStat || needHalfStepKineticEnergy || doInterSimSignal)
+            if (performHostGlobalReduction || performHostHalfStepKinetic || doInterSimSignal)
             {
                 // Since we're already communicating at this step, we
                 // can propagate intra-simulation signals. Note that
@@ -2067,7 +2105,8 @@ void gmx::LegacySimulator::do_md()
                                 &signaller,
                                 lastbox,
                                 &bSumEkinhOld,
-                                (bGStat ? CGLO_GSTAT : 0) | (!EI_VV(ir->eI) && bCalcEner ? CGLO_ENERGY : 0)
+                                (performHostGlobalReduction ? CGLO_GSTAT : 0)
+                                        | (!EI_VV(ir->eI) && bCalcEner ? CGLO_ENERGY : 0)
                                         | (!EI_VV(ir->eI) && bStopCM ? CGLO_STOPCM : 0)
                                         | (!EI_VV(ir->eI) ? CGLO_TEMPERATURE : 0)
                                         | (!EI_VV(ir->eI) ? CGLO_PRESSURE : 0) | CGLO_CONSTRAINT,
@@ -2156,7 +2195,7 @@ void gmx::LegacySimulator::do_md()
         /* #### We now have r(t+dt) and v(t+dt/2)  ############# */
 
         /* The coordinates (x) were unshifted in update */
-        if (!bGStat)
+        if (!bGStat || useResidentGpuGraphThisStep)
         {
             /* We will not sum ekinh_old,
              * so signal that we still have to do it.
@@ -2217,6 +2256,118 @@ void gmx::LegacySimulator::do_md()
             if (bCalcEner)
             {
                 const bool outputDHDL = (computeDHDL && do_per_step(step, ir->fepvals->nstdhdl));
+
+                if (useCurrentStepGaMD && useResidentEnergy)
+                {
+                    if (runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost)
+                    {
+                        const auto deferredEnergySamples = fr_->listedForcesGpu->takeGamdEnergyHistory();
+                        const auto deferredForceVirials = fr_->listedForcesGpu->takeGamdForceVirialHistory(
+                                deferredEnergySamples.size());
+                        const auto deferredConstraintVirials = integrator->takeConstraintVirialHistory();
+                        GMX_RELEASE_ASSERT(
+                                deferredForceVirials.size() == deferredConstraintVirials.size()
+                                        && deferredForceVirials.size() == deferredPressureBoxes.size(),
+                                "Deferred GaMD force and host pressure sample counts must match");
+
+                        std::vector<std::array<real, DIM * DIM>> pressureKineticTensors;
+                        if (useDeviceGlobals)
+                        {
+                            const auto deferredKineticHistory = integrator->takeKineticEnergyHistory();
+                            GMX_RELEASE_ASSERT(
+                                    deferredKineticHistory.numSamples()
+                                                    == static_cast<int>(deferredForceVirials.size())
+                                            && deferredKineticHistory.numGroups == ir->opts.ngtc,
+                                    "Deferred GPU kinetic sample counts must match");
+                            pressureKineticTensors = deferredKineticHistory.totalTensors;
+                            std::vector<real> deferredGroupTemperatures(
+                                    deferredForceVirials.size() * deferredKineticHistory.numGroups);
+                            std::vector<real> deferredTemperatures(deferredForceVirials.size());
+                            for (std::size_t sample = 0; sample < deferredForceVirials.size(); ++sample)
+                            {
+                                real weightedTemperature   = 0;
+                                real totalDegreesOfFreedom = 0;
+                                for (int group = 0; group < deferredKineticHistory.numGroups; ++group)
+                                {
+                                    const real groupTemperature = calc_temp(
+                                            deferredKineticHistory.groupKineticEnergies
+                                                    [sample * deferredKineticHistory.numGroups + group],
+                                            ir->opts.nrdf[group]);
+                                    deferredGroupTemperatures[sample * deferredKineticHistory.numGroups + group] =
+                                            groupTemperature;
+                                    weightedTemperature += ir->opts.nrdf[group] * groupTemperature;
+                                    totalDegreesOfFreedom += ir->opts.nrdf[group];
+                                }
+                                deferredTemperatures[sample] = totalDegreesOfFreedom > 0
+                                                                       ? weightedTemperature / totalDegreesOfFreedom
+                                                                       : 0;
+                            }
+                            energyOutput.completeDeferredGpuKineticSamples(pressureKineticTensors,
+                                                                           deferredTemperatures,
+                                                                           deferredGroupTemperatures);
+                        }
+                        else
+                        {
+                            GMX_RELEASE_ASSERT(deferredKineticTensors.size() == deferredForceVirials.size(),
+                                               "Deferred host kinetic sample counts must match");
+                            pressureKineticTensors = deferredKineticTensors;
+                        }
+
+                        std::vector<std::array<real, DIM * DIM>> deferredTotalVirials(
+                                deferredForceVirials.size());
+                        std::vector<std::array<real, DIM * DIM>> deferredPressures(
+                                deferredForceVirials.size());
+                        std::vector<real> deferredScalarPressures(deferredForceVirials.size());
+                        std::vector<real> deferredSurfaceTensions(deferredForceVirials.size());
+                        for (std::size_t sample = 0; sample < deferredForceVirials.size(); ++sample)
+                        {
+                            for (int component = 0; component < DIM * DIM; ++component)
+                            {
+                                deferredTotalVirials[sample][component] =
+                                        deferredForceVirials[sample][component]
+                                        + deferredConstraintVirials[sample][component];
+                            }
+                            deferredScalarPressures[sample] = calc_pres(
+                                    fr_->pbcType,
+                                    ir->nwall,
+                                    reinterpret_cast<const rvec*>(deferredPressureBoxes[sample].data()),
+                                    reinterpret_cast<const rvec*>(pressureKineticTensors[sample].data()),
+                                    reinterpret_cast<const rvec*>(deferredTotalVirials[sample].data()),
+                                    reinterpret_cast<rvec*>(deferredPressures[sample].data()));
+                            const auto& pressure = deferredPressures[sample];
+                            const auto& box      = deferredPressureBoxes[sample];
+                            deferredSurfaceTensions[sample] =
+                                    (pressure[ZZ * DIM + ZZ]
+                                     - (pressure[XX * DIM + XX] + pressure[YY * DIM + YY]) * 0.5_real)
+                                    * box[ZZ * DIM + ZZ];
+                        }
+                        energyOutput.completeDeferredGpuVirialSamples(deferredTotalVirials,
+                                                                      deferredPressures,
+                                                                      deferredScalarPressures,
+                                                                      deferredSurfaceTensions);
+                        energyOutput.completeDeferredGpuEnergySamples(deferredEnergySamples);
+                        deferredKineticTensors.clear();
+                        deferredPressureBoxes.clear();
+                    }
+                    else
+                    {
+                        energyOutput.deferGpuEnergySample(t, *enerd_);
+                        energyOutput.deferGpuVirialSample();
+                        if (useDeviceGlobals)
+                        {
+                            energyOutput.deferGpuKineticSample();
+                        }
+                        else
+                        {
+                            std::array<real, DIM * DIM> kineticTensor;
+                            std::copy_n(ekind_->ekin[0], DIM * DIM, kineticTensor.begin());
+                            deferredKineticTensors.push_back(kineticTensor);
+                        }
+                        std::array<real, DIM * DIM> pressureBox;
+                        std::copy_n(lastbox[0], DIM * DIM, pressureBox.begin());
+                        deferredPressureBoxes.push_back(pressureBox);
+                    }
+                }
 
                 energyOutput.addDataAtEnergyStep(outputDHDL,
                                                  bCalcEnerStep,

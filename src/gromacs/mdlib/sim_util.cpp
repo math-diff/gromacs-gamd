@@ -3039,16 +3039,19 @@ void do_force(FILE*                         fplog,
                 forceOutNonbonded->forceWithShiftForces().shiftForces(),
                 wcycle);
 
-        if (useGpuGaMDShortRangeVirial && stepWork.stageGpuEnergyAndVirialToHost)
+        if (useGpuGaMDShortRangeVirial)
         {
-            std::array<real, DIM * DIM> shortRangeVirial = {};
             fr->listedForcesGpu->launchGamdShortRangeVirialReduction();
-            fr->listedForcesGpu->copyGamdShortRangeVirial(&shortRangeVirial);
-            for (int i = 0; i < DIM; ++i)
+            if (stepWork.stageGpuEnergyAndVirialToHost)
             {
-                for (int j = 0; j < DIM; ++j)
+                std::array<real, DIM * DIM> shortRangeVirial = {};
+                fr->listedForcesGpu->copyGamdShortRangeVirial(&shortRangeVirial);
+                for (int i = 0; i < DIM; ++i)
                 {
-                    vir_force[i][j] += shortRangeVirial[i * DIM + j];
+                    for (int j = 0; j < DIM; ++j)
+                    {
+                        vir_force[i][j] += shortRangeVirial[i * DIM + j];
+                    }
                 }
             }
         }
@@ -3184,7 +3187,12 @@ void do_force(FILE*                         fplog,
                                                              gamdParameters.thresholdP,
                                                              gamdParameters.kP,
                                                              gamdParameters.thresholdD,
-                                                             gamdParameters.kD);
+                                                             gamdParameters.kD,
+                                                             !stepWork.stageGpuEnergyAndVirialToHost);
+        if (useGpuGaMDShortRangeVirial && !stepWork.stageGpuEnergyAndVirialToHost)
+        {
+            fr->listedForcesGpu->recordGamdForceVirialSample();
+        }
     }
 
     launchGpuEndOfStepTasks(

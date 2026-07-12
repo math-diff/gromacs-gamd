@@ -2555,7 +2555,16 @@ __global__ void stageGamdReciprocalEnergyKernel(const float* gm_virialAndEnergy,
 {
     if (blockIdx.x == 0 && threadIdx.x == 0)
     {
-        gm_destination[0] = 0.5F * gm_virialAndEnergy[6];
+        gm_destination[0]                 = 0.5F * gm_virialAndEnergy[6];
+        gm_destination[1 + XX * DIM + XX] = 0.25F * gm_virialAndEnergy[0];
+        gm_destination[1 + YY * DIM + YY] = 0.25F * gm_virialAndEnergy[1];
+        gm_destination[1 + ZZ * DIM + ZZ] = 0.25F * gm_virialAndEnergy[2];
+        gm_destination[1 + XX * DIM + YY] = 0.25F * gm_virialAndEnergy[3];
+        gm_destination[1 + YY * DIM + XX] = 0.25F * gm_virialAndEnergy[3];
+        gm_destination[1 + XX * DIM + ZZ] = 0.25F * gm_virialAndEnergy[4];
+        gm_destination[1 + ZZ * DIM + XX] = 0.25F * gm_virialAndEnergy[4];
+        gm_destination[1 + YY * DIM + ZZ] = 0.25F * gm_virialAndEnergy[5];
+        gm_destination[1 + ZZ * DIM + YY] = 0.25F * gm_virialAndEnergy[5];
     }
 }
 

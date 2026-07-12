@@ -74,7 +74,6 @@ void LincsGpu::apply(const DeviceBuffer<Float3>& d_x,
                      DeviceBuffer<Float3>        d_v,
                      const real                  invdt,
                      const bool                  computeVirial,
-                     tensor                      virialScaled,
                      const PbcAiuc&              pbcAiuc)
 {
     // Early exit if no constraints
@@ -94,31 +93,45 @@ void LincsGpu::apply(const DeviceBuffer<Float3>& d_x,
 
     launchLincsGpuKernel(
             &kernelParams_, d_x, d_xp, updateVelocities, d_v, invdt, computeVirial, deviceStream_);
+}
 
-    if (computeVirial)
+void LincsGpu::copyVirialToHost(tensor virialScaled)
+{
+    if (kernelParams_.numConstraintsThreads == 0)
     {
-        // Copy LINCS virial data and add it to the common virial
-        copyFromDeviceBuffer(h_virialScaled_.data(),
-                             &kernelParams_.d_virialScaled,
-                             0,
-                             6,
-                             deviceStream_,
-                             GpuApiCallBehavior::Sync,
-                             nullptr);
-
-        // Mapping [XX, XY, XZ, YY, YZ, ZZ] internal format to a tensor object
-        virialScaled[XX][XX] += h_virialScaled_[0];
-        virialScaled[XX][YY] += h_virialScaled_[1];
-        virialScaled[XX][ZZ] += h_virialScaled_[2];
-
-        virialScaled[YY][XX] += h_virialScaled_[1];
-        virialScaled[YY][YY] += h_virialScaled_[3];
-        virialScaled[YY][ZZ] += h_virialScaled_[4];
-
-        virialScaled[ZZ][XX] += h_virialScaled_[2];
-        virialScaled[ZZ][YY] += h_virialScaled_[4];
-        virialScaled[ZZ][ZZ] += h_virialScaled_[5];
+        return;
     }
+
+    copyFromDeviceBuffer(h_virialScaled_.data(),
+                         &kernelParams_.d_virialScaled,
+                         0,
+                         6,
+                         deviceStream_,
+                         GpuApiCallBehavior::Sync,
+                         nullptr);
+
+    // Mapping [XX, XY, XZ, YY, YZ, ZZ] internal format to a tensor object
+    virialScaled[XX][XX] += h_virialScaled_[0];
+    virialScaled[XX][YY] += h_virialScaled_[1];
+    virialScaled[XX][ZZ] += h_virialScaled_[2];
+
+    virialScaled[YY][XX] += h_virialScaled_[1];
+    virialScaled[YY][YY] += h_virialScaled_[3];
+    virialScaled[YY][ZZ] += h_virialScaled_[4];
+
+    virialScaled[ZZ][XX] += h_virialScaled_[2];
+    virialScaled[ZZ][YY] += h_virialScaled_[4];
+    virialScaled[ZZ][ZZ] += h_virialScaled_[5];
+}
+
+bool LincsGpu::hasConstraints() const
+{
+    return kernelParams_.numConstraintsThreads != 0;
+}
+
+DeviceBuffer<float> LincsGpu::virialDeviceBuffer() const
+{
+    return kernelParams_.d_virialScaled;
 }
 
 LincsGpu::LincsGpu(int                  numIterations,

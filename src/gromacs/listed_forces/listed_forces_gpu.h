@@ -49,6 +49,7 @@
 
 #include <array>
 #include <memory>
+#include <vector>
 
 #include "gromacs/gpu_utils/devicebuffer_datatype.h"
 #include "gromacs/math/vectypes.h"
@@ -235,10 +236,25 @@ public:
     GpuEventSynchronizer* gamdPmeEnergyReadyEvent();
 
     /*! \brief Reduces raw energies and evaluates production GaMD scales on device. */
-    void launchGamdEnergyShadowReduction(int igamd, int stage, double thresholdP, double kP, double thresholdD, double kD);
+    void launchGamdEnergyShadowReduction(int    igamd,
+                                         int    stage,
+                                         double thresholdP,
+                                         double kP,
+                                         double thresholdD,
+                                         double kD,
+                                         bool   recordEnergySample);
 
     /*! \brief Returns device VP, VD, scaleP, scaleD, boostP, and boostD. */
     std::array<double, 6> gamdEnergyShadowValues();
+
+    /*! \brief Copies and clears device-resident deferred F_NRE energy samples. */
+    std::vector<std::array<real, F_NRE>> takeGamdEnergyHistory();
+
+    /*! \brief Records the corrected force virial for the current deferred energy sample. */
+    void recordGamdForceVirialSample();
+
+    /*! \brief Copies device-resident corrected force-virial samples. */
+    std::vector<std::array<real, DIM * DIM>> takeGamdForceVirialHistory(int numSamples);
 
     /*! \brief Copies the state-order diagnostic GaMD dihedral force buffer to the host. */
     void copyGamdDihedralShadowForces(ArrayRef<RVec> forces);

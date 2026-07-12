@@ -50,6 +50,7 @@
 #include "config.h"
 
 #include "gromacs/gpu_utils/gpueventsynchronizer.h"
+#include "gromacs/gpu_utils/hostallocator.h"
 #include "gromacs/math/matrix.h"
 #include "gromacs/mdlib/leapfrog_gpu.h"
 #include "gromacs/mdlib/lincs_gpu.h"
@@ -105,6 +106,8 @@ public:
      * \param[in]  dt                       Timestep.
      * \param[in]  updateVelocities         If the velocities should be constrained.
      * \param[in]  computeVirial            If virial should be updated.
+     * \param[in]  deferVirialToHost        If true, defer the host copy until
+     *                                      copyConstraintVirialToHost() is called.
      * \param[out] virial                   Place to save virial tensor.
      * \param[in]  doTemperatureScaling     If velocities should be scaled for temperature coupling.
      * \param[in]  tcstat                   Temperature coupling data.
@@ -116,12 +119,19 @@ public:
                    real                              dt,
                    bool                              updateVelocities,
                    bool                              computeVirial,
+                   bool                              deferVirialToHost,
                    tensor                            virial,
                    bool                              doTemperatureScaling,
                    gmx::ArrayRef<const t_grp_tcstat> tcstat,
                    bool                              doParrinelloRahman,
                    float                             dtPressureCouple,
                    const gmx::Matrix3x3&             prVelocityScalingMatrix);
+
+    void copyConstraintVirialToHost(real dt, tensor virial);
+
+    std::vector<std::array<real, DIM * DIM>> takeConstraintVirialHistory();
+    GpuKineticEnergyHistory                  takeKineticEnergyHistory();
+    std::vector<std::array<real, DIM * DIM>> previousHalfStepKineticEnergy();
 
     /*! \brief Scale coordinates on the GPU for the pressure coupling.
      *
@@ -177,6 +187,8 @@ public:
     static bool isNumCoupledConstraintsSupported(const gmx_mtop_t& mtop);
 
 private:
+    static constexpr int c_constraintVirialHistoryCapacity_ = 64;
+
     //! GPU context object
     const DeviceContext& deviceContext_;
     //! GPU stream
@@ -210,12 +222,40 @@ private:
     //! Allocation size for the reciprocal masses buffer
     int numInverseMassesAlloc_ = -1;
 
+    int                          numTemperatureGroups_          = 0;
+    DeviceBuffer<real>           d_masses_                      = nullptr;
+    DeviceBuffer<unsigned short> d_temperatureGroups_           = nullptr;
+    int                          numKineticAtoms_               = -1;
+    int                          numKineticAtomsAlloc_          = -1;
+    int                          numTemperatureGroupAtoms_      = -1;
+    int                          numTemperatureGroupAtomsAlloc_ = -1;
+    DeviceBuffer<float>          d_currentHalfKinetic_          = nullptr;
+    DeviceBuffer<float>          d_previousHalfKinetic_         = nullptr;
+    DeviceBuffer<float>          d_groupHalfKineticTensor_      = nullptr;
+    DeviceBuffer<float>          d_kineticHistory_              = nullptr;
+    DeviceBuffer<int>            d_kineticHistoryCount_         = nullptr;
+    HostVector<float> h_kineticHistory_ = { {}, gmx::HostAllocationPolicy(gmx::PinningPolicy::PinnedIfSupported) };
+    HostVector<float> h_previousHalfKinetic_ = { {}, gmx::HostAllocationPolicy(gmx::PinningPolicy::PinnedIfSupported) };
+    HostVector<int> h_kineticHistoryCount_ = { {}, gmx::HostAllocationPolicy(gmx::PinningPolicy::PinnedIfSupported) };
+
     //! Leap-Frog integrator
     std::unique_ptr<LeapFrogGpu> integrator_;
     //! LINCS GPU object to use for non-water constraints
     std::unique_ptr<LincsGpu> lincsGpu_;
     //! SETTLE GPU object for water constrains
     std::unique_ptr<SettleGpu> settleGpu_;
+
+    bool                constraintVirialHistoryEnabled_ = false;
+    bool                deviceGlobalHistoryEnabled_     = false;
+    DeviceBuffer<float> d_constraintVirialHistory_      = nullptr;
+    DeviceBuffer<int>   d_constraintVirialHistoryCount_ = nullptr;
+    HostVector<float>   h_constraintVirialHistory_      = { {},
+                                                            gmx::HostAllocationPolicy(
+                                                             gmx::PinningPolicy::PinnedIfSupported) };
+    HostVector<int>     h_constraintVirialHistoryCount_ = {
+        {},
+        gmx::HostAllocationPolicy(gmx::PinningPolicy::PinnedIfSupported)
+    };
 
     //! The event to indicate when the update of coordinates is complete
     GpuEventSynchronizer xUpdatedOnDeviceEvent_;

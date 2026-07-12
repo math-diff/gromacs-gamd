@@ -143,6 +143,10 @@ SimulationWorkload createSimulationWorkload(const gmx::MDLogger& mdlog,
                                     inputrec.nstfout);
     const bool useGpuGaMDForceCorrection =
             simulationWorkload.gamdExecutionMode == GaMDExecutionMode::GpuScalarSynchronized;
+    const char* residentEnergyRequest = getenv("GMX_GAMD_GPU_RESIDENT_ENERGY");
+    const bool  useResidentGpuGaMD = useGpuGaMDForceCorrection && residentEnergyRequest != nullptr
+                                    && residentEnergyRequest[0] == '1'
+                                    && residentEnergyRequest[1] == '\0';
     simulationWorkload.requireCpuForceBufferForPostProcessing =
             useCurrentStepGaMD && useGpuForUpdate && !useGpuGaMDForceCorrection;
     if (useCurrentStepGaMD)
@@ -190,7 +194,8 @@ SimulationWorkload createSimulationWorkload(const gmx::MDLogger& mdlog,
             GMX_GPU_SYCL && !(GMX_GPU_FFT_BBFFT || GMX_GPU_FFT_MKL || GMX_GPU_FFT_ONEMATH);
     simulationWorkload.useMdGpuGraph =
             devFlags.enableCudaGraphs && useGpuForUpdate
-            && !simulationWorkload.requireCpuForceBufferForPostProcessing && !useCurrentStepGaMD
+            && !simulationWorkload.requireCpuForceBufferForPostProcessing
+            && (!useCurrentStepGaMD || useResidentGpuGaMD)
             && (simulationWorkload.haveSeparatePmeRank ? simulationWorkload.useGpuPmePpCommunication : true)
             && (havePpDomainDecomposition ? simulationWorkload.useGpuHaloExchange : true)
             && (havePpDomainDecomposition ? (GMX_THREAD_MPI > 0) : true)

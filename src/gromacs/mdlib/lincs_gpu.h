@@ -142,7 +142,6 @@ public:
      * \param[in]     invdt             Reciprocal timestep (to scale Lagrange
      *                                  multipliers when velocities are updated)
      * \param[in]     computeVirial     If virial should be updated.
-     * \param[in,out] virialScaled      Scaled virial tensor to be updated.
      * \param[in]     pbcAiuc           PBC data.
      */
     void apply(const DeviceBuffer<Float3>& d_x,
@@ -151,8 +150,21 @@ public:
                DeviceBuffer<Float3>        d_v,
                real                        invdt,
                bool                        computeVirial,
-               tensor                      virialScaled,
                const PbcAiuc&              pbcAiuc);
+
+    /*! \brief Copy the most recently computed scaled constraint virial to the host.
+     *
+     * This operation synchronizes the device stream and adds the LINCS contribution
+     * to \p virialScaled. It is separate from apply() so GPU graph capture does not
+     * contain a synchronous device-to-host operation.
+     */
+    void copyVirialToHost(tensor virialScaled);
+
+    /*! \brief Returns whether this object currently owns any LINCS constraints. */
+    bool hasConstraints() const;
+
+    /*! \brief Returns the six-component device virial buffer. */
+    DeviceBuffer<float> virialDeviceBuffer() const;
 
     /*! \brief
      * Update data-structures (e.g. after NB search step).

@@ -9,6 +9,10 @@
 
 #include "config.h"
 
+#include <cstdlib>
+
+#include <optional>
+#include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -19,12 +23,50 @@
 #include "gromacs/taskassignment/decidegpuusage.h"
 #include "gromacs/utility/logger.h"
 
+#include "testutils/setenv.h"
+
 namespace gmx
 {
 namespace test
 {
 namespace
 {
+
+class ScopedEnvironmentVariable
+{
+public:
+    ScopedEnvironmentVariable(const char* name, const char* value) : name_(name)
+    {
+        if (const char* originalValue = std::getenv(name))
+        {
+            originalValue_ = originalValue;
+        }
+        if (value == nullptr)
+        {
+            gmxUnsetenv(name);
+        }
+        else
+        {
+            gmxSetenv(name, value, 1);
+        }
+    }
+
+    ~ScopedEnvironmentVariable()
+    {
+        if (originalValue_.has_value())
+        {
+            gmxSetenv(name_.c_str(), originalValue_->c_str(), 1);
+        }
+        else
+        {
+            gmxUnsetenv(name_.c_str());
+        }
+    }
+
+private:
+    std::string                name_;
+    std::optional<std::string> originalValue_;
+};
 
 TEST(DecideSimulationWorkloadTest, UsesGpuForceBufferOpsWhenNoHostPostProcessingNeedsForces)
 {
@@ -120,6 +162,9 @@ TEST(DecideSimulationWorkloadTest, GaMDHostPostProcessingDisablesMdGpuGraph)
         GTEST_SKIP() << "GPU graph scheduling requires a GPU build";
     }
 
+    ScopedEnvironmentVariable gpuGaMDRequest("GMX_GAMD_GPU", nullptr);
+    ScopedEnvironmentVariable residentEnergyRequest("GMX_GAMD_GPU_RESIDENT_ENERGY", nullptr);
+
     const MDLogger          logger;
     DevelopmentFeatureFlags devFlags;
     devFlags.enableCudaGraphs = true;
@@ -137,6 +182,27 @@ TEST(DecideSimulationWorkloadTest, GaMDHostPostProcessingDisablesMdGpuGraph)
     EXPECT_TRUE(gamdWork.requireCpuForceBufferForPostProcessing);
     EXPECT_FALSE(gamdWork.useMdGpuGraph);
 }
+
+#if GMX_GPU_CUDA
+TEST(DecideSimulationWorkloadTest, ResidentGpuGaMDAllowsMdGpuGraph)
+{
+    ScopedEnvironmentVariable gpuGaMDRequest("GMX_GAMD_GPU", "1");
+    ScopedEnvironmentVariable residentEnergyRequest("GMX_GAMD_GPU_RESIDENT_ENERGY", "1");
+
+    const MDLogger          logger;
+    DevelopmentFeatureFlags devFlags;
+    devFlags.enableCudaGraphs = true;
+    t_inputrec inputrec;
+    inputrec.bDoGaMD = true;
+
+    const SimulationWorkload gamdWork = createSimulationWorkload(
+            logger, inputrec, false, false, devFlags, false, false, false, true, PmeRunMode::GPU, true, true, false, false, false);
+
+    EXPECT_EQ(GaMDExecutionMode::GpuScalarSynchronized, gamdWork.gamdExecutionMode);
+    EXPECT_FALSE(gamdWork.requireCpuForceBufferForPostProcessing);
+    EXPECT_TRUE(gamdWork.useMdGpuGraph);
+}
+#endif
 
 } // namespace
 } // namespace test

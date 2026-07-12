@@ -183,6 +183,9 @@ ListedForcesGpu::Impl::Impl(const gmx_ffparams_t& ffparams,
     const char* gamdScaleFromDeviceRequest = std::getenv("GMX_GAMD_GPU_SCALE_FROM_DEVICE");
     gamdScaleFromDeviceEnabled_ = gamdForceCorrectionEnabled_ && gamdScaleFromDeviceRequest != nullptr
                                   && std::strcmp(gamdScaleFromDeviceRequest, "1") == 0;
+    const char* gamdResidentEnergyRequest = std::getenv("GMX_GAMD_GPU_RESIDENT_ENERGY");
+    gamdEnergyHistoryEnabled_ = gamdScaleFromDeviceEnabled_ && gamdResidentEnergyRequest != nullptr
+                                && std::strcmp(gamdResidentEnergyRequest, "1") == 0;
     gamdEnergyShadowEnabled_   = gamdEnergyShadowDiagnosticsEnabled_ || gamdScaleFromDeviceEnabled_;
     gamdDihedralBufferEnabled_ = gamdDihedralShadowEnabled_ || gamdForceCorrectionEnabled_;
     if (gamdForceCorrectionEnabled_)
@@ -199,8 +202,20 @@ ListedForcesGpu::Impl::Impl(const gmx_ffparams_t& ffparams,
     }
     if (gamdEnergyShadowEnabled_)
     {
-        allocateDeviceBuffer(&d_gamdPmeEnergy_, 1, deviceContext_);
+        // Layout: reciprocal energy followed by the full symmetric virial tensor.
+        allocateDeviceBuffer(&d_gamdPmeEnergy_, 1 + DIM * DIM, deviceContext_);
         allocateDeviceBuffer(&d_gamdEnergyShadow_, 6, deviceContext_);
+        if (gamdEnergyHistoryEnabled_)
+        {
+            allocateDeviceBuffer(&d_gamdEnergyHistory_, c_gamdEnergyHistoryCapacity_ * F_NRE, deviceContext_);
+            allocateDeviceBuffer(
+                    &d_gamdForceVirialHistory_, c_gamdEnergyHistoryCapacity_ * DIM * DIM, deviceContext_);
+            allocateDeviceBuffer(&d_gamdEnergyHistoryCount_, 1, deviceContext_);
+            clearDeviceBufferAsync(&d_gamdEnergyHistoryCount_, 0, 1, deviceStream_);
+            h_gamdEnergyHistory_.resize(c_gamdEnergyHistoryCapacity_ * F_NRE);
+            h_gamdForceVirialHistory_.resize(c_gamdEnergyHistoryCapacity_ * DIM * DIM);
+            h_gamdEnergyHistoryCount_.resize(1);
+        }
         if (gamdEnergyShadowDiagnosticsEnabled_)
         {
             h_gamdEnergyShadow_.resize(6);
@@ -323,6 +338,18 @@ ListedForcesGpu::Impl::~Impl()
     if (d_gamdPmeEnergy_ != nullptr)
     {
         freeDeviceBuffer(&d_gamdPmeEnergy_);
+    }
+    if (d_gamdEnergyHistory_ != nullptr)
+    {
+        freeDeviceBuffer(&d_gamdEnergyHistory_);
+    }
+    if (d_gamdForceVirialHistory_ != nullptr)
+    {
+        freeDeviceBuffer(&d_gamdForceVirialHistory_);
+    }
+    if (d_gamdEnergyHistoryCount_ != nullptr)
+    {
+        freeDeviceBuffer(&d_gamdEnergyHistoryCount_);
     }
 }
 
@@ -823,14 +850,30 @@ void ListedForcesGpu::launchGamdEnergyShadowReduction(int    igamd,
                                                       double thresholdP,
                                                       double kP,
                                                       double thresholdD,
-                                                      double kD)
+                                                      double kD,
+                                                      bool   recordEnergySample)
 {
-    impl_->launchGamdEnergyShadowReduction(igamd, stage, thresholdP, kP, thresholdD, kD);
+    impl_->launchGamdEnergyShadowReduction(igamd, stage, thresholdP, kP, thresholdD, kD, recordEnergySample);
 }
 
 std::array<double, 6> ListedForcesGpu::gamdEnergyShadowValues()
 {
     return impl_->gamdEnergyShadowValues();
+}
+
+std::vector<std::array<real, F_NRE>> ListedForcesGpu::takeGamdEnergyHistory()
+{
+    return impl_->takeGamdEnergyHistory();
+}
+
+void ListedForcesGpu::recordGamdForceVirialSample()
+{
+    impl_->recordGamdForceVirialSample();
+}
+
+std::vector<std::array<real, DIM * DIM>> ListedForcesGpu::takeGamdForceVirialHistory(const int numSamples)
+{
+    return impl_->takeGamdForceVirialHistory(numSamples);
 }
 
 void ListedForcesGpu::copyGamdDihedralShadowForces(ArrayRef<RVec> forces)

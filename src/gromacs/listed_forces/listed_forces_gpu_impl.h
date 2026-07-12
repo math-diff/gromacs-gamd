@@ -201,9 +201,21 @@ public:
     /*! \brief Returns the event marked after PME reciprocal-energy staging. */
     GpuEventSynchronizer* gamdPmeEnergyReadyEvent();
     /*! \brief Reduces raw energies and evaluates production GaMD scales on device. */
-    void launchGamdEnergyShadowReduction(int igamd, int stage, double thresholdP, double kP, double thresholdD, double kD);
+    void launchGamdEnergyShadowReduction(int    igamd,
+                                         int    stage,
+                                         double thresholdP,
+                                         double kP,
+                                         double thresholdD,
+                                         double kD,
+                                         bool   recordEnergySample);
     /*! \brief Returns device VP, VD, scaleP, scaleD, boostP, and boostD. */
     std::array<double, 6> gamdEnergyShadowValues();
+    /*! \brief Copies and clears device-resident deferred F_NRE energy samples. */
+    std::vector<std::array<real, F_NRE>> takeGamdEnergyHistory();
+    /*! \brief Records corrected force virial for the current deferred sample. */
+    void recordGamdForceVirialSample();
+    /*! \brief Copies device-resident corrected force-virial samples. */
+    std::vector<std::array<real, DIM * DIM>> takeGamdForceVirialHistory(int numSamples);
     /*! \brief Copies the state-order diagnostic GaMD dihedral force buffer to the host. */
     void copyGamdDihedralShadowForces(ArrayRef<RVec> forces);
     /*! \brief Copies the device-reduced raw GaMD dihedral virial to the host. */
@@ -226,6 +238,8 @@ public:
     GpuEventSynchronizer* gamdForcesReadyEvent();
 
 private:
+    static constexpr int c_gamdEnergyHistoryCapacity_ = 64;
+
     /*! \brief The interaction lists
      *
      * \todo This is potentially several pinned allocations, which
@@ -278,9 +292,20 @@ private:
     bool                gamdEnergyShadowEnabled_            = false;
     bool                gamdEnergyShadowDiagnosticsEnabled_ = false;
     bool                gamdScaleFromDeviceEnabled_         = false;
+    bool                gamdEnergyHistoryEnabled_           = false;
     DeviceBuffer<float> d_gamdPmeEnergy_                    = nullptr;
     DeviceBuffer<float> d_gamdEnergyShadow_                 = nullptr;
+    DeviceBuffer<float> d_gamdEnergyHistory_                = nullptr;
+    DeviceBuffer<float> d_gamdForceVirialHistory_           = nullptr;
+    DeviceBuffer<int>   d_gamdEnergyHistoryCount_           = nullptr;
     HostVector<float> h_gamdEnergyShadow_ = { {}, gmx::HostAllocationPolicy(gmx::PinningPolicy::PinnedIfSupported) };
+    HostVector<float> h_gamdEnergyHistory_ = { {}, gmx::HostAllocationPolicy(gmx::PinningPolicy::PinnedIfSupported) };
+    HostVector<float>                     h_gamdForceVirialHistory_ = { {},
+                                                                        gmx::HostAllocationPolicy(
+                                                            gmx::PinningPolicy::PinnedIfSupported) };
+    HostVector<int>                       h_gamdEnergyHistoryCount_ = { {},
+                                                                        gmx::HostAllocationPolicy(
+                                                          gmx::PinningPolicy::PinnedIfSupported) };
     std::unique_ptr<GpuEventSynchronizer> gamdPmeEnergyReadyEvent_;
     std::unique_ptr<GpuEventSynchronizer> gamdForcesReadyEvent_;
     //! \brief Host-side virial buffer

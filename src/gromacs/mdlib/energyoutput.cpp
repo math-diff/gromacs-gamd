@@ -880,7 +880,12 @@ void EnergyOutput::addDataAtEnergyStep(bool                    bDoDHDL,
      * as an argument. This is because we sometimes need to write the box from
      * the last timestep to match the trajectory frames.
      */
-    add_ebin_indexed(ebin_, ie_, gmx::ArrayRef<bool>(bEner_), enerd->term, bSum);
+    const bool deferMainEnergySample = deferNextGpuEnergySample_;
+    if (!deferMainEnergySample)
+    {
+        add_ebin_indexed(ebin_, ie_, gmx::ArrayRef<bool>(bEner_), enerd->term, bSum);
+    }
+    deferNextGpuEnergySample_ = false;
     if (nCrmsd_)
     {
         crmsd[0] = constr->rmsd();
@@ -923,13 +928,14 @@ void EnergyOutput::addDataAtEnergyStep(bool                    bDoDHDL,
             add_ebin(ebin_, ienthalpy_, 1, &enthalpy, bSum);
         }
     }
-    if (bPres_)
+    if (bPres_ && !deferNextGpuVirialSample_)
     {
         add_ebin(ebin_, ivir_, 9, vir[0], bSum);
         add_ebin(ebin_, ipres_, 9, pres[0], bSum);
         tmp = (pres[ZZ][ZZ] - (pres[XX][XX] + pres[YY][YY]) * 0.5) * box[ZZ][ZZ];
         add_ebin(ebin_, isurft_, 1, &tmp, bSum);
     }
+    deferNextGpuVirialSample_ = false;
     if (epc_ == PressureCoupling::ParrinelloRahman || epc_ == PressureCoupling::Mttk)
     {
         tmp6[0] = ptCouplingArrays.boxv[XX][XX];
@@ -978,11 +984,14 @@ void EnergyOutput::addDataAtEnergyStep(bool                    bDoDHDL,
 
     if (ekind)
     {
-        for (int i = 0; (i < nTC_); i++)
+        if (!deferNextGpuKineticSample_)
         {
-            tmp_r_[i] = ekind->tcstat[i].T;
+            for (int i = 0; (i < nTC_); i++)
+            {
+                tmp_r_[i] = ekind->tcstat[i].T;
+            }
+            add_ebin(ebin_, itemp_, nTC_, tmp_r_.data(), bSum);
         }
-        add_ebin(ebin_, itemp_, nTC_, tmp_r_.data(), bSum);
 
         if (etc_ == TemperatureCoupling::NoseHoover)
         {
@@ -1037,6 +1046,7 @@ void EnergyOutput::addDataAtEnergyStep(bool                    bDoDHDL,
             add_ebin(ebin_, itc_, nTC_, tmp_r_.data(), bSum);
         }
     }
+    deferNextGpuKineticSample_ = false;
 
     ebin_increase_count(1, ebin_, bSum);
 
@@ -1137,11 +1147,146 @@ void EnergyOutput::addDataAtEnergyStep(bool                    bDoDHDL,
         }
     }
 
-    if (conservedEnergyTracker_)
+    if (conservedEnergyTracker_ && !deferMainEnergySample)
     {
         conservedEnergyTracker_->addPoint(
                 time, bEner_[F_ECONSERVED] ? enerd->term[F_ECONSERVED] : enerd->term[F_ETOT]);
     }
+}
+
+void EnergyOutput::deferGpuEnergySample(const double time, const gmx_enerdata_t& enerd)
+{
+    GMX_RELEASE_ASSERT(!deferNextGpuEnergySample_,
+                       "Only one GPU energy sample can be deferred per logical MD step");
+    std::array<real, F_NRE> sample;
+    std::copy(enerd.term.begin(), enerd.term.end(), sample.begin());
+    deferredGpuEnergySamples_.push_back(sample);
+    deferredGpuEnergyTimes_.push_back(time);
+    deferNextGpuEnergySample_ = true;
+}
+
+void EnergyOutput::completeDeferredGpuEnergySamples(gmx::ArrayRef<const std::array<real, F_NRE>> deviceEnergySamples)
+{
+    GMX_RELEASE_ASSERT(deviceEnergySamples.size() == deferredGpuEnergySamples_.size(),
+                       "Device and host deferred energy sample counts must match");
+    if (deviceEnergySamples.empty())
+    {
+        return;
+    }
+
+    std::vector<real> completedSamples;
+    completedSamples.reserve(deviceEnergySamples.size() * F_NRE);
+    for (gmx::Index sampleIndex = 0; sampleIndex < deviceEnergySamples.ssize(); ++sampleIndex)
+    {
+        auto        completed = deferredGpuEnergySamples_[sampleIndex];
+        const auto& device    = deviceEnergySamples[sampleIndex];
+        for (int fType = 0; fType <= F_EPOT; ++fType)
+        {
+            completed[fType] = device[fType];
+        }
+
+        const real potentialCorrection =
+                completed[F_EPOT] - deferredGpuEnergySamples_[sampleIndex][F_EPOT];
+        completed[F_ETOT] += potentialCorrection;
+        completed[F_ECONSERVED] += potentialCorrection;
+        completedSamples.insert(completedSamples.end(), completed.begin(), completed.end());
+    }
+
+    add_ebin_indexed_deferred(
+            ebin_, ie_, gmx::ArrayRef<bool>(bEner_), completedSamples, deviceEnergySamples.ssize());
+    if (conservedEnergyTracker_)
+    {
+        for (gmx::Index sample = 0; sample < deviceEnergySamples.ssize(); ++sample)
+        {
+            const auto& completed = completedSamples;
+            const real  conserved =
+                    completed[sample * F_NRE + (bEner_[F_ECONSERVED] ? F_ECONSERVED : F_ETOT)];
+            conservedEnergyTracker_->addPoint(deferredGpuEnergyTimes_[sample], conserved);
+        }
+    }
+    deferredGpuEnergySamples_.clear();
+    deferredGpuEnergyTimes_.clear();
+}
+
+void EnergyOutput::deferGpuVirialSample()
+{
+    GMX_RELEASE_ASSERT(!deferNextGpuVirialSample_,
+                       "Only one GPU virial sample can be deferred per logical MD step");
+    ++deferredGpuVirialSampleCount_;
+    deferNextGpuVirialSample_ = true;
+}
+
+void EnergyOutput::completeDeferredGpuVirialSamples(gmx::ArrayRef<const std::array<real, DIM * DIM>> virialSamples,
+                                                    gmx::ArrayRef<const std::array<real, DIM * DIM>> pressureSamples,
+                                                    gmx::ArrayRef<const real> scalarPressureSamples,
+                                                    gmx::ArrayRef<const real> surfaceTensionSamples)
+{
+    const int numSamples = virialSamples.ssize();
+    GMX_RELEASE_ASSERT(numSamples == deferredGpuVirialSampleCount_ && pressureSamples.ssize() == numSamples
+                               && scalarPressureSamples.ssize() == numSamples
+                               && surfaceTensionSamples.ssize() == numSamples,
+                       "All deferred GPU virial sample counts must match");
+    GMX_RELEASE_ASSERT(deferredGpuEnergySamples_.size() == virialSamples.size(),
+                       "Deferred GPU energy and virial samples must cover the same steps");
+    if (numSamples == 0)
+    {
+        return;
+    }
+
+    std::vector<real> flatVirial;
+    std::vector<real> flatPressure;
+    flatVirial.reserve(numSamples * DIM * DIM);
+    flatPressure.reserve(numSamples * DIM * DIM);
+    for (int sample = 0; sample < numSamples; ++sample)
+    {
+        flatVirial.insert(flatVirial.end(), virialSamples[sample].begin(), virialSamples[sample].end());
+        flatPressure.insert(
+                flatPressure.end(), pressureSamples[sample].begin(), pressureSamples[sample].end());
+        deferredGpuEnergySamples_[sample][F_PRES] = scalarPressureSamples[sample];
+    }
+
+    add_ebin_deferred(ebin_, ivir_, DIM * DIM, flatVirial, numSamples);
+    add_ebin_deferred(ebin_, ipres_, DIM * DIM, flatPressure, numSamples);
+    add_ebin_deferred(ebin_, isurft_, 1, surfaceTensionSamples, numSamples);
+    deferredGpuVirialSampleCount_ = 0;
+}
+
+void EnergyOutput::deferGpuKineticSample()
+{
+    GMX_RELEASE_ASSERT(!deferNextGpuKineticSample_,
+                       "Only one GPU kinetic sample can be deferred per logical MD step");
+    ++deferredGpuKineticSampleCount_;
+    deferNextGpuKineticSample_ = true;
+}
+
+void EnergyOutput::completeDeferredGpuKineticSamples(gmx::ArrayRef<const std::array<real, DIM * DIM>> kineticTensorSamples,
+                                                     gmx::ArrayRef<const real> temperatureSamples,
+                                                     gmx::ArrayRef<const real> groupTemperatureSamples)
+{
+    const int numSamples = kineticTensorSamples.ssize();
+    GMX_RELEASE_ASSERT(numSamples == deferredGpuKineticSampleCount_ && temperatureSamples.ssize() == numSamples
+                               && groupTemperatureSamples.ssize() == numSamples * nTC_,
+                       "All deferred GPU kinetic sample counts must match");
+    GMX_RELEASE_ASSERT(deferredGpuEnergySamples_.size() == kineticTensorSamples.size(),
+                       "Deferred GPU energy and kinetic samples must cover the same steps");
+    if (numSamples == 0)
+    {
+        return;
+    }
+
+    for (int sample = 0; sample < numSamples; ++sample)
+    {
+        const real kineticEnergy = kineticTensorSamples[sample][XX * DIM + XX]
+                                   + kineticTensorSamples[sample][YY * DIM + YY]
+                                   + kineticTensorSamples[sample][ZZ * DIM + ZZ];
+        const real kineticCorrection = kineticEnergy - deferredGpuEnergySamples_[sample][F_EKIN];
+        deferredGpuEnergySamples_[sample][F_EKIN] = kineticEnergy;
+        deferredGpuEnergySamples_[sample][F_TEMP] = temperatureSamples[sample];
+        deferredGpuEnergySamples_[sample][F_ETOT] += kineticCorrection;
+        deferredGpuEnergySamples_[sample][F_ECONSERVED] += kineticCorrection;
+    }
+    add_ebin_deferred(ebin_, itemp_, nTC_, groupTemperatureSamples, numSamples);
+    deferredGpuKineticSampleCount_ = 0;
 }
 
 void EnergyOutput::recordNonEnergyStep()

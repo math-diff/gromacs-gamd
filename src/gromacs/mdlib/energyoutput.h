@@ -200,6 +200,29 @@ public:
                              const rvec              mu_tot,
                              const gmx::Constraints* constr);
 
+    /*! \brief Defer the main F_NRE energy-bin update for one device-resident step. */
+    void deferGpuEnergySample(double time, const gmx_enerdata_t& enerd);
+
+    /*! \brief Complete deferred main-energy samples from device-produced F_NRE rows. */
+    void completeDeferredGpuEnergySamples(gmx::ArrayRef<const std::array<real, F_NRE>> deviceEnergySamples);
+
+    /*! \brief Defer virial and pressure bins for one device-resident step. */
+    void deferGpuVirialSample();
+
+    /*! \brief Complete deferred virial, pressure, and surface-tension samples. */
+    void completeDeferredGpuVirialSamples(gmx::ArrayRef<const std::array<real, DIM * DIM>> virialSamples,
+                                          gmx::ArrayRef<const std::array<real, DIM * DIM>> pressureSamples,
+                                          gmx::ArrayRef<const real> scalarPressureSamples,
+                                          gmx::ArrayRef<const real> surfaceTensionSamples);
+
+    /*! \brief Defer kinetic-energy and temperature-group bins for one GPU-resident step. */
+    void deferGpuKineticSample();
+
+    /*! \brief Complete deferred kinetic and temperature samples. */
+    void completeDeferredGpuKineticSamples(gmx::ArrayRef<const std::array<real, DIM * DIM>> kineticTensorSamples,
+                                           gmx::ArrayRef<const real> temperatureSamples,
+                                           gmx::ArrayRef<const real> groupTemperatureSamples);
+
     /*! \brief Update the data averaging structure counts.
      *
      * Updates the number of steps, the values have not being computed.
@@ -326,6 +349,18 @@ private:
     int ie_ = 0;
     //! Number of energy terms from F_NRE list to be saved (i.e. number of 'true' in bEner)
     int f_nre_ = 0;
+
+    //! Host portions of energy samples whose GPU potential terms are staged in a later batch.
+    std::vector<std::array<real, F_NRE>> deferredGpuEnergySamples_;
+    std::vector<double>                  deferredGpuEnergyTimes_;
+    //! Whether the next addDataAtEnergyStep() call should skip the main F_NRE bins.
+    bool deferNextGpuEnergySample_ = false;
+    //! Number of virial/pressure samples omitted from the normal per-step bin update.
+    int deferredGpuVirialSampleCount_ = 0;
+    //! Whether the next addDataAtEnergyStep() call should skip virial and pressure bins.
+    bool deferNextGpuVirialSample_      = false;
+    int  deferredGpuKineticSampleCount_ = 0;
+    bool deferNextGpuKineticSample_     = false;
 
     //! Index for constraints RMSD
     int iconrmsd_ = 0;

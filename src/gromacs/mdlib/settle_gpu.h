@@ -98,7 +98,6 @@ public:
      * \param[in]     invdt             Reciprocal timestep (to scale Lagrange
      *                                  multipliers when velocities are updated)
      * \param[in]     computeVirial     If virial should be updated.
-     * \param[in,out] virialScaled      Scaled virial tensor to be updated.
      * \param[in]     pbcAiuc           PBC data.
      */
     void apply(const DeviceBuffer<Float3>& d_x,
@@ -107,8 +106,21 @@ public:
                DeviceBuffer<Float3>        d_v,
                real                        invdt,
                bool                        computeVirial,
-               tensor                      virialScaled,
                const PbcAiuc&              pbcAiuc);
+
+    /*! \brief Copy the most recently computed scaled SETTLE virial to the host.
+     *
+     * This operation synchronizes the device stream and adds the SETTLE contribution
+     * to \p virialScaled. Keeping it separate from apply() permits GPU graph capture
+     * without a synchronous device-to-host operation.
+     */
+    void copyVirialToHost(tensor virialScaled);
+
+    /*! \brief Returns whether this object currently owns any SETTLE constraints. */
+    bool hasSettles() const;
+
+    /*! \brief Returns the six-component device virial buffer. */
+    DeviceBuffer<float> virialDeviceBuffer() const;
 
     /*! \brief
      * Update data-structures (e.g. after NB search step).

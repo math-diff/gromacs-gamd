@@ -238,13 +238,26 @@ void ListedForcesGpu::launchGamdEnergyShadowReduction(int /* igamd */,
                                                       double /* thresholdP */,
                                                       double /* kP */,
                                                       double /* thresholdD */,
-                                                      double /* kD */)
+                                                      double /* kD */,
+                                                      bool /* recordEnergySample */)
 {
 }
 
 std::array<double, 6> ListedForcesGpu::gamdEnergyShadowValues()
 {
     return { 0.0, 0.0, 1.0, 1.0, 0.0, 0.0 };
+}
+
+std::vector<std::array<real, F_NRE>> ListedForcesGpu::takeGamdEnergyHistory()
+{
+    return {};
+}
+
+void ListedForcesGpu::recordGamdForceVirialSample() {}
+
+std::vector<std::array<real, DIM * DIM>> ListedForcesGpu::takeGamdForceVirialHistory(int /* numSamples */)
+{
+    return {};
 }
 
 void ListedForcesGpu::copyGamdDihedralShadowForces(ArrayRef<RVec> /* forces */) {}
