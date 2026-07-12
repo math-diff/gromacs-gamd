@@ -24,6 +24,7 @@
 #include "gromacs/timing/wallcycle.h"
 #include "gromacs/utility/fatalerror.h"
 #include "gromacs/utility/futil.h"
+#include "gromacs/utility/gmxassert.h"
 
 // ============================================================================
 // Globals shared with other translation units
@@ -1332,7 +1333,17 @@ static void writeGaMDStatsColumns(FILE* fp, bool enabled, const GaMDStats& stat)
     std::fprintf(fp, " %18.9g %18.9g %18.9g %18.9g %18.9g %18.9g %18.9g", Vmax, Vmin, Vavg, sigmaV, E, k0, k);
 }
 
-static void writeGaMDParaLine(long step, int nodeid)
+struct GaMDProductionOutputRecord
+{
+    double potentialEnergy = 0;
+    double dihedralEnergy  = 0;
+    double scaleP          = 1;
+    double scaleD          = 1;
+    double boostP          = 0;
+    double boostD          = 0;
+};
+
+static void writeGaMDParaLine(long step, int nodeid, bool flushOutput)
 {
     if (nodeid != 0)
     {
@@ -1374,13 +1385,13 @@ static void writeGaMDParaLine(long step, int nodeid)
     }
     writeGaMDStatsColumns(fp, hasP, g_statP);
     writeGaMDStatsColumns(fp, hasD, g_statD);
-    if (std::fputc('\n', fp) == EOF || std::fflush(fp) != 0)
+    if (std::fputc('\n', fp) == EOF || (flushOutput && std::fflush(fp) != 0))
     {
         gmx_fatal(FARGS, "Failed to flush gamd-para.dat at step %ld.", step);
     }
 }
 
-static void writeGaMDReweightLine(long step, int nodeid)
+static void writeGaMDReweightRecord(long step, int nodeid, const GaMDProductionOutputRecord& record, bool flushOutput)
 {
     if (nodeid != 0)
     {
@@ -1425,11 +1436,11 @@ static void writeGaMDReweightLine(long step, int nodeid)
 
     constexpr double kJ_to_kcal = 1.0 / 4.184;
 
-    const double VP_kcal           = g_gamd_VP_used * kJ_to_kcal;
-    const double VD_kcal           = g_gamd_VD_used * kJ_to_kcal;
-    const double boostP_kcal       = g_gamd_boostP_current * kJ_to_kcal;
-    const double boostD_kcal       = g_gamd_boostD_current * kJ_to_kcal;
-    const double effectiveDihScale = g_gamd_scale_P * g_gamd_dih_ratio;
+    const double VP_kcal           = record.potentialEnergy * kJ_to_kcal;
+    const double VD_kcal           = record.dihedralEnergy * kJ_to_kcal;
+    const double boostP_kcal       = record.boostP * kJ_to_kcal;
+    const double boostD_kcal       = record.boostD * kJ_to_kcal;
+    const double effectiveDihScale = record.scaleP * record.scaleD;
 
     if (std::fprintf(fp,
                      "%10ld %12ld %20.9f %20.9f %14.9f %14.9f %14.9f %20.9f %20.9f\n",
@@ -1437,16 +1448,25 @@ static void writeGaMDReweightLine(long step, int nodeid)
                      step,
                      VP_kcal,
                      VD_kcal,
-                     g_gamd_scale_P,
-                     g_gamd_scale_D_current,
+                     record.scaleP,
+                     record.scaleD,
                      effectiveDihScale,
                      boostP_kcal,
                      boostD_kcal)
                 < 0
-        || std::fflush(fp) != 0)
+        || (flushOutput && std::fflush(fp) != 0))
     {
         gmx_fatal(FARGS, "Failed to write or flush gamd-reweight.dat at step %ld.", step);
     }
+}
+
+static void writeGaMDReweightLine(long step, int nodeid, bool flushOutput)
+{
+    writeGaMDReweightRecord(
+            step,
+            nodeid,
+            { g_gamd_VP_used, g_gamd_VD_used, g_gamd_scale_P, g_gamd_scale_D_current, g_gamd_boostP_current, g_gamd_boostD_current },
+            flushOutput);
 }
 
 // ============================================================================
@@ -1629,7 +1649,13 @@ bool gamdRequiresHostEnergyThisStep(long step)
     }
     const bool writesParameters = g_params.para_nst > 0 && step % g_params.para_nst == 0;
     const bool writesReweight = step > 0 && g_params.reweight_nst > 0 && step % g_params.reweight_nst == 0;
-    return writesParameters || writesReweight;
+    return (writesParameters || writesReweight) && !gamdBufferedProductionOutputEnabled();
+}
+
+bool gamdBufferedProductionOutputEnabled()
+{
+    const char* request = std::getenv("GMX_GAMD_GPU_BUFFERED_OUTPUT");
+    return request != nullptr && request[0] == '1' && request[1] == '\0';
 }
 
 void gamdWarnIfRunTooShort(int64_t initStep, int64_t nsteps, int nodeid)
@@ -1763,8 +1789,8 @@ void gamdFinalizeCurrentStep(long           step,
         g_gamd_last_total_boost = boostP + boostD;
         wallcycle_stop(wcycle, WallCycleCounter::GaMDFinalize);
         wallcycle_start(wcycle, WallCycleCounter::GaMDOutput);
-        writeGaMDParaLine(step, nodeid);
-        writeGaMDReweightLine(step, nodeid);
+        writeGaMDParaLine(step, nodeid, true);
+        writeGaMDReweightLine(step, nodeid, true);
         wallcycle_stop(wcycle, WallCycleCounter::GaMDOutput);
         return;
     }
@@ -1870,8 +1896,89 @@ void gamdFinalizeCurrentStep(long           step,
     g_gamd_last_total_boost = g_gamd_boostP_current + g_gamd_boostD_current;
     wallcycle_stop(wcycle, WallCycleCounter::GaMDFinalize);
     wallcycle_start(wcycle, WallCycleCounter::GaMDOutput);
-    writeGaMDParaLine(step, nodeid);
-    writeGaMDReweightLine(step, nodeid);
+    if (!gamdBufferedProductionOutputEnabled() || g_gamd_currentStage != 5)
+    {
+        writeGaMDParaLine(step, nodeid, true);
+        writeGaMDReweightLine(step, nodeid, true);
+    }
+    wallcycle_stop(wcycle, WallCycleCounter::GaMDOutput);
+}
+
+void gamdWriteBufferedProductionOutput(ArrayRef<const int64_t> deferredSteps,
+                                       ArrayRef<const std::array<real, F_NRE>> deferredEnergySamples,
+                                       long           currentStep,
+                                       int            nodeid,
+                                       gmx_wallcycle* wcycle)
+{
+    if (!gamdBufferedProductionOutputEnabled())
+    {
+        return;
+    }
+    GMX_RELEASE_ASSERT(deferredSteps.size() == deferredEnergySamples.size(),
+                       "Buffered GaMD output steps and energy samples must match");
+    if (g_gamd_currentStage != 5)
+    {
+        GMX_RELEASE_ASSERT(deferredSteps.empty(),
+                           "Buffered GaMD output may defer samples only in production stage 5");
+        return;
+    }
+
+    wallcycle_start(wcycle, WallCycleCounter::GaMDOutput);
+    for (std::size_t sampleIndex = 0; sampleIndex < deferredEnergySamples.size(); ++sampleIndex)
+    {
+        const auto& sample          = deferredEnergySamples[sampleIndex];
+        float       potentialEnergy = 0;
+        for (int fType = 0; fType < F_EPOT; ++fType)
+        {
+            if (fType != F_DISRESVIOL && fType != F_ORIRESDEV)
+            {
+                potentialEnergy += sample[fType];
+            }
+        }
+        const float dihedralEnergy =
+                sample[F_PDIHS] + sample[F_RBDIHS] + sample[F_FOURDIHS] + sample[F_CMAP];
+
+        GaMDProductionOutputRecord record;
+        record.potentialEnergy = potentialEnergy;
+        record.dihedralEnergy  = dihedralEnergy;
+        double totalEnergyForP = potentialEnergy;
+        if ((g_params.igamd == 2 || g_params.igamd == 3) && dihedralEnergy < g_statD.E)
+        {
+            const double deltaD = g_statD.E - dihedralEnergy;
+            record.boostD       = 0.5 * g_statD.k * deltaD * deltaD;
+            record.scaleD       = 1.0 - g_statD.k * deltaD;
+        }
+        if (g_params.igamd == 3)
+        {
+            totalEnergyForP += record.boostD;
+        }
+        if ((g_params.igamd == 1 || g_params.igamd == 3) && totalEnergyForP < g_statP.E)
+        {
+            const double deltaP = g_statP.E - totalEnergyForP;
+            record.boostP       = 0.5 * g_statP.k * deltaP * deltaP;
+            record.scaleP       = 1.0 - g_statP.k * deltaP;
+        }
+        record.scaleP = validateAndClampGaMDScale("total-potential",
+                                                  record.scaleP,
+                                                  totalEnergyForP,
+                                                  g_statP,
+                                                  deferredSteps[sampleIndex],
+                                                  nodeid,
+                                                  &g_gamd_warnedScalePFloor);
+        record.scaleD = validateAndClampGaMDScale(
+                "dihedral", record.scaleD, dihedralEnergy, g_statD, deferredSteps[sampleIndex], nodeid, &g_gamd_warnedScaleDFloor);
+
+        writeGaMDParaLine(deferredSteps[sampleIndex], nodeid, false);
+        writeGaMDReweightRecord(deferredSteps[sampleIndex], nodeid, record, false);
+    }
+
+    writeGaMDParaLine(currentStep, nodeid, false);
+    writeGaMDReweightLine(currentStep, nodeid, false);
+    if ((g_gamd_para_fp != nullptr && std::fflush(g_gamd_para_fp) != 0)
+        || (g_gamd_reweight_fp != nullptr && std::fflush(g_gamd_reweight_fp) != 0))
+    {
+        gmx_fatal(FARGS, "Failed to flush buffered GaMD output at step %ld.", currentStep);
+    }
     wallcycle_stop(wcycle, WallCycleCounter::GaMDOutput);
 }
 

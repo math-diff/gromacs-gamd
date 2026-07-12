@@ -5,11 +5,15 @@
 
 #include <cstdint>
 
+#include <array>
+
 #include "gromacs/mdtypes/gamd_params.h"
 #include "gromacs/mdtypes/iforceprovider.h"
 #include "gromacs/mdtypes/inputrec.h"
 #include "gromacs/mdtypes/simulation_workload.h"
+#include "gromacs/topology/ifunc.h"
 #include "gromacs/topology/topology.h"
+#include "gromacs/utility/arrayref.h"
 
 struct gmx_wallcycle;
 
@@ -29,6 +33,12 @@ struct GaMDGpuProductionParameters
 void                        gamdPrepareStep(long step, int nodeid);
 GaMDGpuProductionParameters gamdGpuProductionParameters();
 bool                        gamdRequiresHostEnergyThisStep(long step);
+bool                        gamdBufferedProductionOutputEnabled();
+void                        gamdWriteBufferedProductionOutput(ArrayRef<const int64_t> deferredSteps,
+                                                              ArrayRef<const std::array<real, F_NRE>> deferredEnergySamples,
+                                                              long           currentStep,
+                                                              int            nodeid,
+                                                              gmx_wallcycle* wcycle = nullptr);
 void                        gamdWarnIfRunTooShort(int64_t initStep, int64_t nsteps, int nodeid);
 void                        gamdFinalizeCurrentStep(long           step,
                                                     int            nodeid,

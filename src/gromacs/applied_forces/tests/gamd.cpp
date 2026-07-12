@@ -120,6 +120,41 @@ private:
     std::optional<std::string> originalValue_;
 };
 
+class ScopedGaMDBufferedOutputEnvironment
+{
+public:
+    explicit ScopedGaMDBufferedOutputEnvironment(const char* value)
+    {
+        if (const char* originalValue = std::getenv("GMX_GAMD_GPU_BUFFERED_OUTPUT"))
+        {
+            originalValue_ = originalValue;
+        }
+        if (value == nullptr)
+        {
+            gmxUnsetenv("GMX_GAMD_GPU_BUFFERED_OUTPUT");
+        }
+        else
+        {
+            gmxSetenv("GMX_GAMD_GPU_BUFFERED_OUTPUT", value, 1);
+        }
+    }
+
+    ~ScopedGaMDBufferedOutputEnvironment()
+    {
+        if (originalValue_.has_value())
+        {
+            gmxSetenv("GMX_GAMD_GPU_BUFFERED_OUTPUT", originalValue_->c_str(), 1);
+        }
+        else
+        {
+            gmxUnsetenv("GMX_GAMD_GPU_BUFFERED_OUTPUT");
+        }
+    }
+
+private:
+    std::optional<std::string> originalValue_;
+};
+
 GaMDExecutionMode selectSupportedGaMDExecutionMode()
 {
     return selectGaMDExecutionMode(true, true, true, true, true, false, false, false, false, 0);
@@ -343,8 +378,9 @@ TEST(GaMDTest, CurrentStepGpuCompatibilityAllowsGpuBondedAndGpuUpdate)
 
 TEST(GaMDTest, ResidentProductionEnergyStagesOnlyForHostConsumers)
 {
-    TestFileManager fileManager;
-    const auto      workDir =
+    ScopedGaMDBufferedOutputEnvironment bufferedOutput(nullptr);
+    TestFileManager                     fileManager;
+    const auto                          workDir =
             fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
@@ -376,6 +412,41 @@ TEST(GaMDTest, ResidentProductionEnergyStagesOnlyForHostConsumers)
     EXPECT_TRUE(gamdRequiresHostEnergyThisStep(50));
 
     gamdPrepareStep(51, 0);
+    gamdSetCheckpointingThisStep(true);
+    EXPECT_TRUE(gamdRequiresHostEnergyThisStep(51));
+    gamdSetCheckpointingThisStep(false);
+}
+
+TEST(GaMDTest, BufferedProductionOutputDefersTextCadenceButNotCheckpointing)
+{
+    ScopedGaMDBufferedOutputEnvironment bufferedOutput("1");
+    TestFileManager                     fileManager;
+    const auto                          workDir =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    ScopedWorkingDirectory scopedWorkingDirectory(workDir);
+
+    gamdResetStateForTesting();
+    gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP");
+    {
+        std::ofstream output("gamd.in");
+        output << "igamd 1\n";
+        output << "iE 1\n";
+        output << "iEP 1\n";
+        output << "ntcmdprep 0\n";
+        output << "ntcmd 2\n";
+        output << "ntebprep 0\n";
+        output << "nteb 2\n";
+        output << "ntave 2\n";
+        output << "para_nst 50\n";
+        output << "reweight_nst 50\n";
+        output << "sigma0P 6.0\n";
+    }
+
+    gamdSetCheckpointingThisStep(false);
+    gamdPrepareStep(50, 0);
+    EXPECT_TRUE(gamdBufferedProductionOutputEnabled());
+    EXPECT_FALSE(gamdRequiresHostEnergyThisStep(50));
+
     gamdSetCheckpointingThisStep(true);
     EXPECT_TRUE(gamdRequiresHostEnergyThisStep(51));
     gamdSetCheckpointingThisStep(false);

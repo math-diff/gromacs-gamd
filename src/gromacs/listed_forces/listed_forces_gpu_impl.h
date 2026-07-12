@@ -238,7 +238,7 @@ public:
     GpuEventSynchronizer* gamdForcesReadyEvent();
 
 private:
-    static constexpr int c_gamdEnergyHistoryCapacity_ = 64;
+    static constexpr int c_gamdEnergyHistoryCapacity_ = 4096;
 
     /*! \brief The interaction lists
      *

@@ -187,7 +187,7 @@ public:
     static bool isNumCoupledConstraintsSupported(const gmx_mtop_t& mtop);
 
 private:
-    static constexpr int c_constraintVirialHistoryCapacity_ = 64;
+    static constexpr int c_constraintVirialHistoryCapacity_ = 4096;
 
     //! GPU context object
     const DeviceContext& deviceContext_;

@@ -57,6 +57,7 @@
 
 #include "gromacs/applied_forces/awh/awh.h"
 #include "gromacs/applied_forces/awh/read_params.h"
+#include "gromacs/applied_forces/gamd/gamdforceprovider.h"
 #include "gromacs/commandline/filenm.h"
 #include "gromacs/compat/pointers.h"
 #include "gromacs/domdec/collect.h"
@@ -178,13 +179,6 @@
 #include "replicaexchange.h"
 #include "shellfc.h"
 
-namespace gmx
-{
-void gamdPrepareStep(long step, int nodeid);
-void gamdWarnIfRunTooShort(int64_t initStep, int64_t nsteps, int nodeid);
-void gamdSetCheckpointingThisStep(bool checkpointingThisStep);
-bool gamdRequiresHostEnergyThisStep(long step);
-} // namespace gmx
 /* GaMD Ultimate Total Potential Scale */
 extern double g_gamd_scale_P;
 extern int    g_gamd_debug;
@@ -260,6 +254,7 @@ void gmx::LegacySimulator::do_md()
     char                                     sbuf[STEPSTRSIZE], sbuf2[STEPSTRSIZE];
     std::vector<std::array<real, DIM * DIM>> deferredKineticTensors;
     std::vector<std::array<real, DIM * DIM>> deferredPressureBoxes;
+    std::vector<int64_t>                     deferredGamdOutputSteps;
 
     /* PME load balancing data for GPU kernels */
     gmx_bool bPMETune         = FALSE;
@@ -928,6 +923,9 @@ void gmx::LegacySimulator::do_md()
     const char* deviceGlobalsRequest = std::getenv("GMX_GAMD_GPU_DEVICE_GLOBALS");
     const bool  useDeviceGlobals = deviceGlobalsRequest != nullptr && deviceGlobalsRequest[0] == '1'
                                   && deviceGlobalsRequest[1] == '\0';
+    const char* bufferedOutputRequest = std::getenv("GMX_GAMD_GPU_BUFFERED_OUTPUT");
+    const bool useBufferedOutput = bufferedOutputRequest != nullptr && bufferedOutputRequest[0] == '1'
+                                   && bufferedOutputRequest[1] == '\0';
     if (residentEnergyRequest != nullptr && !useResidentEnergy
         && !(residentEnergyRequest[0] == '0' && residentEnergyRequest[1] == '\0'))
     {
@@ -938,9 +936,18 @@ void gmx::LegacySimulator::do_md()
     {
         gmx_fatal(FARGS, "GMX_GAMD_GPU_DEVICE_GLOBALS must be exactly 0 or 1; got '%s'.", deviceGlobalsRequest);
     }
+    if (bufferedOutputRequest != nullptr && !useBufferedOutput
+        && !(bufferedOutputRequest[0] == '0' && bufferedOutputRequest[1] == '\0'))
+    {
+        gmx_fatal(FARGS, "GMX_GAMD_GPU_BUFFERED_OUTPUT must be exactly 0 or 1; got '%s'.", bufferedOutputRequest);
+    }
     if (useDeviceGlobals && !useResidentEnergy)
     {
         gmx_fatal(FARGS, "GMX_GAMD_GPU_DEVICE_GLOBALS=1 requires GMX_GAMD_GPU_RESIDENT_ENERGY=1.");
+    }
+    if (useBufferedOutput && !useDeviceGlobals)
+    {
+        gmx_fatal(FARGS, "GMX_GAMD_GPU_BUFFERED_OUTPUT=1 requires GMX_GAMD_GPU_DEVICE_GLOBALS=1.");
     }
     /* and stop now if we should */
     bLastStep = (bLastStep || (ir->nsteps >= 0 && step_rel > ir->nsteps));
@@ -1282,10 +1289,12 @@ void gmx::LegacySimulator::do_md()
             if (!loggedResidentEnergyMode && cr_->nodeid == 0)
             {
                 loggedResidentEnergyMode = true;
-                std::fprintf(stderr,
-                             "[GaMD GPU INFO] Device-resident production energy enabled; host "
-                             "staging is retained for output, log, checkpoint, adaptive-stage, "
-                             "and diagnostic steps.\n");
+                std::fprintf(
+                        stderr,
+                        "[GaMD GPU INFO] Device-resident production energy enabled; host staging "
+                        "is retained for %slog, checkpoint, adaptive-stage, and diagnostic "
+                        "steps.\n",
+                        useBufferedOutput ? "standard energy/" : "GaMD output, ");
             }
         }
 
@@ -2346,6 +2355,18 @@ void gmx::LegacySimulator::do_md()
                                                                       deferredScalarPressures,
                                                                       deferredSurfaceTensions);
                         energyOutput.completeDeferredGpuEnergySamples(deferredEnergySamples);
+                        if (useBufferedOutput)
+                        {
+                            GMX_RELEASE_ASSERT(
+                                    deferredGamdOutputSteps.size() == deferredEnergySamples.size(),
+                                    "Buffered GaMD output steps and energy samples must match");
+                            gmx::gamdWriteBufferedProductionOutput(deferredGamdOutputSteps,
+                                                                   deferredEnergySamples,
+                                                                   step,
+                                                                   cr_->nodeid,
+                                                                   wallCycleCounters_);
+                            deferredGamdOutputSteps.clear();
+                        }
                         deferredKineticTensors.clear();
                         deferredPressureBoxes.clear();
                     }
@@ -2366,6 +2387,10 @@ void gmx::LegacySimulator::do_md()
                         std::array<real, DIM * DIM> pressureBox;
                         std::copy_n(lastbox[0], DIM * DIM, pressureBox.begin());
                         deferredPressureBoxes.push_back(pressureBox);
+                        if (useBufferedOutput)
+                        {
+                            deferredGamdOutputSteps.push_back(step);
+                        }
                     }
                 }
 
