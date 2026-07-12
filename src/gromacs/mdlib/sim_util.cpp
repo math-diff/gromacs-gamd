@@ -148,6 +148,7 @@
 
 extern double g_gamd_scale_P;
 extern double g_gamd_dih_ratio;
+extern double g_gamd_last_total_boost;
 
 class GpuEventSynchronizer;
 struct gmx_edsam;
@@ -557,43 +558,47 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*              cr,
     const double rawDihedralEnergy  = enerd->term[F_PDIHS] + enerd->term[F_RBDIHS]
                                      + enerd->term[F_FOURDIHS] + enerd->term[F_CMAP];
 
-    if (fr->listedForcesGpu != nullptr && fr->listedForcesGpu->gamdEnergyShadowEnabled())
+    gmx::gamdFinalizeCurrentStep(
+            static_cast<long>(step), cr->nodeid, rawPotentialEnergy, rawDihedralEnergy, wcycle);
+
+    if (fr->listedForcesGpu != nullptr && fr->listedForcesGpu->gamdEnergyShadowDiagnosticsEnabled())
     {
-        const std::array<double, 2> deviceEnergies =
-                fr->listedForcesGpu->gamdEnergyShadowValues();
-        const double totalDifference    = deviceEnergies[0] - rawPotentialEnergy;
-        const double dihedralDifference = deviceEnergies[1] - rawDihedralEnergy;
+        const std::array<double, 6> deviceState     = fr->listedForcesGpu->gamdEnergyShadowValues();
+        const double                totalDifference = deviceState[0] - rawPotentialEnergy;
+        const double                dihedralDifference = deviceState[1] - rawDihedralEnergy;
+        const double                scalePDifference   = deviceState[2] - g_gamd_scale_P;
+        const double                scaleDDifference   = deviceState[3] - g_gamd_dih_ratio;
+        const double totalBoostDifference = deviceState[4] + deviceState[5] - g_gamd_last_total_boost;
         std::fprintf(stderr,
-                     "[GaMD GPU energy shadow] step=%lld total_host=%.12g total_device=%.12g "
-                     "total_diff=%.9g dihedral_host=%.12g dihedral_device=%.12g "
-                     "dihedral_diff=%.9g\n",
+                     "[GaMD GPU energy shadow] step=%lld total_diff=%.9g dihedral_diff=%.9g "
+                     "scaleP_diff=%.9g scaleD_diff=%.9g total_boost_diff=%.9g\n",
                      static_cast<long long>(step),
-                     rawPotentialEnergy,
-                     deviceEnergies[0],
                      totalDifference,
-                     rawDihedralEnergy,
-                     deviceEnergies[1],
-                     dihedralDifference);
+                     dihedralDifference,
+                     scalePDifference,
+                     scaleDDifference,
+                     totalBoostDifference);
         // At the TC5b potential magnitude, one single-precision ULP is 0.0625 kJ/mol.
         // Allow four ULPs for the different but deterministic summation order.
         constexpr double c_totalEnergyTolerance    = 0.25;
         constexpr double c_dihedralEnergyTolerance = 0.001;
-        if (std::abs(totalDifference) > c_totalEnergyTolerance
-            || std::abs(dihedralDifference) > c_dihedralEnergyTolerance)
+        constexpr double c_scaleTolerance          = 2e-5;
+        constexpr double c_boostTolerance          = 0.1;
+        if (std::abs(totalDifference) > c_totalEnergyTolerance || std::abs(dihedralDifference) > c_dihedralEnergyTolerance
+            || std::abs(scalePDifference) > c_scaleTolerance || std::abs(scaleDDifference) > c_scaleTolerance
+            || std::abs(totalBoostDifference) > c_boostTolerance)
         {
             gmx_fatal(FARGS,
-                      "GaMD GPU raw-energy shadow mismatch at step %lld: total difference %.9g "
-                      "(tolerance %.9g), dihedral difference %.9g (tolerance %.9g).",
+                      "GaMD GPU energy/state shadow mismatch at step %lld: total %.9g, "
+                      "dihedral %.9g, scaleP %.9g, scaleD %.9g, total boost %.9g.",
                       static_cast<long long>(step),
                       totalDifference,
-                      c_totalEnergyTolerance,
                       dihedralDifference,
-                      c_dihedralEnergyTolerance);
+                      scalePDifference,
+                      scaleDDifference,
+                      totalBoostDifference);
         }
     }
-
-    gmx::gamdFinalizeCurrentStep(
-            static_cast<long>(step), cr->nodeid, rawPotentialEnergy, rawDihedralEnergy, wcycle);
 
     const real totalScale = static_cast<real>(g_gamd_scale_P);
     const real dihedralCorrectionScale = static_cast<real>(g_gamd_scale_P * (g_gamd_dih_ratio - 1.0));
@@ -645,6 +650,11 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*              cr,
 
             if (validateLiveGpuCorrection)
             {
+                // GPU update leaves the host coordinate buffer stale on ordinary steps.
+                // Refresh it only for this explicit CPU/GPU diagnostic comparison.
+                fr->stateGpu->copyCoordinatesFromGpu(x.unpaddedArrayRef(), AtomLocality::Local);
+                fr->stateGpu->waitCoordinatesReadyOnHost(AtomLocality::Local);
+
                 gamdGpuModeDihedralForces.resize(
                         force.ssize(), gmx::RVec(0.0_real, 0.0_real, 0.0_real));
                 gamdGpuModeDihedralShiftForces.resize(
@@ -3170,7 +3180,13 @@ void do_force(FILE*                         fplog,
                 fr->pmedata,
                 fr->listedForcesGpu->gamdPmeEnergyStagingBuffer(),
                 fr->listedForcesGpu->gamdPmeEnergyReadyEvent());
-        fr->listedForcesGpu->launchGamdEnergyShadowReduction();
+        const GaMDGpuProductionParameters gamdParameters = gamdGpuProductionParameters();
+        fr->listedForcesGpu->launchGamdEnergyShadowReduction(gamdParameters.igamd,
+                                                             gamdParameters.stage,
+                                                             gamdParameters.thresholdP,
+                                                             gamdParameters.kP,
+                                                             gamdParameters.thresholdD,
+                                                             gamdParameters.kD);
     }
 
     launchGpuEndOfStepTasks(

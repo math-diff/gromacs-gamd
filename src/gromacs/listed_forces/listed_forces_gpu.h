@@ -219,8 +219,11 @@ public:
     /*! \brief Returns whether device GaMD dihedral-force production is enabled. */
     bool gamdDihedralBufferEnabled() const;
 
-    /*! \brief Returns whether the diagnostic device GaMD energy path is enabled. */
+    /*! \brief Returns whether the device GaMD energy/scale path is enabled. */
     bool gamdEnergyShadowEnabled() const;
+
+    /*! \brief Returns whether host/device energy-state comparison is enabled. */
+    bool gamdEnergyShadowDiagnosticsEnabled() const;
 
     /*! \brief Returns PME reciprocal-energy staging owned by the GaMD consumer. */
     DeviceBuffer<float> gamdPmeEnergyStagingBuffer();
@@ -228,11 +231,11 @@ public:
     /*! \brief Returns the event marked by PME after staging reciprocal energy. */
     GpuEventSynchronizer* gamdPmeEnergyReadyEvent();
 
-    /*! \brief Reduces raw total/dihedral GaMD energies from device producers. */
-    void launchGamdEnergyShadowReduction();
+    /*! \brief Reduces raw energies and evaluates production GaMD scales on device. */
+    void launchGamdEnergyShadowReduction(int igamd, int stage, double thresholdP, double kP, double thresholdD, double kD);
 
-    /*! \brief Returns the diagnostic device raw total/dihedral GaMD energies. */
-    std::array<double, 2> gamdEnergyShadowValues();
+    /*! \brief Returns device VP, VD, scaleP, scaleD, boostP, and boostD. */
+    std::array<double, 6> gamdEnergyShadowValues();
 
     /*! \brief Copies the state-order diagnostic GaMD dihedral force buffer to the host. */
     void copyGamdDihedralShadowForces(ArrayRef<RVec> forces);

@@ -1640,6 +1640,11 @@ void gamdPrepareStep(long step, int nodeid)
     g_gamd_step_ready_for_output = (g_gamd_currentStage >= 3);
 }
 
+GaMDGpuProductionParameters gamdGpuProductionParameters()
+{
+    return { g_params.igamd, g_gamd_currentStage, g_statP.E, g_statP.k, g_statD.E, g_statD.k };
+}
+
 void gamdWarnIfRunTooShort(int64_t initStep, int64_t nsteps, int nodeid)
 {
     static bool warnedAboutRunLength = false;

@@ -165,6 +165,12 @@ list(APPEND LIBGROMACS_SOURCES ${GENERATED_VERSION_FILE})
 if (GMX_GPU_CUDA)
     get_property(CUDA_SOURCES GLOBAL PROPERTY CUDA_SOURCES)
     set_source_files_properties(${CUDA_SOURCES} PROPERTIES LANGUAGE CUDA)
+    # This one-thread scalar kernel intentionally uses FP64 to match the host
+    # GaMD scale calculation. Disable ptxas warnings only for this source so
+    # the global double-usage warning is not promoted to an error.
+    set_source_files_properties(
+        ${CMAKE_CURRENT_SOURCE_DIR}/listed_forces/gamd_scale_gpu.cu
+        PROPERTIES COMPILE_OPTIONS "-Xptxas=-w")
 endif()
 
 if (GMX_GPU_CUDA)

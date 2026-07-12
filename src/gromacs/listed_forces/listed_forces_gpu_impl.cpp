@@ -213,6 +213,11 @@ bool ListedForcesGpu::gamdEnergyShadowEnabled() const
     return false;
 }
 
+bool ListedForcesGpu::gamdEnergyShadowDiagnosticsEnabled() const
+{
+    return false;
+}
+
 DeviceBuffer<float> ListedForcesGpu::gamdPmeEnergyStagingBuffer()
 {
     return nullptr;
@@ -223,11 +228,18 @@ GpuEventSynchronizer* ListedForcesGpu::gamdPmeEnergyReadyEvent()
     return nullptr;
 }
 
-void ListedForcesGpu::launchGamdEnergyShadowReduction() {}
-
-std::array<double, 2> ListedForcesGpu::gamdEnergyShadowValues()
+void ListedForcesGpu::launchGamdEnergyShadowReduction(int /* igamd */,
+                                                      int /* stage */,
+                                                      double /* thresholdP */,
+                                                      double /* kP */,
+                                                      double /* thresholdD */,
+                                                      double /* kD */)
 {
-    return { 0.0, 0.0 };
+}
+
+std::array<double, 6> ListedForcesGpu::gamdEnergyShadowValues()
+{
+    return { 0.0, 0.0, 1.0, 1.0, 0.0, 0.0 };
 }
 
 void ListedForcesGpu::copyGamdDihedralShadowForces(ArrayRef<RVec> /* forces */) {}

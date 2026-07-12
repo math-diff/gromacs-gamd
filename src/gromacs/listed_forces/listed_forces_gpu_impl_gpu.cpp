@@ -177,10 +177,14 @@ ListedForcesGpu::Impl::Impl(const gmx_ffparams_t& ffparams,
 
 #if GMX_GPU_CUDA
     gamdDihedralShadowEnabled_ = (std::getenv("GMX_GAMD_GPU_DIH_SHADOW") != nullptr);
-    gamdEnergyShadowEnabled_ = (std::getenv("GMX_GAMD_GPU_ENERGY_SHADOW") != nullptr);
+    gamdEnergyShadowDiagnosticsEnabled_ = (std::getenv("GMX_GAMD_GPU_ENERGY_SHADOW") != nullptr);
     const char* gamdGpuRequest = std::getenv("GMX_GAMD_GPU");
     gamdForceCorrectionEnabled_ =
             (gamdGpuRequest != nullptr && std::strcmp(gamdGpuRequest, "1") == 0);
+    const char* gamdScaleFromDeviceRequest = std::getenv("GMX_GAMD_GPU_SCALE_FROM_DEVICE");
+    gamdScaleFromDeviceEnabled_ = gamdForceCorrectionEnabled_ && gamdScaleFromDeviceRequest != nullptr
+                                  && std::strcmp(gamdScaleFromDeviceRequest, "1") == 0;
+    gamdEnergyShadowEnabled_ = gamdEnergyShadowDiagnosticsEnabled_ || gamdScaleFromDeviceEnabled_;
     gamdDihedralBufferEnabled_ =
             gamdDihedralShadowEnabled_ || gamdForceCorrectionEnabled_;
     if (gamdForceCorrectionEnabled_)
@@ -198,8 +202,11 @@ ListedForcesGpu::Impl::Impl(const gmx_ffparams_t& ffparams,
     if (gamdEnergyShadowEnabled_)
     {
         allocateDeviceBuffer(&d_gamdPmeEnergy_, 1, deviceContext_);
-        allocateDeviceBuffer(&d_gamdEnergyShadow_, 2, deviceContext_);
-        h_gamdEnergyShadow_.resize(2);
+        allocateDeviceBuffer(&d_gamdEnergyShadow_, 6, deviceContext_);
+        if (gamdEnergyShadowDiagnosticsEnabled_)
+        {
+            h_gamdEnergyShadow_.resize(6);
+        }
         gamdPmeEnergyReadyEvent_ = std::make_unique<GpuEventSynchronizer>();
     }
 #endif
@@ -619,6 +626,11 @@ bool ListedForcesGpu::Impl::gamdEnergyShadowEnabled() const
     return gamdEnergyShadowEnabled_;
 }
 
+bool ListedForcesGpu::Impl::gamdEnergyShadowDiagnosticsEnabled() const
+{
+    return gamdEnergyShadowDiagnosticsEnabled_;
+}
+
 void ListedForcesGpu::Impl::copyGamdDihedralShadowForces(ArrayRef<RVec> forces)
 {
     GMX_RELEASE_ASSERT(gamdDihedralShadowEnabled_,
@@ -791,6 +803,11 @@ bool ListedForcesGpu::gamdEnergyShadowEnabled() const
     return impl_->gamdEnergyShadowEnabled();
 }
 
+bool ListedForcesGpu::gamdEnergyShadowDiagnosticsEnabled() const
+{
+    return impl_->gamdEnergyShadowDiagnosticsEnabled();
+}
+
 DeviceBuffer<float> ListedForcesGpu::gamdPmeEnergyStagingBuffer()
 {
     return impl_->gamdPmeEnergyStagingBuffer();
@@ -801,12 +818,17 @@ GpuEventSynchronizer* ListedForcesGpu::gamdPmeEnergyReadyEvent()
     return impl_->gamdPmeEnergyReadyEvent();
 }
 
-void ListedForcesGpu::launchGamdEnergyShadowReduction()
+void ListedForcesGpu::launchGamdEnergyShadowReduction(int    igamd,
+                                                      int    stage,
+                                                      double thresholdP,
+                                                      double kP,
+                                                      double thresholdD,
+                                                      double kD)
 {
-    impl_->launchGamdEnergyShadowReduction();
+    impl_->launchGamdEnergyShadowReduction(igamd, stage, thresholdP, kP, thresholdD, kD);
 }
 
-std::array<double, 2> ListedForcesGpu::gamdEnergyShadowValues()
+std::array<double, 6> ListedForcesGpu::gamdEnergyShadowValues()
 {
     return impl_->gamdEnergyShadowValues();
 }

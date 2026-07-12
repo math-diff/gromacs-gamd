@@ -14,8 +14,19 @@
 struct gmx_wallcycle;
 
 namespace gmx {
-    
+
+struct GaMDGpuProductionParameters
+{
+    int    igamd      = 0;
+    int    stage      = 0;
+    double thresholdP = 0;
+    double kP         = 0;
+    double thresholdD = 0;
+    double kD         = 0;
+};
+
 void gamdPrepareStep(long step, int nodeid);
+GaMDGpuProductionParameters gamdGpuProductionParameters();
 void gamdWarnIfRunTooShort(int64_t initStep, int64_t nsteps, int nodeid);
 void gamdFinalizeCurrentStep(long           step,
                             int            nodeid,
