@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../amber24_src"
+		}
+	],
+	"settings": {
+		"chatgpt.openOnStartup": true
+	}
+}
