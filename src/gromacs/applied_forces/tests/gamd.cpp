@@ -39,9 +39,8 @@
  */
 #include "gmxpre.h"
 
-#include "gromacs/applied_forces/gamd/gamdforceprovider.h"
-
 #include <cstdlib>
+
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -50,6 +49,8 @@
 #include <vector>
 
 #include <gtest/gtest.h>
+
+#include "gromacs/applied_forces/gamd/gamdforceprovider.h"
 
 #include "testutils/setenv.h"
 #include "testutils/testasserts.h"
@@ -66,8 +67,7 @@ class ScopedWorkingDirectory
 {
 public:
     explicit ScopedWorkingDirectory(const std::filesystem::path& path) :
-        originalPath_(std::filesystem::current_path()),
-        path_(path)
+        originalPath_(std::filesystem::current_path()), path_(path)
     {
         std::filesystem::create_directories(path_);
         std::filesystem::current_path(path_);
@@ -122,22 +122,13 @@ private:
 
 GaMDExecutionMode selectSupportedGaMDExecutionMode()
 {
-    return selectGaMDExecutionMode(true,
-                                   true,
-                                   true,
-                                   true,
-                                   true,
-                                   false,
-                                   false,
-                                   false,
-                                   false,
-                                   0);
+    return selectGaMDExecutionMode(true, true, true, true, true, false, false, false, false, 0);
 }
 
 std::vector<std::vector<double>> readNumericRows(const std::filesystem::path& path)
 {
-    std::ifstream          input(path);
-    std::string            line;
+    std::ifstream                    input(path);
+    std::string                      line;
     std::vector<std::vector<double>> rows;
 
     while (std::getline(input, line))
@@ -183,7 +174,8 @@ size_t countNumericRows(const std::filesystem::path& path)
 TEST(GaMDTest, Stage4PotentialStatisticsUseBoostedTotalPotential)
 {
     TestFileManager fileManager;
-    const auto      workDir = fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    const auto      workDir =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
     gamdResetStateForTesting();
@@ -240,7 +232,8 @@ TEST(GaMDTest, Stage4PotentialStatisticsUseBoostedTotalPotential)
 TEST(GaMDTest, CheckpointReplayDoesNotDuplicateTextOutputForSavedStep)
 {
     TestFileManager fileManager;
-    const auto      workDir = fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    const auto      workDir =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
     gamdResetStateForTesting();
@@ -348,6 +341,46 @@ TEST(GaMDTest, CurrentStepGpuCompatibilityAllowsGpuBondedAndGpuUpdate)
     EXPECT_EQ(nullptr, gmx::currentStepGaMDGpuIncompatibilityReason(true, true));
 }
 
+TEST(GaMDTest, ResidentProductionEnergyStagesOnlyForHostConsumers)
+{
+    TestFileManager fileManager;
+    const auto      workDir =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    ScopedWorkingDirectory scopedWorkingDirectory(workDir);
+
+    gamdResetStateForTesting();
+    gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP");
+    {
+        std::ofstream output("gamd.in");
+        output << "igamd 1\n";
+        output << "iE 1\n";
+        output << "iEP 1\n";
+        output << "ntcmdprep 0\n";
+        output << "ntcmd 2\n";
+        output << "ntebprep 0\n";
+        output << "nteb 2\n";
+        output << "ntave 2\n";
+        output << "para_nst 50\n";
+        output << "reweight_nst 50\n";
+        output << "sigma0P 6.0\n";
+    }
+
+    gamdSetCheckpointingThisStep(false);
+    gamdPrepareStep(2, 0);
+    EXPECT_TRUE(gamdRequiresHostEnergyThisStep(2));
+
+    gamdPrepareStep(49, 0);
+    EXPECT_FALSE(gamdRequiresHostEnergyThisStep(49));
+
+    gamdPrepareStep(50, 0);
+    EXPECT_TRUE(gamdRequiresHostEnergyThisStep(50));
+
+    gamdPrepareStep(51, 0);
+    gamdSetCheckpointingThisStep(true);
+    EXPECT_TRUE(gamdRequiresHostEnergyThisStep(51));
+    gamdSetCheckpointingThisStep(false);
+}
+
 TEST(GaMDTest, GaMDGpuExecutionModeDefaultsToCpuReference)
 {
     ScopedGaMDGpuEnvironment environment(nullptr);
@@ -360,8 +393,7 @@ TEST(GaMDTest, GaMDGpuExecutionModeCanBeForcedToCpuReference)
     ScopedGaMDGpuEnvironment environment("0");
 
     EXPECT_EQ(GaMDExecutionMode::CpuReference,
-              selectGaMDExecutionMode(
-                      true, false, false, false, false, true, true, true, true, 1));
+              selectGaMDExecutionMode(true, false, false, false, false, true, true, true, true, 1));
 }
 
 TEST(GaMDTest, NonGaMDRunIgnoresGpuExecutionModeRequest)
@@ -369,8 +401,7 @@ TEST(GaMDTest, NonGaMDRunIgnoresGpuExecutionModeRequest)
     ScopedGaMDGpuEnvironment environment("invalid");
 
     EXPECT_EQ(GaMDExecutionMode::CpuReference,
-              selectGaMDExecutionMode(
-                      false, false, false, false, false, true, true, true, true, 1));
+              selectGaMDExecutionMode(false, false, false, false, false, true, true, true, true, 1));
 }
 
 TEST(GaMDTest, GaMDGpuExecutionModeRejectsInvalidRequest)
@@ -396,36 +427,28 @@ TEST(GaMDTest, GaMDGpuExecutionModeRejectsUnsupportedWorkloads)
     ScopedGaMDGpuEnvironment environment("1");
 
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(
-                    true, false, true, true, true, false, false, false, false, 0),
+            selectGaMDExecutionMode(true, false, true, true, true, false, false, false, false, 0),
             "requires -nb gpu");
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(
-                    true, true, false, true, true, false, false, false, false, 0),
+            selectGaMDExecutionMode(true, true, false, true, true, false, false, false, false, 0),
             "requires -pme gpu");
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(
-                    true, true, true, false, true, false, false, false, false, 0),
+            selectGaMDExecutionMode(true, true, true, false, true, false, false, false, false, 0),
             "requires -bonded gpu");
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(
-                    true, true, true, true, false, false, false, false, false, 0),
+            selectGaMDExecutionMode(true, true, true, true, false, false, false, false, false, 0),
             "requires -update gpu");
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(
-                    true, true, true, true, true, true, false, false, false, 0),
+            selectGaMDExecutionMode(true, true, true, true, true, true, false, false, false, 0),
             "without domain decomposition");
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(
-                    true, true, true, true, true, false, false, true, false, 0),
+            selectGaMDExecutionMode(true, true, true, true, true, false, false, true, false, 0),
             "does not support MTS");
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(
-                    true, true, true, true, true, false, false, false, true, 0),
+            selectGaMDExecutionMode(true, true, true, true, true, false, false, false, true, 0),
             "does not yet support pressure coupling");
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(
-                    true, true, true, true, true, false, false, false, false, 10),
+            selectGaMDExecutionMode(true, true, true, true, true, false, false, false, false, 10),
             "requires nstfout=0");
 }
 #else
@@ -440,7 +463,8 @@ TEST(GaMDTest, GaMDGpuExecutionModeRejectsNonCudaBuild)
 TEST(GaMDTest, IrestProductionCheckpointCanContinueWithoutDuplicateRows)
 {
     TestFileManager fileManager;
-    const auto      workDir = fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    const auto      workDir =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
     gamdResetStateForTesting();
@@ -506,7 +530,8 @@ TEST(GaMDTest, IrestProductionCheckpointCanContinueWithoutDuplicateRows)
 TEST(GaMDTest, StrictInputRejectsUnknownParameter)
 {
     TestFileManager fileManager;
-    const auto      workDir = fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    const auto      workDir =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
     gamdResetStateForTesting();
@@ -531,7 +556,8 @@ TEST(GaMDTest, StrictInputRejectsUnknownParameter)
 TEST(GaMDTest, StrictInputRejectsDuplicateParameter)
 {
     TestFileManager fileManager;
-    const auto      workDir = fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    const auto      workDir =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
     gamdResetStateForTesting();
@@ -547,7 +573,8 @@ TEST(GaMDTest, StrictInputRejectsDuplicateParameter)
 TEST(GaMDTest, StrictInputRejectsInvalidRange)
 {
     TestFileManager fileManager;
-    const auto      workDir = fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    const auto      workDir =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
     gamdResetStateForTesting();

@@ -2119,7 +2119,12 @@ void pme_gpu_spread(PmeGpu*                        pmeGpu,
     wallcycle_stop(wcycle, WallCycleCounter::LaunchGpuPme);
 }
 
-void pme_gpu_solve(PmeGpu* pmeGpu, const int gridIndex, t_complex* h_grid, GridOrdering gridOrdering, bool computeEnergyAndVirial)
+void pme_gpu_solve(PmeGpu*      pmeGpu,
+                   const int    gridIndex,
+                   t_complex*   h_grid,
+                   GridOrdering gridOrdering,
+                   bool         computeEnergyAndVirial,
+                   bool         stageEnergyAndVirialToHost)
 {
     GMX_ASSERT(
             pmeGpu->common->ngrids == 1 || pmeGpu->common->ngrids == 2,
@@ -2262,7 +2267,7 @@ void pme_gpu_solve(PmeGpu* pmeGpu, const int gridIndex, t_complex* h_grid, GridO
     launchGpuKernel(kernelPtr, config, pmeGpu->archSpecific->pmeStream_, timingEvent, "PME solve", kernelArgs);
     pme_gpu_stop_timing(pmeGpu, timingId);
 
-    if (computeEnergyAndVirial)
+    if (stageEnergyAndVirialToHost)
     {
         copyFromDeviceBuffer(pmeGpu->staging.h_virialAndEnergy[gridIndex].data(),
                              &kernelParamsPtr->constants.d_virialAndEnergy[gridIndex],
@@ -2546,8 +2551,7 @@ DeviceBuffer<gmx::RVec> pme_gpu_get_kernelparam_forces(const PmeGpu* pmeGpu)
     }
 }
 
-__global__ void stageGamdReciprocalEnergyKernel(const float* gm_virialAndEnergy,
-                                                float*       gm_destination)
+__global__ void stageGamdReciprocalEnergyKernel(const float* gm_virialAndEnergy, float* gm_destination)
 {
     if (blockIdx.x == 0 && threadIdx.x == 0)
     {
@@ -2555,8 +2559,8 @@ __global__ void stageGamdReciprocalEnergyKernel(const float* gm_virialAndEnergy,
     }
 }
 
-void pme_gpu_stage_gamd_reciprocal_energy(const PmeGpu*        pmeGpu,
-                                          DeviceBuffer<float>  destination,
+void pme_gpu_stage_gamd_reciprocal_energy(const PmeGpu*         pmeGpu,
+                                          DeviceBuffer<float>   destination,
                                           GpuEventSynchronizer* readyEvent)
 {
     GMX_ASSERT(pmeGpu != nullptr && pmeGpu->kernelParams != nullptr,
@@ -2573,8 +2577,8 @@ void pme_gpu_stage_gamd_reciprocal_energy(const PmeGpu*        pmeGpu,
     config.gridSize[2]      = 1;
     config.sharedMemorySize = 0;
 
-    auto source = pmeGpu->kernelParams->constants.d_virialAndEnergy[FEP_STATE_A];
-    auto kernel = stageGamdReciprocalEnergyKernel;
+    auto       source     = pmeGpu->kernelParams->constants.d_virialAndEnergy[FEP_STATE_A];
+    auto       kernel     = stageGamdReciprocalEnergyKernel;
     const auto kernelArgs = prepareGpuKernelArguments(kernel, config, &source, &destination);
     launchGpuKernel(kernel,
                     config,

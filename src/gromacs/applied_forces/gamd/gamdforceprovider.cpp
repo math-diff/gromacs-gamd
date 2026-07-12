@@ -2,12 +2,13 @@
 
 #include "config.h"
 
-#include <algorithm>
 #include <cerrno>
 #include <cinttypes>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+
+#include <algorithm>
 #include <fstream>
 #include <limits>
 #include <map>
@@ -60,7 +61,7 @@ static bool g_gamd_step_ready_for_output = false;
 static int  g_gamd_currentStage          = 0; // 1..5
 
 // restart load control
-static bool g_gamd_restart_load_attempted = false;
+static bool g_gamd_restart_load_attempted   = false;
 static bool g_gamd_force_production_restart = false;
 
 // 当前 rank id，供写 restart 时使用
@@ -124,8 +125,8 @@ static GaMDRealParams g_params;
 static bool           g_params_loaded = false;
 
 // 为了 restart/continue 可恢复，这里不要用 thread_local
-static GaMDStats g_statP;
-static GaMDStats g_statD;
+static GaMDStats       g_statP;
+static GaMDStats       g_statD;
 static GaMDWindowStats g_windowStatP;
 static GaMDWindowStats g_windowStatD;
 
@@ -174,13 +175,11 @@ static bool readRestartSavedStep(const char* filename, long* savedStep)
     return false;
 }
 
-static bool parseGaMDTextRow(const std::string& line,
-                             int                expectedColumns,
-                             long*              step)
+static bool parseGaMDTextRow(const std::string& line, int expectedColumns, long* step)
 {
-    std::istringstream input(line);
+    std::istringstream       input(line);
     std::vector<std::string> tokens;
-    std::string token;
+    std::string              token;
     while (input >> token)
     {
         tokens.push_back(token);
@@ -201,8 +200,8 @@ static bool parseGaMDTextRow(const std::string& line,
         }
     }
 
-    char* stepEnd = nullptr;
-    errno         = 0;
+    char* stepEnd         = nullptr;
+    errno                 = 0;
     const long parsedStep = std::strtol(tokens[1].c_str(), &stepEnd, 10);
     if (stepEnd == tokens[1].c_str() || *stepEnd != '\0' || errno == ERANGE)
     {
@@ -217,10 +216,7 @@ static bool parseGaMDTextRow(const std::string& line,
  * restart file is the commit record, and on load each text file is atomically
  * rebuilt to contain exactly one complete row per step through savedStep.
  * Re-running this repair after another interruption is safe and idempotent. */
-static void reconcileGaMDTextFile(const char* filename,
-                                  int         expectedColumns,
-                                  long        savedStep,
-                                  int         nodeid)
+static void reconcileGaMDTextFile(const char* filename, int expectedColumns, long savedStep, int nodeid)
 {
     if (nodeid != 0 || !fileExists(filename))
     {
@@ -233,13 +229,13 @@ static void reconcileGaMDTextFile(const char* filename,
         gmx_fatal(FARGS, "Failed to open GaMD text file '%s' for continuation repair.", filename);
     }
 
-    std::vector<std::string>       headers;
-    std::set<std::string>          seenHeaders;
-    std::map<long, std::string>    rowsByStep;
-    long malformedRows = 0;
-    long futureRows    = 0;
-    long duplicateRows = 0;
-    std::string line;
+    std::vector<std::string>    headers;
+    std::set<std::string>       seenHeaders;
+    std::map<long, std::string> rowsByStep;
+    long                        malformedRows = 0;
+    long                        futureRows    = 0;
+    long                        duplicateRows = 0;
+    std::string                 line;
     while (std::getline(input, line))
     {
         const auto first = line.find_first_not_of(" \t\r");
@@ -279,7 +275,7 @@ static void reconcileGaMDTextFile(const char* filename,
     input.close();
 
     const std::string tmpName = std::string(filename) + ".reconcile.tmp";
-    FILE* fp = std::fopen(tmpName.c_str(), "w");
+    FILE*             fp      = std::fopen(tmpName.c_str(), "w");
     if (fp == nullptr)
     {
         gmx_fatal(FARGS, "Failed to open '%s' for continuation repair.", tmpName.c_str());
@@ -290,7 +286,7 @@ static void reconcileGaMDTextFile(const char* filename,
     }
     for (const auto& [rowStep, row] : rowsByStep)
     {
-        (void) rowStep;
+        (void)rowStep;
         std::fprintf(fp, "%s\n", row.c_str());
     }
     flushAndSyncFileOrFatal(fp, tmpName.c_str());
@@ -334,8 +330,8 @@ static void writeStatsLine(FILE* fp, const char* name, const GaMDStats& s)
 
 static bool readStatsLine(std::istringstream& iss, GaMDStats* s)
 {
-    return static_cast<bool>(iss >> s->Vmax >> s->Vmin >> s->Vavg >> s->sigmaV >> s->M2
-                             >> s->count >> s->E >> s->k0 >> s->k);
+    return static_cast<bool>(iss >> s->Vmax >> s->Vmin >> s->Vavg >> s->sigmaV >> s->M2 >> s->count
+                             >> s->E >> s->k0 >> s->k);
 }
 
 static void writeWindowStatsLine(FILE* fp, const char* name, const GaMDWindowStats& s)
@@ -373,8 +369,7 @@ static void saveGaMDRestartState(long step, int nodeid)
     const bool saveDuringBoostStat     = (inBoostStatPhase && g_gamd_checkpointing_this_step);
     const bool saveDuringProduction    = (inProductionPhase && g_gamd_checkpointing_this_step);
 
-    if (!saveAtCmdStatBoundary && !saveAtBoostStatBoundary && !saveDuringBoostStat
-        && !saveDuringProduction)
+    if (!saveAtCmdStatBoundary && !saveAtBoostStatBoundary && !saveDuringBoostStat && !saveDuringProduction)
     {
         return;
     }
@@ -448,10 +443,7 @@ static void saveGaMDRestartState(long step, int nodeid)
         std::remove(previousName);
         if (std::rename(finalName, previousName) != 0)
         {
-            gmx_fatal(FARGS,
-                      "Failed to rotate previous GaMD restart %s -> %s.",
-                      finalName,
-                      previousName);
+            gmx_fatal(FARGS, "Failed to rotate previous GaMD restart %s -> %s.", finalName, previousName);
         }
     }
     if (std::rename(tmpName, finalName) != 0)
@@ -487,12 +479,11 @@ static void loadGaMDRestartStateIfNeeded(long step, int nodeid)
         }
         return;
     }
-    const char* restartFilename  = "gamd-restart.dat";
-    long        currentSavedStep  = -1;
-    long        previousSavedStep = -1;
+    const char* restartFilename      = "gamd-restart.dat";
+    long        currentSavedStep     = -1;
+    long        previousSavedStep    = -1;
     const bool  haveCurrentSavedStep = readRestartSavedStep("gamd-restart.dat", &currentSavedStep);
-    const bool  havePreviousSavedStep =
-            readRestartSavedStep("gamd-restart-prev.dat", &previousSavedStep);
+    const bool havePreviousSavedStep = readRestartSavedStep("gamd-restart-prev.dat", &previousSavedStep);
 
     const bool currentMatches =
             haveCurrentSavedStep && (currentSavedStep == step || currentSavedStep == step - 1);
@@ -533,10 +524,9 @@ static void loadGaMDRestartStateIfNeeded(long step, int nodeid)
             // A unit or deliberately offset fresh run can begin above step 0,
             // but once any GaMD output exists, silently resetting statistics is
             // unsafe and must be rejected.
-            const bool haveGaMDArtifacts = fileExists("gamd-reweight.dat")
-                                           || fileExists("gamd-para.dat")
-                                           || fileExists("gamd-restart.dat")
-                                           || fileExists("gamd-restart-prev.dat");
+            const bool haveGaMDArtifacts =
+                    fileExists("gamd-reweight.dat") || fileExists("gamd-para.dat")
+                    || fileExists("gamd-restart.dat") || fileExists("gamd-restart-prev.dat");
             if (haveGaMDArtifacts)
             {
                 gmx_fatal(FARGS,
@@ -555,13 +545,11 @@ static void loadGaMDRestartStateIfNeeded(long step, int nodeid)
     std::ifstream infile(restartFilename);
     if (!infile.is_open())
     {
-        gmx_fatal(FARGS,
-                  "GaMD restart mode requires '%s', but the file was not found.",
-                  restartFilename);
+        gmx_fatal(FARGS, "GaMD restart mode requires '%s', but the file was not found.", restartFilename);
     }
 
-    int    version           = 0;
-    long   savedStep         = -1;
+    int  version   = 0;
+    long savedStep = -1;
 
     int    file_igamd        = 0;
     int    file_iE           = 1;
@@ -576,20 +564,20 @@ static void loadGaMDRestartStateIfNeeded(long step, int nodeid)
     double file_sigma0P      = 0.0;
     double file_sigma0D      = 0.0;
 
-    GaMDStats statP;
-    GaMDStats statD;
+    GaMDStats       statP;
+    GaMDStats       statD;
     GaMDWindowStats windowStatP;
     GaMDWindowStats windowStatD;
 
-    bool foundVersion   = false;
-    bool foundSavedStep = false;
-    bool foundParams    = false;
+    bool foundVersion           = false;
+    bool foundSavedStep         = false;
+    bool foundParams            = false;
     bool foundProductionRestart = false;
-    bool foundStatP     = false;
-    bool foundStatD     = false;
-    bool foundWindowP   = false;
-    bool foundWindowD   = false;
-    bool fileProductionRestart = false;
+    bool foundStatP             = false;
+    bool foundStatD             = false;
+    bool foundWindowP           = false;
+    bool foundWindowD           = false;
+    bool fileProductionRestart  = false;
 
     std::string line;
     std::string key;
@@ -625,15 +613,14 @@ static void loadGaMDRestartStateIfNeeded(long step, int nodeid)
             int productionRestart = 0;
             if (iss >> productionRestart)
             {
-                fileProductionRestart   = (productionRestart != 0);
+                fileProductionRestart  = (productionRestart != 0);
                 foundProductionRestart = true;
             }
         }
         else if (key == "params")
         {
-            if (iss >> file_igamd >> file_iE >> file_iEP >> file_iED >> file_ntcmdprep
-                    >> file_ntcmd >> file_ntebprep >> file_nteb >> file_ntave
-                    >> file_reweight_nst >> file_sigma0P >> file_sigma0D)
+            if (iss >> file_igamd >> file_iE >> file_iEP >> file_iED >> file_ntcmdprep >> file_ntcmd >> file_ntebprep
+                >> file_nteb >> file_ntave >> file_reweight_nst >> file_sigma0P >> file_sigma0D)
             {
                 foundParams = true;
             }
@@ -658,27 +645,21 @@ static void loadGaMDRestartStateIfNeeded(long step, int nodeid)
 
     if (!foundVersion || !foundSavedStep || !foundParams || !foundStatP || !foundStatD)
     {
-        gmx_fatal(FARGS,
-                  "GaMD restart '%s' is incomplete or corrupted.",
-                  restartFilename);
+        gmx_fatal(FARGS, "GaMD restart '%s' is incomplete or corrupted.", restartFilename);
     }
 
     if (version != 1 && version != 2 && version != 3)
     {
-        gmx_fatal(FARGS,
-                  "Unsupported GaMD restart version %d in '%s'.",
-                  version,
-                  restartFilename);
+        gmx_fatal(FARGS, "Unsupported GaMD restart version %d in '%s'.", version, restartFilename);
     }
 
     if (version >= 2 && (!foundWindowP || !foundWindowD))
     {
-        gmx_fatal(FARGS,
-                  "GaMD restart '%s' is missing window statistics.",
-                  restartFilename);
+        gmx_fatal(FARGS, "GaMD restart '%s' is missing window statistics.", restartFilename);
     }
 
-    auto validStats = [](const GaMDStats& stat) {
+    auto validStats = [](const GaMDStats& stat)
+    {
         return std::isfinite(stat.Vmax) && std::isfinite(stat.Vmin) && std::isfinite(stat.Vavg)
                && std::isfinite(stat.sigmaV) && std::isfinite(stat.M2) && std::isfinite(stat.E)
                && std::isfinite(stat.k0) && std::isfinite(stat.k) && stat.count >= 0
@@ -686,23 +667,19 @@ static void loadGaMDRestartStateIfNeeded(long step, int nodeid)
                && stat.k >= 0.0 && (stat.count == 0 || stat.Vmax >= stat.Vmin);
     };
     auto validWindowStats = [](const GaMDWindowStats& stat) {
-        return stat.count >= 0 && std::isfinite(stat.mean) && std::isfinite(stat.M2)
-               && stat.M2 >= 0.0;
+        return stat.count >= 0 && std::isfinite(stat.mean) && std::isfinite(stat.M2) && stat.M2 >= 0.0;
     };
     if (savedStep < 0 || !validStats(statP) || !validStats(statD)
         || (version >= 2 && (!validWindowStats(windowStatP) || !validWindowStats(windowStatD))))
     {
-        gmx_fatal(FARGS,
-                  "GaMD restart '%s' contains invalid or non-finite saved state.",
-                  restartFilename);
+        gmx_fatal(FARGS, "GaMD restart '%s' contains invalid or non-finite saved state.", restartFilename);
     }
 
     // 最关键保护：restart 文件必须对应上一完成步
     // 接受两种 saved_step 语义：
     // legacy: saved_step = step - 1
     // current: saved_step = step
-    if ((!explicitProductionRestart || checkpointContinuation) && savedStep != step
-        && savedStep != step - 1)
+    if ((!explicitProductionRestart || checkpointContinuation) && savedStep != step && savedStep != step - 1)
     {
         gmx_fatal(FARGS,
                   "GaMD restart '%s' saved_step=%ld does not match first continued step=%ld.",
@@ -715,10 +692,9 @@ static void loadGaMDRestartStateIfNeeded(long step, int nodeid)
             (file_igamd != g_params.igamd || file_iE != g_params.iE || file_iEP != g_params.iEP
              || file_iED != g_params.iED || std::abs(file_sigma0P - g_params.sigma0P) > 1e-9
              || std::abs(file_sigma0D - g_params.sigma0D) > 1e-9);
-    const bool stageParamsMismatch =
-            (file_ntcmdprep != g_params.ntcmdprep || file_ntcmd != g_params.ntcmd
-             || file_ntebprep != g_params.ntebprep || file_nteb != g_params.nteb
-             || file_ntave != g_params.ntave);
+    const bool stageParamsMismatch = (file_ntcmdprep != g_params.ntcmdprep
+                                      || file_ntcmd != g_params.ntcmd || file_ntebprep != g_params.ntebprep
+                                      || file_nteb != g_params.nteb || file_ntave != g_params.ntave);
 
     // 只检查会影响物理轨迹/boost 的参数。
     // reweight_nst 只影响输出格式，不影响动力学，因此不作为拒绝条件。
@@ -751,8 +727,7 @@ static void loadGaMDRestartStateIfNeeded(long step, int nodeid)
         const long restartNtcmd = file_ntcmd;
         const long restartNteb  = file_nteb;
         const bool inferredProductionRestart = (!foundProductionRestart && savedStep < restartNtcmd);
-        const bool restartFileIsProductionRestart =
-                (fileProductionRestart || inferredProductionRestart);
+        const bool restartFileIsProductionRestart = (fileProductionRestart || inferredProductionRestart);
 
         if (savedStep < restartNtcmd && !restartFileIsProductionRestart)
         {
@@ -900,13 +875,13 @@ void gamdResetStateForTesting()
     g_gamd_step_ready_for_output = false;
     g_gamd_currentStage          = 0;
 
-    g_gamd_restart_load_attempted    = false;
-    g_gamd_force_production_restart  = false;
-    g_gamd_current_nodeid            = 0;
-    g_gamd_checkpointing_this_step   = false;
-    g_gamd_suppressTextOutputStep    = -1;
-    g_gamd_warnedScalePFloor         = false;
-    g_gamd_warnedScaleDFloor         = false;
+    g_gamd_restart_load_attempted   = false;
+    g_gamd_force_production_restart = false;
+    g_gamd_current_nodeid           = 0;
+    g_gamd_checkpointing_this_step  = false;
+    g_gamd_suppressTextOutputStep   = -1;
+    g_gamd_warnedScalePFloor        = false;
+    g_gamd_warnedScaleDFloor        = false;
 
     g_params        = {};
     g_params_loaded = false;
@@ -916,8 +891,7 @@ void gamdResetStateForTesting()
     g_windowStatD   = {};
 }
 
-const char* currentStepGaMDGpuIncompatibilityReason(bool /*useGpuUpdate*/,
-                                                    bool /*haveGpuBondedWork*/)
+const char* currentStepGaMDGpuIncompatibilityReason(bool /*useGpuUpdate*/, bool /*haveGpuBondedWork*/)
 {
     return nullptr;
 }
@@ -1023,9 +997,9 @@ void loadGaMDParams(int nodeid)
     }
 
     std::set<std::string> seenKeys;
-    std::string line;
-    std::string key;
-    long lineNumber = 0;
+    std::string           line;
+    std::string           key;
+    long                  lineNumber = 0;
 
     while (std::getline(infile, line))
     {
@@ -1036,16 +1010,15 @@ void loadGaMDParams(int nodeid)
             continue;
         }
 
-        auto markUnique = [&]() {
+        auto markUnique = [&]()
+        {
             if (!seenKeys.insert(key).second)
             {
-                gmx_fatal(FARGS,
-                          "Duplicate GaMD parameter '%s' at gamd.in line %ld.",
-                          key.c_str(),
-                          lineNumber);
+                gmx_fatal(FARGS, "Duplicate GaMD parameter '%s' at gamd.in line %ld.", key.c_str(), lineNumber);
             }
         };
-        auto readValue = [&](auto* value) {
+        auto readValue = [&](auto* value)
+        {
             markUnique();
             if (!(iss >> *value))
             {
@@ -1132,10 +1105,7 @@ void loadGaMDParams(int nodeid)
         }
         else
         {
-            gmx_fatal(FARGS,
-                      "Unknown GaMD parameter '%s' at gamd.in line %ld.",
-                      key.c_str(),
-                      lineNumber);
+            gmx_fatal(FARGS, "Unknown GaMD parameter '%s' at gamd.in line %ld.", key.c_str(), lineNumber);
         }
     }
     if (infile.bad())
@@ -1143,7 +1113,8 @@ void loadGaMDParams(int nodeid)
         gmx_fatal(FARGS, "Failed while reading required parameter file 'gamd.in'.");
     }
 
-    auto requireKey = [&](const char* requiredKey) {
+    auto requireKey = [&](const char* requiredKey)
+    {
         if (seenKeys.count(requiredKey) == 0)
         {
             gmx_fatal(FARGS, "Required GaMD parameter '%s' is missing from gamd.in.", requiredKey);
@@ -1548,9 +1519,8 @@ void finalize_window_stats(GaMDWindowStats& windowStat, GaMDStats& stat)
         return;
     }
 
-    stat.Vavg = windowStat.mean;
-    stat.sigmaV =
-            (windowStat.count > 1 ? std::sqrt(windowStat.M2 / windowStat.count) : 0.0);
+    stat.Vavg   = windowStat.mean;
+    stat.sigmaV = (windowStat.count > 1 ? std::sqrt(windowStat.M2 / windowStat.count) : 0.0);
 
     windowStat = {};
 }
@@ -1596,13 +1566,11 @@ static bool stageUpdatesStats(const int stage)
 // Provider implementation
 // ============================================================================
 
-GaMDForceProvider::GaMDForceProvider(const GaMDParams& params,
-                                     const t_inputrec&  ir,
-                                     const gmx_mtop_t&  mtop)
-    : params_(params)
+GaMDForceProvider::GaMDForceProvider(const GaMDParams& params, const t_inputrec& ir, const gmx_mtop_t& mtop) :
+    params_(params)
 {
-    (void) ir;
-    (void) mtop;
+    (void)ir;
+    (void)mtop;
 }
 
 void gamdPrepareStep(long step, int nodeid)
@@ -1645,6 +1613,25 @@ GaMDGpuProductionParameters gamdGpuProductionParameters()
     return { g_params.igamd, g_gamd_currentStage, g_statP.E, g_statP.k, g_statD.E, g_statD.k };
 }
 
+bool gamdRequiresHostEnergyThisStep(long step)
+{
+    if (g_params.igamd == 0)
+    {
+        return false;
+    }
+    if (g_gamd_currentStage != 5 || g_gamd_checkpointing_this_step)
+    {
+        return true;
+    }
+    if (std::getenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP") != nullptr)
+    {
+        return true;
+    }
+    const bool writesParameters = g_params.para_nst > 0 && step % g_params.para_nst == 0;
+    const bool writesReweight = step > 0 && g_params.reweight_nst > 0 && step % g_params.reweight_nst == 0;
+    return writesParameters || writesReweight;
+}
+
 void gamdWarnIfRunTooShort(int64_t initStep, int64_t nsteps, int nodeid)
 {
     static bool warnedAboutRunLength = false;
@@ -1660,26 +1647,29 @@ void gamdWarnIfRunTooShort(int64_t initStep, int64_t nsteps, int nodeid)
         return;
     }
 
-    const int64_t adaptivePhaseEnd = static_cast<int64_t>(g_params.ntcmd) + static_cast<int64_t>(g_params.nteb);
+    const int64_t adaptivePhaseEnd =
+            static_cast<int64_t>(g_params.ntcmd) + static_cast<int64_t>(g_params.nteb);
     const int64_t plannedFinalStep = initStep + nsteps;
     if (adaptivePhaseEnd >= plannedFinalStep)
     {
-        std::fprintf(stderr,
-                     "\n[GaMD WARNING] ntcmd + nteb = %" PRId64 " >= planned final step = %" PRId64 ".\n"
-                     "GaMD requires ntcmd + nteb < init_step + nsteps to reach the production stage.\n"
-                     "Increase nsteps or reduce ntcmd/nteb if production sampling is intended.\n\n",
-                     adaptivePhaseEnd,
-                     plannedFinalStep);
+        std::fprintf(
+                stderr,
+                "\n[GaMD WARNING] ntcmd + nteb = %" PRId64 " >= planned final step = %" PRId64
+                ".\n"
+                "GaMD requires ntcmd + nteb < init_step + nsteps to reach the production stage.\n"
+                "Increase nsteps or reduce ntcmd/nteb if production sampling is intended.\n\n",
+                adaptivePhaseEnd,
+                plannedFinalStep);
     }
 }
 
-static double validateAndClampGaMDScale(const char* label,
-                                        double      rawScale,
-                                        double      energy,
+static double validateAndClampGaMDScale(const char*      label,
+                                        double           rawScale,
+                                        double           energy,
                                         const GaMDStats& stat,
-                                        long        step,
-                                        int         nodeid,
-                                        bool*       warnedAtFloor)
+                                        long             step,
+                                        int              nodeid,
+                                        bool*            warnedAtFloor)
 {
     if (!std::isfinite(rawScale) || !std::isfinite(energy) || !std::isfinite(stat.E)
         || !std::isfinite(stat.k))
@@ -1719,10 +1709,10 @@ static double validateAndClampGaMDScale(const char* label,
 }
 
 void gamdFinalizeCurrentStep(long           step,
-                            int            nodeid,
-                            double         totalPotentialEnergy,
-                            double         dihedralEnergy,
-                            gmx_wallcycle* wcycle)
+                             int            nodeid,
+                             double         totalPotentialEnergy,
+                             double         dihedralEnergy,
+                             gmx_wallcycle* wcycle)
 {
     if (g_params.igamd == 0 || g_gamd_lastAccountedStep == step)
     {
@@ -1731,11 +1721,11 @@ void gamdFinalizeCurrentStep(long           step,
     wallcycle_start(wcycle, WallCycleCounter::GaMDFinalize);
     g_gamd_lastAccountedStep = step;
 
-    g_gamd_current_nodeid = nodeid;
-    g_gamd_currentStage   = determineGaMDStage(step);
+    g_gamd_current_nodeid        = nodeid;
+    g_gamd_currentStage          = determineGaMDStage(step);
     g_gamd_step_ready_for_output = (g_gamd_currentStage >= 3);
-    g_gamd_VP_used        = totalPotentialEnergy;
-    g_gamd_VD_used        = dihedralEnergy;
+    g_gamd_VP_used               = totalPotentialEnergy;
+    g_gamd_VD_used               = dihedralEnergy;
 
     if (const char* sp = std::getenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP"))
     {
@@ -1759,31 +1749,17 @@ void gamdFinalizeCurrentStep(long           step,
         }
 
         const GaMDStats overrideStats{};
-        g_gamd_scale_P = validateAndClampGaMDScale("total-potential",
-                                                  scaleP,
-                                                  totalPotentialEnergy,
-                                                  overrideStats,
-                                                  step,
-                                                  nodeid,
-                                                  &g_gamd_warnedScalePFloor);
-        g_gamd_scale_D_current = validateAndClampGaMDScale("dihedral",
-                                                          scaleD,
-                                                          dihedralEnergy,
-                                                          overrideStats,
-                                                          step,
-                                                          nodeid,
-                                                          &g_gamd_warnedScaleDFloor);
+        g_gamd_scale_P = validateAndClampGaMDScale(
+                "total-potential", scaleP, totalPotentialEnergy, overrideStats, step, nodeid, &g_gamd_warnedScalePFloor);
+        g_gamd_scale_D_current = validateAndClampGaMDScale(
+                "dihedral", scaleD, dihedralEnergy, overrideStats, step, nodeid, &g_gamd_warnedScaleDFloor);
         if (!std::isfinite(boostP) || !std::isfinite(boostD))
         {
-            gmx_fatal(FARGS,
-                      "Non-finite forced GaMD boost at step %ld: boostP=%g boostD=%g.",
-                      step,
-                      boostP,
-                      boostD);
+            gmx_fatal(FARGS, "Non-finite forced GaMD boost at step %ld: boostP=%g boostD=%g.", step, boostP, boostD);
         }
-        g_gamd_dih_ratio       = g_gamd_scale_D_current;
-        g_gamd_boostP_current  = boostP;
-        g_gamd_boostD_current  = boostD;
+        g_gamd_dih_ratio        = g_gamd_scale_D_current;
+        g_gamd_boostP_current   = boostP;
+        g_gamd_boostD_current   = boostD;
         g_gamd_last_total_boost = boostP + boostD;
         wallcycle_stop(wcycle, WallCycleCounter::GaMDFinalize);
         wallcycle_start(wcycle, WallCycleCounter::GaMDOutput);
@@ -1829,29 +1805,15 @@ void gamdFinalizeCurrentStep(long           step,
 
         if (!std::isfinite(boostP) || !std::isfinite(boostD))
         {
-            gmx_fatal(FARGS,
-                      "Non-finite GaMD boost energy at step %ld: boostP=%g boostD=%g.",
-                      step,
-                      boostP,
-                      boostD);
+            gmx_fatal(FARGS, "Non-finite GaMD boost energy at step %ld: boostP=%g boostD=%g.", step, boostP, boostD);
         }
-        g_gamd_scale_P = validateAndClampGaMDScale("total-potential",
-                                                  scaleP,
-                                                  totalEnergyForP,
-                                                  g_statP,
-                                                  step,
-                                                  nodeid,
-                                                  &g_gamd_warnedScalePFloor);
-        g_gamd_scale_D_current = validateAndClampGaMDScale("dihedral",
-                                                          scaleD,
-                                                          dihedralEnergy,
-                                                          g_statD,
-                                                          step,
-                                                          nodeid,
-                                                          &g_gamd_warnedScaleDFloor);
-        g_gamd_dih_ratio       = g_gamd_scale_D_current;
-        g_gamd_boostP_current  = boostP;
-        g_gamd_boostD_current  = boostD;
+        g_gamd_scale_P = validateAndClampGaMDScale(
+                "total-potential", scaleP, totalEnergyForP, g_statP, step, nodeid, &g_gamd_warnedScalePFloor);
+        g_gamd_scale_D_current = validateAndClampGaMDScale(
+                "dihedral", scaleD, dihedralEnergy, g_statD, step, nodeid, &g_gamd_warnedScaleDFloor);
+        g_gamd_dih_ratio      = g_gamd_scale_D_current;
+        g_gamd_boostP_current = boostP;
+        g_gamd_boostD_current = boostD;
     }
 
     if (updateStat)
@@ -1913,15 +1875,13 @@ void gamdFinalizeCurrentStep(long           step,
     wallcycle_stop(wcycle, WallCycleCounter::GaMDOutput);
 }
 
-void GaMDForceProvider::calculateForces(const ForceProviderInput& fpin,
-                                        ForceProviderOutput*      fpout)
+void GaMDForceProvider::calculateForces(const ForceProviderInput& fpin, ForceProviderOutput* fpout)
 {
-    (void) fpout;
+    (void)fpout;
 
     const int  nodeid = fpin.cr_.nodeid;
     const long step   = fpin.step_;
 
-    
 
     gamdPrepareStep(step, nodeid);
 }

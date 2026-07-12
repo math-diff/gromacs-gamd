@@ -173,9 +173,9 @@ public:
                                          DeviceBuffer<float>* virial,
                                          const char*          kernelName);
     /*! \brief Launches in-place GaMD force correction after a dependency event. */
-    void launchGamdForceCorrectionKernel(DeviceBuffer<Float3> forces,
-                                         real                 totalScale,
-                                         real                 dihedralCorrectionScale,
+    void launchGamdForceCorrectionKernel(DeviceBuffer<Float3>  forces,
+                                         real                  totalScale,
+                                         real                  dihedralCorrectionScale,
                                          GpuEventSynchronizer* rawForcesReady);
     /*! \brief Returns whether there are bonded interactions
      * assigned to the GPU */
@@ -194,6 +194,8 @@ public:
     bool gamdEnergyShadowEnabled() const;
     /*! \brief Returns whether host/device energy-state comparison is enabled. */
     bool gamdEnergyShadowDiagnosticsEnabled() const;
+    /*! \brief Returns whether in-place correction consumes device GaMD scales. */
+    bool gamdScaleFromDeviceEnabled() const;
     /*! \brief Returns PME reciprocal-energy staging owned by this consumer. */
     DeviceBuffer<float> gamdPmeEnergyStagingBuffer();
     /*! \brief Returns the event marked after PME reciprocal-energy staging. */
@@ -261,18 +263,18 @@ private:
     //! Diagnostic total-force buffer corrected by the GaMD device kernel.
     DeviceBuffer<Float3> d_gamdCorrectedForcesState_ = nullptr;
     //! State-atom to nbnxn-atom index mapping.
-    DeviceBuffer<int> d_nbnxnAtomOrder_              = nullptr;
-    int               gamdNbnxnForceSize_            = 0;
-    int               gamdNbnxnForceCapacity_        = 0;
-    int               gamdStateForceSize_            = 0;
-    int               gamdStateForceCapacity_        = 0;
-    int               gamdCorrectedForceSize_        = 0;
-    int               gamdCorrectedForceCapacity_    = 0;
-    int               nbnxnAtomOrderSize_            = 0;
-    int               nbnxnAtomOrderCapacity_        = 0;
-    bool              gamdDihedralShadowEnabled_     = false;
-    bool              gamdDihedralBufferEnabled_     = false;
-    bool              gamdForceCorrectionEnabled_    = false;
+    DeviceBuffer<int>   d_nbnxnAtomOrder_                   = nullptr;
+    int                 gamdNbnxnForceSize_                 = 0;
+    int                 gamdNbnxnForceCapacity_             = 0;
+    int                 gamdStateForceSize_                 = 0;
+    int                 gamdStateForceCapacity_             = 0;
+    int                 gamdCorrectedForceSize_             = 0;
+    int                 gamdCorrectedForceCapacity_         = 0;
+    int                 nbnxnAtomOrderSize_                 = 0;
+    int                 nbnxnAtomOrderCapacity_             = 0;
+    bool                gamdDihedralShadowEnabled_          = false;
+    bool                gamdDihedralBufferEnabled_          = false;
+    bool                gamdForceCorrectionEnabled_         = false;
     bool                gamdEnergyShadowEnabled_            = false;
     bool                gamdEnergyShadowDiagnosticsEnabled_ = false;
     bool                gamdScaleFromDeviceEnabled_         = false;

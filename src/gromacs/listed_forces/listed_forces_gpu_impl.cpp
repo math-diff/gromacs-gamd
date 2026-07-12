@@ -218,6 +218,11 @@ bool ListedForcesGpu::gamdEnergyShadowDiagnosticsEnabled() const
     return false;
 }
 
+bool ListedForcesGpu::gamdScaleFromDeviceEnabled() const
+{
+    return false;
+}
+
 DeviceBuffer<float> ListedForcesGpu::gamdPmeEnergyStagingBuffer()
 {
     return nullptr;

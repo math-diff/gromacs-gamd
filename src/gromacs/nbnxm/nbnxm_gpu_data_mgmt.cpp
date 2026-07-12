@@ -949,7 +949,7 @@ void gpu_launch_cpyback(NbnxmGpu*                nb,
     if (iloc == InteractionLocality::Local)
     {
         /* DtoH fshift when virial is needed */
-        if (stepWork.computeVirial)
+        if (stepWork.computeVirial && stepWork.stageGpuEnergyAndVirialToHost)
         {
             static_assert(
                     sizeof(*nb->nbst.fShift.data()) == sizeof(Float3),
@@ -964,7 +964,7 @@ void gpu_launch_cpyback(NbnxmGpu*                nb,
         }
 
         /* DtoH energies */
-        if (stepWork.computeEnergy)
+        if (stepWork.computeEnergy && stepWork.stageGpuEnergyAndVirialToHost)
         {
             static_assert(sizeof(*nb->nbst.eLJ.data()) == sizeof(float),
                           "Sizes of host- and device-side LJ energy terms should be the same.");

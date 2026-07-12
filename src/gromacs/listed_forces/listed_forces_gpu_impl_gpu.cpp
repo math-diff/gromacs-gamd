@@ -80,8 +80,8 @@ std::vector<float> makeCmapCoefficients(const gmx_cmap_t& cmapGrid)
         return {};
     }
 
-    constexpr int c_numCoefficients = 16;
-    const int     cellsPerMap       = gridSpacing * gridSpacing;
+    constexpr int      c_numCoefficients = 16;
+    const int          cellsPerMap       = gridSpacing * gridSpacing;
     std::vector<float> coefficients(cmapGrid.cmapdata.size() * cellsPerMap * c_numCoefficients);
     const float        gridWidthDegrees = 360.0F / gridSpacing;
 
@@ -96,19 +96,19 @@ std::vector<float> makeCmapCoefficients(const gmx_cmap_t& cmapGrid)
             const int phi1Next = (phi1 + 1) % gridSpacing;
             for (int phi2 = 0; phi2 < gridSpacing; ++phi2)
             {
-                const int phi2Next = (phi2 + 1) % gridSpacing;
+                const int phi2Next     = (phi2 + 1) % gridSpacing;
                 const int positions[4] = { phi1 * gridSpacing + phi2,
                                            phi1Next * gridSpacing + phi2,
                                            phi1Next * gridSpacing + phi2Next,
                                            phi1 * gridSpacing + phi2Next };
-                float tx[c_numCoefficients];
+                float     tx[c_numCoefficients];
                 for (int corner = 0; corner < 4; ++corner)
                 {
-                    tx[corner]      = values[positions[corner] * 4];
-                    tx[corner + 4]  = values[positions[corner] * 4 + 1] * gridWidthDegrees;
-                    tx[corner + 8]  = values[positions[corner] * 4 + 2] * gridWidthDegrees;
-                    tx[corner + 12] = values[positions[corner] * 4 + 3] * gridWidthDegrees
-                                      * gridWidthDegrees;
+                    tx[corner]     = values[positions[corner] * 4];
+                    tx[corner + 4] = values[positions[corner] * 4 + 1] * gridWidthDegrees;
+                    tx[corner + 8] = values[positions[corner] * 4 + 2] * gridWidthDegrees;
+                    tx[corner + 12] =
+                            values[positions[corner] * 4 + 3] * gridWidthDegrees * gridWidthDegrees;
                 }
 
                 const int cell = map * cellsPerMap + phi1 * gridSpacing + phi2;
@@ -176,22 +176,20 @@ ListedForcesGpu::Impl::Impl(const gmx_ffparams_t& ffparams,
     wcycle_ = wcycle;
 
 #if GMX_GPU_CUDA
-    gamdDihedralShadowEnabled_ = (std::getenv("GMX_GAMD_GPU_DIH_SHADOW") != nullptr);
+    gamdDihedralShadowEnabled_          = (std::getenv("GMX_GAMD_GPU_DIH_SHADOW") != nullptr);
     gamdEnergyShadowDiagnosticsEnabled_ = (std::getenv("GMX_GAMD_GPU_ENERGY_SHADOW") != nullptr);
-    const char* gamdGpuRequest = std::getenv("GMX_GAMD_GPU");
-    gamdForceCorrectionEnabled_ =
-            (gamdGpuRequest != nullptr && std::strcmp(gamdGpuRequest, "1") == 0);
+    const char* gamdGpuRequest          = std::getenv("GMX_GAMD_GPU");
+    gamdForceCorrectionEnabled_ = (gamdGpuRequest != nullptr && std::strcmp(gamdGpuRequest, "1") == 0);
     const char* gamdScaleFromDeviceRequest = std::getenv("GMX_GAMD_GPU_SCALE_FROM_DEVICE");
     gamdScaleFromDeviceEnabled_ = gamdForceCorrectionEnabled_ && gamdScaleFromDeviceRequest != nullptr
                                   && std::strcmp(gamdScaleFromDeviceRequest, "1") == 0;
-    gamdEnergyShadowEnabled_ = gamdEnergyShadowDiagnosticsEnabled_ || gamdScaleFromDeviceEnabled_;
-    gamdDihedralBufferEnabled_ =
-            gamdDihedralShadowEnabled_ || gamdForceCorrectionEnabled_;
+    gamdEnergyShadowEnabled_   = gamdEnergyShadowDiagnosticsEnabled_ || gamdScaleFromDeviceEnabled_;
+    gamdDihedralBufferEnabled_ = gamdDihedralShadowEnabled_ || gamdForceCorrectionEnabled_;
     if (gamdForceCorrectionEnabled_)
     {
-        gamdForcesReadyEvent_ = (gamdDihedralShadowEnabled_
-                                         ? std::make_unique<GpuEventSynchronizer>(2, 2)
-                                         : std::make_unique<GpuEventSynchronizer>());
+        gamdForcesReadyEvent_ =
+                (gamdDihedralShadowEnabled_ ? std::make_unique<GpuEventSynchronizer>(2, 2)
+                                            : std::make_unique<GpuEventSynchronizer>());
     }
     if (gamdDihedralBufferEnabled_)
     {
@@ -240,12 +238,12 @@ ListedForcesGpu::Impl::Impl(const gmx_ffparams_t& ffparams,
     }
 
     kernelParams_.electrostaticsScaleFactor = electrostaticsScaleFactor;
-    kernelParams_.cmapGridSpacing            = ffparams.cmap_grid.grid_spacing;
+    kernelParams_.cmapGridSpacing           = ffparams.cmap_grid.grid_spacing;
     kernelParams_.cmapCoefficientsPerMap =
             16 * ffparams.cmap_grid.grid_spacing * ffparams.cmap_grid.grid_spacing;
-    kernelBuffers_.d_forceParams            = d_forceParams_;
-    kernelBuffers_.d_vTot                   = d_vTot_;
-    kernelBuffers_.d_cmapCoefficients       = d_cmapCoefficients_;
+    kernelBuffers_.d_forceParams      = d_forceParams_;
+    kernelBuffers_.d_vTot             = d_vTot_;
+    kernelBuffers_.d_cmapCoefficients = d_cmapCoefficients_;
     for (int i = 0; i < numFTypesOnGpu; i++)
     {
         kernelBuffers_.d_iatoms[i]       = nullptr;
@@ -411,8 +409,8 @@ void ListedForcesGpu::Impl::updateInteractionListsAndDeviceBuffers(ArrayRef<cons
                                                                    DeviceBuffer<Float4> d_xqPtr,
                                                                    DeviceBuffer<RVec>   d_fPtr,
                                                                    DeviceBuffer<RVec>   d_fShiftPtr,
-                                                                   DeviceBuffer<float>  d_nbLJEnergyPtr,
-                                                                   DeviceBuffer<float>  d_nbElecEnergyPtr)
+                                                                   DeviceBuffer<float> d_nbLJEnergyPtr,
+                                                                   DeviceBuffer<float> d_nbElecEnergyPtr)
 {
     wallcycle_sub_start(wcycle_, WallCycleSubCounter::GpuBondedListUpdate);
 
@@ -538,14 +536,14 @@ void ListedForcesGpu::Impl::updateInteractionListsAndDeviceBuffers(ArrayRef<cons
     int fTypeRangeEnd               = kernelParams_.fTypeRangeEnd[numFTypesOnGpu - 1];
     kernelLaunchConfig_.gridSize[0] = (fTypeRangeEnd + c_threadsPerBlock) / c_threadsPerBlock;
 
-    d_xq_     = d_xqPtr;
-    d_f_      = d_fPtr;
-    d_fShift_ = d_fShiftPtr;
+    d_xq_           = d_xqPtr;
+    d_f_            = d_fPtr;
+    d_fShift_       = d_fShiftPtr;
     d_nbLJEnergy_   = d_nbLJEnergyPtr;
     d_nbElecEnergy_ = d_nbElecEnergyPtr;
 
-    kernelBuffers_.d_forceParams = d_forceParams_;
-    kernelBuffers_.d_vTot        = d_vTot_;
+    kernelBuffers_.d_forceParams      = d_forceParams_;
+    kernelBuffers_.d_vTot             = d_vTot_;
     kernelBuffers_.d_cmapCoefficients = d_cmapCoefficients_;
 
     GMX_RELEASE_ASSERT(haveGpuInteractions == haveInteractions_,
@@ -631,6 +629,11 @@ bool ListedForcesGpu::Impl::gamdEnergyShadowDiagnosticsEnabled() const
     return gamdEnergyShadowDiagnosticsEnabled_;
 }
 
+bool ListedForcesGpu::Impl::gamdScaleFromDeviceEnabled() const
+{
+    return gamdScaleFromDeviceEnabled_;
+}
+
 void ListedForcesGpu::Impl::copyGamdDihedralShadowForces(ArrayRef<RVec> forces)
 {
     GMX_RELEASE_ASSERT(gamdDihedralShadowEnabled_,
@@ -651,13 +654,8 @@ void ListedForcesGpu::Impl::copyGamdDihedralVirial(std::array<real, DIM * DIM>* 
     GMX_RELEASE_ASSERT(gamdDihedralBufferEnabled_,
                        "GaMD GPU dihedral virial copy requested while disabled");
     GMX_RELEASE_ASSERT(virial != nullptr, "GaMD GPU dihedral virial requires host storage");
-    copyFromDeviceBuffer(virial->data(),
-                         &d_gamdDihedralVirial_,
-                         0,
-                         virial->size(),
-                         deviceStream_,
-                         GpuApiCallBehavior::Sync,
-                         nullptr);
+    copyFromDeviceBuffer(
+            virial->data(), &d_gamdDihedralVirial_, 0, virial->size(), deviceStream_, GpuApiCallBehavior::Sync, nullptr);
 }
 
 void ListedForcesGpu::Impl::copyGamdShortRangeVirial(std::array<real, DIM * DIM>* virial)
@@ -676,13 +674,12 @@ void ListedForcesGpu::Impl::copyGamdShortRangeVirial(std::array<real, DIM * DIM>
 
 void ListedForcesGpu::Impl::applyGamdForceCorrectionShadow(ArrayRef<const RVec> rawForces,
                                                            real                 totalScale,
-                                                           real                 dihedralCorrectionScale,
-                                                           ArrayRef<RVec>       correctedForces)
+                                                           real           dihedralCorrectionScale,
+                                                           ArrayRef<RVec> correctedForces)
 {
     GMX_RELEASE_ASSERT(gamdDihedralShadowEnabled_,
                        "GaMD GPU force-correction shadow requested while disabled");
-    GMX_RELEASE_ASSERT(rawForces.ssize() == gamdStateForceSize_
-                               && correctedForces.ssize() == gamdStateForceSize_,
+    GMX_RELEASE_ASSERT(rawForces.ssize() == gamdStateForceSize_ && correctedForces.ssize() == gamdStateForceSize_,
                        "GaMD GPU force-correction shadow buffers have the wrong size");
     copyToDeviceBuffer(&d_gamdCorrectedForcesState_,
                        reinterpret_cast<const Float3*>(rawForces.data()),
@@ -710,8 +707,7 @@ void ListedForcesGpu::Impl::applyGamdForceCorrection(DeviceBuffer<RVec>    force
                        "GaMD GPU force correction requested while disabled");
     GMX_RELEASE_ASSERT(forces != nullptr && rawForcesReady != nullptr,
                        "GaMD GPU force correction requires forces and a dependency event");
-    launchGamdForceCorrectionKernel(
-            forces, totalScale, dihedralCorrectionScale, rawForcesReady);
+    launchGamdForceCorrectionKernel(forces, totalScale, dihedralCorrectionScale, rawForcesReady);
 }
 
 GpuEventSynchronizer* ListedForcesGpu::Impl::gamdForcesReadyEvent()
@@ -744,14 +740,13 @@ void ListedForcesGpu::updateInteractionListsAndDeviceBuffers(ArrayRef<const int>
                                                              const InteractionDefinitions& idef,
                                                              NBAtomDataGpu* nbnxmAtomDataGpu)
 {
-    impl_->updateInteractionListsAndDeviceBuffers(
-            nbnxnAtomOrder,
-            idef,
-            nbnxmAtomDataGpu->xq,
-            nbnxmAtomDataGpu->f,
-            nbnxmAtomDataGpu->fShift,
-            nbnxmAtomDataGpu->eLJ,
-            nbnxmAtomDataGpu->eElec);
+    impl_->updateInteractionListsAndDeviceBuffers(nbnxnAtomOrder,
+                                                  idef,
+                                                  nbnxmAtomDataGpu->xq,
+                                                  nbnxmAtomDataGpu->f,
+                                                  nbnxmAtomDataGpu->fShift,
+                                                  nbnxmAtomDataGpu->eLJ,
+                                                  nbnxmAtomDataGpu->eElec);
 }
 
 void ListedForcesGpu::setPbc(PbcType pbcType, const matrix box, bool canMoleculeSpanPbc)
@@ -808,6 +803,11 @@ bool ListedForcesGpu::gamdEnergyShadowDiagnosticsEnabled() const
     return impl_->gamdEnergyShadowDiagnosticsEnabled();
 }
 
+bool ListedForcesGpu::gamdScaleFromDeviceEnabled() const
+{
+    return impl_->gamdScaleFromDeviceEnabled();
+}
+
 DeviceBuffer<float> ListedForcesGpu::gamdPmeEnergyStagingBuffer()
 {
     return impl_->gamdPmeEnergyStagingBuffer();
@@ -858,8 +858,7 @@ void ListedForcesGpu::applyGamdForceCorrectionShadow(ArrayRef<const RVec> rawFor
                                                      real                 dihedralCorrectionScale,
                                                      ArrayRef<RVec>       correctedForces)
 {
-    impl_->applyGamdForceCorrectionShadow(
-            rawForces, totalScale, dihedralCorrectionScale, correctedForces);
+    impl_->applyGamdForceCorrectionShadow(rawForces, totalScale, dihedralCorrectionScale, correctedForces);
 }
 
 void ListedForcesGpu::applyGamdForceCorrection(DeviceBuffer<RVec>    forces,
@@ -867,8 +866,7 @@ void ListedForcesGpu::applyGamdForceCorrection(DeviceBuffer<RVec>    forces,
                                                real                  dihedralCorrectionScale,
                                                GpuEventSynchronizer* rawForcesReady)
 {
-    impl_->applyGamdForceCorrection(
-            forces, totalScale, dihedralCorrectionScale, rawForcesReady);
+    impl_->applyGamdForceCorrection(forces, totalScale, dihedralCorrectionScale, rawForcesReady);
 }
 
 GpuEventSynchronizer* ListedForcesGpu::gamdForcesReadyEvent()

@@ -454,7 +454,7 @@ void pmePerformSolve(gmx_pme_t*        pme,
             switch (method)
             {
                 case PmeSolveAlgorithm::Coulomb:
-                    pme_gpu_solve(pme->gpu, gridIndex, h_grid, gridOrdering, computeEnergyAndVirial);
+                    pme_gpu_solve(pme->gpu, gridIndex, h_grid, gridOrdering, computeEnergyAndVirial, computeEnergyAndVirial);
                     break;
 
                 default: GMX_THROW(InternalError("Test not implemented for this mode"));

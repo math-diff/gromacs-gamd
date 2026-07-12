@@ -88,9 +88,9 @@ static constexpr int numFTypesOnGpu = 8;
  * \note Currently bonded are only supported with CUDA and SYCL, not with OpenCL.
  */
 #if GMX_GPU_CUDA
-constexpr std::array<int, numFTypesOnGpu> fTypesOnGpu = { F_BONDS,  F_ANGLES,  F_UREY_BRADLEY,
-                                                          F_PDIHS,  F_RBDIHS,  F_IDIHS,
-                                                          F_PIDIHS, F_CMAP,    F_LJ14 };
+constexpr std::array<int, numFTypesOnGpu> fTypesOnGpu = { F_BONDS,  F_ANGLES, F_UREY_BRADLEY,
+                                                          F_PDIHS,  F_RBDIHS, F_IDIHS,
+                                                          F_PIDIHS, F_CMAP,   F_LJ14 };
 #else
 constexpr std::array<int, numFTypesOnGpu> fTypesOnGpu = { F_BONDS,  F_ANGLES, F_UREY_BRADLEY,
                                                           F_PDIHS,  F_RBDIHS, F_IDIHS,
@@ -224,6 +224,9 @@ public:
 
     /*! \brief Returns whether host/device energy-state comparison is enabled. */
     bool gamdEnergyShadowDiagnosticsEnabled() const;
+
+    /*! \brief Returns whether in-place correction consumes device GaMD scales. */
+    bool gamdScaleFromDeviceEnabled() const;
 
     /*! \brief Returns PME reciprocal-energy staging owned by the GaMD consumer. */
     DeviceBuffer<float> gamdPmeEnergyStagingBuffer();

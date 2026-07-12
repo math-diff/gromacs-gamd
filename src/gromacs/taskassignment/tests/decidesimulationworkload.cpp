@@ -34,13 +34,31 @@ TEST(DecideSimulationWorkloadTest, UsesGpuForceBufferOpsWhenNoHostPostProcessing
     simulationWork.useGpuFBufferOpsWhenAllowed            = true;
     simulationWork.requireCpuForceBufferForPostProcessing = false;
     DomainLifetimeWorkload domainWork;
-    std::vector<MtsLevel>   mtsLevels;
+    std::vector<MtsLevel>  mtsLevels;
 
     const StepWorkload stepWork = setupStepWorkload(
             GMX_FORCE_NONBONDED | GMX_FORCE_FORCES, mtsLevels, 0, domainWork, simulationWork);
 
     EXPECT_TRUE(stepWork.computeNonbondedForces);
     EXPECT_TRUE(stepWork.useGpuFBufferOps);
+}
+
+TEST(DecideSimulationWorkloadTest, EnergyAndVirialWorkStagesGpuResultsToHostByDefault)
+{
+    SimulationWorkload     simulationWork;
+    DomainLifetimeWorkload domainWork;
+    std::vector<MtsLevel>  mtsLevels;
+
+    const StepWorkload energyWork =
+            setupStepWorkload(GMX_FORCE_ENERGY, mtsLevels, 0, domainWork, simulationWork);
+    const StepWorkload virialWork =
+            setupStepWorkload(GMX_FORCE_VIRIAL, mtsLevels, 0, domainWork, simulationWork);
+    const StepWorkload forceOnlyWork =
+            setupStepWorkload(GMX_FORCE_FORCES, mtsLevels, 0, domainWork, simulationWork);
+
+    EXPECT_TRUE(energyWork.stageGpuEnergyAndVirialToHost);
+    EXPECT_TRUE(virialWork.stageGpuEnergyAndVirialToHost);
+    EXPECT_FALSE(forceOnlyWork.stageGpuEnergyAndVirialToHost);
 }
 
 TEST(DecideSimulationWorkloadTest, HostPostProcessingDisablesGpuForceBufferOpsThisStep)
@@ -51,7 +69,7 @@ TEST(DecideSimulationWorkloadTest, HostPostProcessingDisablesGpuForceBufferOpsTh
     simulationWork.useGpuFBufferOpsWhenAllowed            = true;
     simulationWork.requireCpuForceBufferForPostProcessing = true;
     DomainLifetimeWorkload domainWork;
-    std::vector<MtsLevel>   mtsLevels;
+    std::vector<MtsLevel>  mtsLevels;
 
     const StepWorkload stepWork = setupStepWorkload(
             GMX_FORCE_NONBONDED | GMX_FORCE_FORCES, mtsLevels, 0, domainWork, simulationWork);
@@ -68,14 +86,10 @@ TEST(DecideSimulationWorkloadTest, GpuGaMDUsesGpuForceBufferOpsOnVirialSteps)
     simulationWork.useGpuFBufferOpsWhenAllowed = true;
     simulationWork.gamdExecutionMode           = GaMDExecutionMode::GpuScalarSynchronized;
     DomainLifetimeWorkload domainWork;
-    std::vector<MtsLevel>   mtsLevels;
+    std::vector<MtsLevel>  mtsLevels;
 
-    const StepWorkload stepWork = setupStepWorkload(GMX_FORCE_NONBONDED | GMX_FORCE_FORCES
-                                                            | GMX_FORCE_VIRIAL,
-                                                    mtsLevels,
-                                                    0,
-                                                    domainWork,
-                                                    simulationWork);
+    const StepWorkload stepWork = setupStepWorkload(
+            GMX_FORCE_NONBONDED | GMX_FORCE_FORCES | GMX_FORCE_VIRIAL, mtsLevels, 0, domainWork, simulationWork);
 
     EXPECT_TRUE(stepWork.computeVirial);
     EXPECT_TRUE(stepWork.useGpuFBufferOps);
@@ -92,12 +106,8 @@ TEST(DecideSimulationWorkloadTest, CpuForceWorkKeepsGaMDVirialReductionOnCpu)
     domainWork.haveCpuLocalForceWork = true;
     std::vector<MtsLevel> mtsLevels;
 
-    const StepWorkload stepWork = setupStepWorkload(GMX_FORCE_NONBONDED | GMX_FORCE_FORCES
-                                                            | GMX_FORCE_VIRIAL,
-                                                    mtsLevels,
-                                                    0,
-                                                    domainWork,
-                                                    simulationWork);
+    const StepWorkload stepWork = setupStepWorkload(
+            GMX_FORCE_NONBONDED | GMX_FORCE_FORCES | GMX_FORCE_VIRIAL, mtsLevels, 0, domainWork, simulationWork);
 
     EXPECT_TRUE(stepWork.computeVirial);
     EXPECT_FALSE(stepWork.useGpuFBufferOps);
@@ -110,45 +120,19 @@ TEST(DecideSimulationWorkloadTest, GaMDHostPostProcessingDisablesMdGpuGraph)
         GTEST_SKIP() << "GPU graph scheduling requires a GPU build";
     }
 
-    const MDLogger           logger;
-    DevelopmentFeatureFlags  devFlags;
+    const MDLogger          logger;
+    DevelopmentFeatureFlags devFlags;
     devFlags.enableCudaGraphs = true;
     t_inputrec inputrec;
 
-    const SimulationWorkload baselineWork = createSimulationWorkload(logger,
-                                                                     inputrec,
-                                                                     false,
-                                                                     false,
-                                                                     devFlags,
-                                                                     false,
-                                                                     false,
-                                                                     false,
-                                                                     true,
-                                                                     PmeRunMode::None,
-                                                                     false,
-                                                                     true,
-                                                                     false,
-                                                                     false,
-                                                                     false);
+    const SimulationWorkload baselineWork = createSimulationWorkload(
+            logger, inputrec, false, false, devFlags, false, false, false, true, PmeRunMode::None, false, true, false, false, false);
 
     EXPECT_TRUE(baselineWork.useMdGpuGraph);
 
-    inputrec.bDoGaMD = true;
-    const SimulationWorkload gamdWork = createSimulationWorkload(logger,
-                                                                inputrec,
-                                                                false,
-                                                                false,
-                                                                devFlags,
-                                                                false,
-                                                                false,
-                                                                false,
-                                                                true,
-                                                                PmeRunMode::None,
-                                                                false,
-                                                                true,
-                                                                false,
-                                                                false,
-                                                                false);
+    inputrec.bDoGaMD                  = true;
+    const SimulationWorkload gamdWork = createSimulationWorkload(
+            logger, inputrec, false, false, devFlags, false, false, false, true, PmeRunMode::None, false, true, false, false, false);
 
     EXPECT_TRUE(gamdWork.requireCpuForceBufferForPostProcessing);
     EXPECT_FALSE(gamdWork.useMdGpuGraph);

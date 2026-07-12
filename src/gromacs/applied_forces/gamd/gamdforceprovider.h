@@ -5,15 +5,16 @@
 
 #include <cstdint>
 
-#include "gromacs/mdtypes/iforceprovider.h"
 #include "gromacs/mdtypes/gamd_params.h"
+#include "gromacs/mdtypes/iforceprovider.h"
 #include "gromacs/mdtypes/inputrec.h"
 #include "gromacs/mdtypes/simulation_workload.h"
 #include "gromacs/topology/topology.h"
 
 struct gmx_wallcycle;
 
-namespace gmx {
+namespace gmx
+{
 
 struct GaMDGpuProductionParameters
 {
@@ -25,29 +26,30 @@ struct GaMDGpuProductionParameters
     double kD         = 0;
 };
 
-void gamdPrepareStep(long step, int nodeid);
+void                        gamdPrepareStep(long step, int nodeid);
 GaMDGpuProductionParameters gamdGpuProductionParameters();
-void gamdWarnIfRunTooShort(int64_t initStep, int64_t nsteps, int nodeid);
-void gamdFinalizeCurrentStep(long           step,
-                            int            nodeid,
-                            double         totalPotentialEnergy,
-                            double         dihedralEnergy,
-                            gmx_wallcycle* wcycle = nullptr);
-void gamdSetCheckpointingThisStep(bool checkpointingThisStep);
-void gamdWriteRestartState(long step);
-void gamdResetStateForTesting();
+bool                        gamdRequiresHostEnergyThisStep(long step);
+void                        gamdWarnIfRunTooShort(int64_t initStep, int64_t nsteps, int nodeid);
+void                        gamdFinalizeCurrentStep(long           step,
+                                                    int            nodeid,
+                                                    double         totalPotentialEnergy,
+                                                    double         dihedralEnergy,
+                                                    gmx_wallcycle* wcycle = nullptr);
+void                        gamdSetCheckpointingThisStep(bool checkpointingThisStep);
+void                        gamdWriteRestartState(long step);
+void                        gamdResetStateForTesting();
 const char* currentStepGaMDGpuIncompatibilityReason(bool useGpuUpdate, bool haveGpuBondedWork);
-GaMDExecutionMode selectGaMDExecutionMode(bool useGaMD,
-                                          bool useGpuNonbonded,
-                                          bool useGpuPme,
-                                          bool useGpuBonded,
-                                          bool useGpuUpdate,
-                                          bool havePpDomainDecomposition,
-                                          bool haveSeparatePmeRank,
-                                          bool useMts,
-                                          bool havePressureCoupling,
-                                          int  nstfout);
-const char* gaMDExecutionModeName(GaMDExecutionMode mode);
+GaMDExecutionMode       selectGaMDExecutionMode(bool useGaMD,
+                                                bool useGpuNonbonded,
+                                                bool useGpuPme,
+                                                bool useGpuBonded,
+                                                bool useGpuUpdate,
+                                                bool havePpDomainDecomposition,
+                                                bool haveSeparatePmeRank,
+                                                bool useMts,
+                                                bool havePressureCoupling,
+                                                int  nstfout);
+const char*             gaMDExecutionModeName(GaMDExecutionMode mode);
 class GaMDForceProvider final : public IForceProvider
 {
 public:

@@ -178,17 +178,19 @@
 #include "replicaexchange.h"
 #include "shellfc.h"
 
-namespace gmx {
+namespace gmx
+{
 void gamdPrepareStep(long step, int nodeid);
 void gamdWarnIfRunTooShort(int64_t initStep, int64_t nsteps, int nodeid);
 void gamdSetCheckpointingThisStep(bool checkpointingThisStep);
-}
+bool gamdRequiresHostEnergyThisStep(long step);
+} // namespace gmx
 /* GaMD Ultimate Total Potential Scale */
 extern double g_gamd_scale_P;
-extern int g_gamd_debug;
+extern int    g_gamd_debug;
 extern double g_gamd_dih_ratio;
 extern double g_gamd_last_total_boost;
-extern long g_gamd_debug_current_step;
+extern long   g_gamd_debug_current_step;
 
 /* bonded.cpp dihedral-only debug dump hooks */
 void gmx_gamd_dih_force_debug_prepare_step(int nAtoms);
@@ -916,7 +918,15 @@ void gmx::LegacySimulator::do_md()
         logInitialMultisimStatus(ms_, cr_, mdLog_, simulationsShareState, ir->nsteps, ir->init_step);
     }
 
-    bool usedMdGpuGraphLastStep = false;
+    bool        usedMdGpuGraphLastStep = false;
+    const char* residentEnergyRequest  = std::getenv("GMX_GAMD_GPU_RESIDENT_ENERGY");
+    const bool useResidentEnergy = residentEnergyRequest != nullptr && residentEnergyRequest[0] == '1'
+                                   && residentEnergyRequest[1] == '\0';
+    if (residentEnergyRequest != nullptr && !useResidentEnergy
+        && !(residentEnergyRequest[0] == '0' && residentEnergyRequest[1] == '\0'))
+    {
+        gmx_fatal(FARGS, "GMX_GAMD_GPU_RESIDENT_ENERGY must be exactly 0 or 1; got '%s'.", residentEnergyRequest);
+    }
     /* and stop now if we should */
     bLastStep = (bLastStep || (ir->nsteps >= 0 && step_rel > ir->nsteps));
     while (!bLastStep)
@@ -1326,7 +1336,8 @@ void gmx::LegacySimulator::do_md()
                                 fprintf(stderr,
                                         "\n[GaMD WARNING] nstcalcenergy = %d > 1.\n"
                                         "Current-step GaMD requires raw energies every step.\n"
-                                        "Set nstcalcenergy = 1 for a supported production path.\n\n",
+                                        "Set nstcalcenergy = 1 for a supported production "
+                                        "path.\n\n",
                                         ir->nstcalcenergy);
                             }
                             else
@@ -1341,6 +1352,36 @@ void gmx::LegacySimulator::do_md()
 
                     gmx::gamdPrepareStep(step, cr_->nodeid);
                     gmx::gamdWarnIfRunTooShort(ir->init_step, ir->nsteps, cr_->nodeid);
+
+                    if (useResidentEnergy)
+                    {
+                        if (simulationWork.gamdExecutionMode != GaMDExecutionMode::GpuScalarSynchronized
+                            || fr_->listedForcesGpu == nullptr
+                            || !fr_->listedForcesGpu->gamdScaleFromDeviceEnabled())
+                        {
+                            gmx_fatal(FARGS,
+                                      "GMX_GAMD_GPU_RESIDENT_ENERGY=1 requires the supported "
+                                      "single-rank GPU GaMD path and "
+                                      "GMX_GAMD_GPU_SCALE_FROM_DEVICE=1.");
+                        }
+
+                        const bool diagnosticHostState =
+                                fr_->listedForcesGpu->gamdEnergyShadowDiagnosticsEnabled()
+                                || fr_->listedForcesGpu->gamdDihedralShadowEnabled();
+                        const bool needHostEnergy = needEnergyAndVirial || diagnosticHostState
+                                                    || gmx::gamdRequiresHostEnergyThisStep(step);
+                        runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost = needHostEnergy;
+
+                        static bool loggedResidentEnergyMode = false;
+                        if (!loggedResidentEnergyMode && cr_->nodeid == 0)
+                        {
+                            loggedResidentEnergyMode = true;
+                            std::fprintf(stderr,
+                                         "[GaMD GPU INFO] Device-resident production energy "
+                                         "enabled; host staging is retained for output, log, "
+                                         "checkpoint, adaptive-stage, and diagnostic steps.\n");
+                        }
+                    }
                 }
 
                 g_gamd_debug_current_step = step;
@@ -1408,7 +1449,7 @@ void gmx::LegacySimulator::do_md()
 
 
             gmx_gamd_dih_force_debug_flush(step);
-            
+
             /* ========================================================== */
             /* GaMD force debug dump (single-rank validation helper)
              *
@@ -1450,8 +1491,7 @@ void gmx::LegacySimulator::do_md()
                         dumpFp = std::fopen(s, "w");
                         if (dumpFp != nullptr)
                         {
-                            std::fprintf(dumpFp,
-                                         "# step atom fx fy fz |f|\n");
+                            std::fprintf(dumpFp, "# step atom fx fy fz |f|\n");
                             std::fflush(dumpFp);
                         }
                     }
@@ -1463,11 +1503,12 @@ void gmx::LegacySimulator::do_md()
 
                     const int nAtoms = static_cast<int>(forces.size());
                     const int begin  = std::max(0, std::min(dumpBegin, nAtoms));
-                    const int end    = (dumpCount < 0
-                                                ? nAtoms
-                                                : std::max(begin, std::min(begin + dumpCount, nAtoms)));
+                    const int end =
+                            (dumpCount < 0 ? nAtoms
+                                           : std::max(begin, std::min(begin + dumpCount, nAtoms)));
 
-                    std::fprintf(dumpFp, "# dump step %lld nAtoms %d begin %d end %d\n",
+                    std::fprintf(dumpFp,
+                                 "# dump step %lld nAtoms %d begin %d end %d\n",
                                  static_cast<long long>(step),
                                  nAtoms,
                                  begin,
@@ -1620,7 +1661,6 @@ void gmx::LegacySimulator::do_md()
                     bGStat ? (bSumEkinhOld ? EkindataState::UsedNeedToReduce
                                            : EkindataState::UsedDoNotNeedToReduce)
                            : EkindataState::NotUsed;
-
 
 
             do_md_trajectory_writing(fpLog_,
@@ -1800,8 +1840,7 @@ void gmx::LegacySimulator::do_md()
 
                     if (((simulationWork.useGpuPme && simulationWork.useCpuPmePpCommunication)
                          || (!runScheduleWork_->stepWork.useGpuFBufferOps))
-                        && simulationWork.gamdExecutionMode
-                                   != gmx::GaMDExecutionMode::GpuScalarSynchronized)
+                        && simulationWork.gamdExecutionMode != gmx::GaMDExecutionMode::GpuScalarSynchronized)
                     {
                         // The PME forces were recieved to the host, and reduced on the CPU with the
                         // rest of the forces computed on the GPU, so the final forces have to be
@@ -1814,25 +1853,22 @@ void gmx::LegacySimulator::do_md()
                              && do_per_step(step + ir->nsttcouple - 1, ir->nsttcouple));
 
                     GpuEventSynchronizer* forcesReadyForUpdate =
-                            (simulationWork.gamdExecutionMode
-                                             == gmx::GaMDExecutionMode::GpuScalarSynchronized
+                            (simulationWork.gamdExecutionMode == gmx::GaMDExecutionMode::GpuScalarSynchronized
                                      ? fr_->listedForcesGpu->gamdForcesReadyEvent()
                                      : stateGpu->getLocalForcesReadyOnDeviceEvent(
-                                               runScheduleWork_->stepWork,
-                                               runScheduleWork_->simulationWork));
+                                               runScheduleWork_->stepWork, runScheduleWork_->simulationWork));
 
                     // This applies Leap-Frog, LINCS and SETTLE in succession
-                    integrator->integrate(
-                            forcesReadyForUpdate,
-                            ir->delta_t,
-                            true,
-                            bCalcVir,
-                            shake_vir,
-                            doTemperatureScaling,
-                            ekind_->tcstat,
-                            doParrinelloRahman,
-                            ir->pressureCouplingOptions.nstpcouple * ir->delta_t,
-                            parrinelloRahmanM);
+                    integrator->integrate(forcesReadyForUpdate,
+                                          ir->delta_t,
+                                          true,
+                                          bCalcVir,
+                                          shake_vir,
+                                          doTemperatureScaling,
+                                          ekind_->tcstat,
+                                          doParrinelloRahman,
+                                          ir->pressureCouplingOptions.nstpcouple * ir->delta_t,
+                                          parrinelloRahmanM);
                 }
                 else
                 {
@@ -2176,7 +2212,6 @@ void gmx::LegacySimulator::do_md()
                                           ir->nstlog,
                                           step);
             }
-
 
 
             if (bCalcEner)

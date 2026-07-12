@@ -407,12 +407,14 @@ void pme_gpu_3dfft(const PmeGpu* pmeGpu, enum gmx_fft_direction direction, int g
  * \param[in,out] h_grid                  The host-side input and output Fourier grid buffer (used only with testing or host-side FFT)
  * \param[in]     gridOrdering            Specifies the dimenion ordering of the complex grid. TODO: store this information?
  * \param[in]     computeEnergyAndVirial  Tells if the energy and virial computation should be performed.
+ * \param[in]     stageEnergyAndVirialToHost  Tells if energy and virial should be copied to host.
  */
 GPU_FUNC_QUALIFIER void pme_gpu_solve(PmeGpu*      GPU_FUNC_ARGUMENT(pmeGpu),
                                       int          GPU_FUNC_ARGUMENT(gridIndex),
                                       t_complex*   GPU_FUNC_ARGUMENT(h_grid),
                                       GridOrdering GPU_FUNC_ARGUMENT(gridOrdering),
-                                      bool GPU_FUNC_ARGUMENT(computeEnergyAndVirial)) GPU_FUNC_TERM;
+                                      bool         GPU_FUNC_ARGUMENT(computeEnergyAndVirial),
+                                      bool GPU_FUNC_ARGUMENT(stageEnergyAndVirialToHost)) GPU_FUNC_TERM;
 
 /*! \libinternal \brief
  * A GPU force gathering function.
@@ -445,10 +447,10 @@ GPU_FUNC_QUALIFIER DeviceBuffer<gmx::RVec> pme_gpu_get_kernelparam_forces(const 
         GPU_FUNC_TERM_WITH_RETURN(DeviceBuffer<gmx::RVec>{});
 
 /*! \brief Stage scaled primary-grid reciprocal energy for a device consumer. */
-GPU_FUNC_QUALIFIER void pme_gpu_stage_gamd_reciprocal_energy(
-        const PmeGpu*              GPU_FUNC_ARGUMENT(pmeGpu),
-        DeviceBuffer<float>        GPU_FUNC_ARGUMENT(destination),
-        GpuEventSynchronizer*      GPU_FUNC_ARGUMENT(readyEvent)) GPU_FUNC_TERM;
+GPU_FUNC_QUALIFIER void
+pme_gpu_stage_gamd_reciprocal_energy(const PmeGpu*       GPU_FUNC_ARGUMENT(pmeGpu),
+                                     DeviceBuffer<float> GPU_FUNC_ARGUMENT(destination),
+                                     GpuEventSynchronizer* GPU_FUNC_ARGUMENT(readyEvent)) GPU_FUNC_TERM;
 
 GPU_FUNC_QUALIFIER void pme_gpu_set_kernelparam_useNvshmem(const PmeGpu* GPU_FUNC_ARGUMENT(pmeGpu),
                                                            bool GPU_FUNC_ARGUMENT(useNvshmem)) GPU_FUNC_TERM;

@@ -44,8 +44,8 @@
 
 #include "config.h"
 
-#include <cstdlib>
 #include <cstdint>
+#include <cstdlib>
 
 #include <bitset>
 #include <memory>
@@ -130,17 +130,17 @@ SimulationWorkload createSimulationWorkload(const gmx::MDLogger& mdlog,
     simulationWorkload.haveEwaldSurfaceContribution = haveEwaldSurfaceContribution(inputrec);
     simulationWorkload.useMts                       = inputrec.useMts;
     const bool useCurrentStepGaMD = inputrec.bDoGaMD || getenv("GMX_USE_GAMD") != nullptr;
-    simulationWorkload.gamdExecutionMode = selectGaMDExecutionMode(
-            useCurrentStepGaMD,
-            useGpuForNonbonded,
-            simulationWorkload.useGpuPme,
-            useGpuForBonded,
-            useGpuForUpdate,
-            havePpDomainDecomposition,
-            haveSeparatePmeRank,
-            inputrec.useMts,
-            inputrec.pressureCouplingOptions.epc != PressureCoupling::No,
-            inputrec.nstfout);
+    simulationWorkload.gamdExecutionMode =
+            selectGaMDExecutionMode(useCurrentStepGaMD,
+                                    useGpuForNonbonded,
+                                    simulationWorkload.useGpuPme,
+                                    useGpuForBonded,
+                                    useGpuForUpdate,
+                                    havePpDomainDecomposition,
+                                    haveSeparatePmeRank,
+                                    inputrec.useMts,
+                                    inputrec.pressureCouplingOptions.epc != PressureCoupling::No,
+                                    inputrec.nstfout);
     const bool useGpuGaMDForceCorrection =
             simulationWorkload.gamdExecutionMode == GaMDExecutionMode::GpuScalarSynchronized;
     simulationWorkload.requireCpuForceBufferForPostProcessing =
@@ -156,8 +156,9 @@ SimulationWorkload createSimulationWorkload(const gmx::MDLogger& mdlog,
     {
         GMX_LOG(mdlog.info)
                 .asParagraph()
-                .appendText("Current-step GaMD with GPU update uses the CPU force buffer for "
-                            "the GaMD force correction before GPU integration.");
+                .appendText(
+                        "Current-step GaMD with GPU update uses the CPU force buffer for "
+                        "the GaMD force correction before GPU integration.");
     }
     const bool featuresRequireGpuBufferOps = useGpuForUpdate || simulationWorkload.useGpuDirectCommunication;
 
@@ -189,8 +190,7 @@ SimulationWorkload createSimulationWorkload(const gmx::MDLogger& mdlog,
             GMX_GPU_SYCL && !(GMX_GPU_FFT_BBFFT || GMX_GPU_FFT_MKL || GMX_GPU_FFT_ONEMATH);
     simulationWorkload.useMdGpuGraph =
             devFlags.enableCudaGraphs && useGpuForUpdate
-            && !simulationWorkload.requireCpuForceBufferForPostProcessing
-            && !useCurrentStepGaMD
+            && !simulationWorkload.requireCpuForceBufferForPostProcessing && !useCurrentStepGaMD
             && (simulationWorkload.haveSeparatePmeRank ? simulationWorkload.useGpuPmePpCommunication : true)
             && (havePpDomainDecomposition ? simulationWorkload.useGpuHaloExchange : true)
             && (havePpDomainDecomposition ? (GMX_THREAD_MPI > 0) : true)
@@ -286,6 +286,7 @@ StepWorkload setupStepWorkload(const int                     legacyFlags,
     flags.computeSlowForces             = computeSlowForces;
     flags.computeVirial                 = ((legacyFlags & GMX_FORCE_VIRIAL) != 0);
     flags.computeEnergy                 = ((legacyFlags & GMX_FORCE_ENERGY) != 0);
+    flags.stageGpuEnergyAndVirialToHost = flags.computeEnergy || flags.computeVirial;
     flags.computeForces                 = ((legacyFlags & GMX_FORCE_FORCES) != 0);
     flags.useOnlyMtsCombinedForceBuffer = ((legacyFlags & GMX_FORCE_DO_NOT_NEED_NORMAL_FORCE) != 0);
     flags.computeListedForces           = ((legacyFlags & GMX_FORCE_LISTED) != 0);
@@ -303,8 +304,7 @@ StepWorkload setupStepWorkload(const int                     legacyFlags,
     // Generic virial steps take the CPU reduction path. The validated single-rank GPU GaMD
     // path computes the short-range virial before PME force reduction and can keep forces on GPU.
     const bool useGpuGaMDShortRangeVirial =
-            flags.computeVirial
-            && simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuScalarSynchronized
+            flags.computeVirial && simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuScalarSynchronized
             && !domainWork.haveCpuLocalForceWork;
     flags.useGpuFBufferOps = simulationWork.useGpuFBufferOpsWhenAllowed
                              && (!flags.computeVirial || useGpuGaMDShortRangeVirial)

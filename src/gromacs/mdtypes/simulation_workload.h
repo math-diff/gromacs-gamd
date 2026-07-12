@@ -83,6 +83,8 @@ public:
     bool computeVirial = false;
     //! Whether energies need to be computed this step this step
     bool computeEnergy = false;
+    //! Whether GPU energy and virial results need to be staged to host this step
+    bool stageGpuEnergyAndVirialToHost = false;
     //! Whether (any) forces need to be computed this step, not only energies
     bool computeForces = false;
     //! Whether only the MTS combined force buffers are needed and not the separate normal force buffer.
