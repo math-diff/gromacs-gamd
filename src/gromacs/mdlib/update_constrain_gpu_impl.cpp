@@ -575,6 +575,7 @@ void UpdateConstrainGpu::Impl::scaleVelocities(const Matrix3x3& scalingMatrix)
 UpdateConstrainGpu::Impl::Impl(const t_inputrec&    ir,
                                const gmx_mtop_t&    mtop,
                                const int            numTempScaleValues,
+                               const bool           useGpuResidentGaMD,
                                const DeviceContext& deviceContext,
                                const DeviceStream&  deviceStream,
                                gmx_wallcycle*       wcycle) :
@@ -588,12 +589,8 @@ UpdateConstrainGpu::Impl::Impl(const t_inputrec&    ir,
         settleGpu_ = std::make_unique<SettleGpu>(mtop, deviceContext_, deviceStream_);
     }
 #if GMX_GPU_CUDA
-    const char* residentEnergyRequest = std::getenv("GMX_GAMD_GPU_RESIDENT_ENERGY");
-    constraintVirialHistoryEnabled_ =
-            residentEnergyRequest != nullptr && std::strcmp(residentEnergyRequest, "1") == 0;
-    const char* deviceGlobalsRequest = std::getenv("GMX_GAMD_GPU_DEVICE_GLOBALS");
-    deviceGlobalHistoryEnabled_ = constraintVirialHistoryEnabled_ && deviceGlobalsRequest != nullptr
-                                  && std::strcmp(deviceGlobalsRequest, "1") == 0;
+    constraintVirialHistoryEnabled_ = useGpuResidentGaMD;
+    deviceGlobalHistoryEnabled_     = useGpuResidentGaMD;
     if (constraintVirialHistoryEnabled_)
     {
         allocateDeviceBuffer(&d_constraintVirialHistory_,
@@ -757,10 +754,17 @@ GpuEventSynchronizer* UpdateConstrainGpu::Impl::xUpdatedOnDeviceEvent()
 UpdateConstrainGpu::UpdateConstrainGpu(const t_inputrec&    ir,
                                        const gmx_mtop_t&    mtop,
                                        const int            numTempScaleValues,
+                                       const bool           useGpuResidentGaMD,
                                        const DeviceContext& deviceContext,
                                        const DeviceStream&  deviceStream,
                                        gmx_wallcycle*       wcycle) :
-    impl_(new Impl(ir, mtop, numTempScaleValues, deviceContext, deviceStream, wcycle))
+    impl_(new Impl(ir,
+                   mtop,
+                   numTempScaleValues,
+                   useGpuResidentGaMD,
+                   deviceContext,
+                   deviceStream,
+                   wcycle))
 {
 }
 

@@ -126,7 +126,7 @@ TEST(DecideSimulationWorkloadTest, GpuGaMDUsesGpuForceBufferOpsOnVirialSteps)
     simulationWork.computeNonbonded            = true;
     simulationWork.useGpuNonbonded             = true;
     simulationWork.useGpuFBufferOpsWhenAllowed = true;
-    simulationWork.gamdExecutionMode           = GaMDExecutionMode::GpuScalarSynchronized;
+    simulationWork.gamdExecutionMode           = GaMDExecutionMode::GpuResident;
     DomainLifetimeWorkload domainWork;
     std::vector<MtsLevel>  mtsLevels;
 
@@ -143,7 +143,7 @@ TEST(DecideSimulationWorkloadTest, CpuForceWorkKeepsGaMDVirialReductionOnCpu)
     simulationWork.computeNonbonded            = true;
     simulationWork.useGpuNonbonded             = true;
     simulationWork.useGpuFBufferOpsWhenAllowed = true;
-    simulationWork.gamdExecutionMode           = GaMDExecutionMode::GpuScalarSynchronized;
+    simulationWork.gamdExecutionMode           = GaMDExecutionMode::GpuResident;
     DomainLifetimeWorkload domainWork;
     domainWork.haveCpuLocalForceWork = true;
     std::vector<MtsLevel> mtsLevels;
@@ -155,15 +155,12 @@ TEST(DecideSimulationWorkloadTest, CpuForceWorkKeepsGaMDVirialReductionOnCpu)
     EXPECT_FALSE(stepWork.useGpuFBufferOps);
 }
 
-TEST(DecideSimulationWorkloadTest, GaMDHostPostProcessingDisablesMdGpuGraph)
+TEST(DecideSimulationWorkloadTest, CpuUpdateGaMDUsesReferenceModeWithoutMdGpuGraph)
 {
     if (!(GMX_GPU_CUDA || GMX_GPU_SYCL))
     {
         GTEST_SKIP() << "GPU graph scheduling requires a GPU build";
     }
-
-    ScopedEnvironmentVariable gpuGaMDRequest("GMX_GAMD_GPU", nullptr);
-    ScopedEnvironmentVariable residentEnergyRequest("GMX_GAMD_GPU_RESIDENT_ENERGY", nullptr);
 
     const MDLogger          logger;
     DevelopmentFeatureFlags devFlags;
@@ -177,18 +174,16 @@ TEST(DecideSimulationWorkloadTest, GaMDHostPostProcessingDisablesMdGpuGraph)
 
     inputrec.bDoGaMD                  = true;
     const SimulationWorkload gamdWork = createSimulationWorkload(
-            logger, inputrec, false, false, devFlags, false, false, false, true, PmeRunMode::None, false, true, false, false, false);
+            logger, inputrec, false, false, devFlags, false, false, false, true, PmeRunMode::None, false, false, false, false, false);
 
-    EXPECT_TRUE(gamdWork.requireCpuForceBufferForPostProcessing);
+    EXPECT_EQ(GaMDExecutionMode::CpuReference, gamdWork.gamdExecutionMode);
+    EXPECT_FALSE(gamdWork.requireCpuForceBufferForPostProcessing);
     EXPECT_FALSE(gamdWork.useMdGpuGraph);
 }
 
 #if GMX_GPU_CUDA
 TEST(DecideSimulationWorkloadTest, ResidentGpuGaMDAllowsMdGpuGraph)
 {
-    ScopedEnvironmentVariable gpuGaMDRequest("GMX_GAMD_GPU", "1");
-    ScopedEnvironmentVariable residentEnergyRequest("GMX_GAMD_GPU_RESIDENT_ENERGY", "1");
-
     const MDLogger          logger;
     DevelopmentFeatureFlags devFlags;
     devFlags.enableCudaGraphs = true;
@@ -198,7 +193,7 @@ TEST(DecideSimulationWorkloadTest, ResidentGpuGaMDAllowsMdGpuGraph)
     const SimulationWorkload gamdWork = createSimulationWorkload(
             logger, inputrec, false, false, devFlags, false, false, false, true, PmeRunMode::GPU, true, true, false, false, false);
 
-    EXPECT_EQ(GaMDExecutionMode::GpuScalarSynchronized, gamdWork.gamdExecutionMode);
+    EXPECT_EQ(GaMDExecutionMode::GpuResident, gamdWork.gamdExecutionMode);
     EXPECT_FALSE(gamdWork.requireCpuForceBufferForPostProcessing);
     EXPECT_TRUE(gamdWork.useMdGpuGraph);
 }

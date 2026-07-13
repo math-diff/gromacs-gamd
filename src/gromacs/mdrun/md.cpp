@@ -221,6 +221,12 @@ bool getForcedGaMDScaleP(double* scalePOut)
     return active;
 }
 
+bool doCRescalePressureCouplingThisStep(const t_inputrec& inputRecord, int64_t step)
+{
+    return inputRecord.pressureCouplingOptions.epc == PressureCoupling::CRescale
+           && do_per_step(step, inputRecord.pressureCouplingOptions.nstpcouple);
+}
+
 } // namespace
 
 using gmx::SimulationSignaller;
@@ -540,6 +546,7 @@ void gmx::LegacySimulator::do_md()
                 *ir,
                 topGlobal_,
                 ekind_->numTemperatureCouplingGroups(),
+                simulationWork.useGpuResidentGaMD(),
                 fr_->deviceStreamManager->context(),
                 fr_->deviceStreamManager->stream(gmx::DeviceStreamType::UpdateAndConstraints),
                 wallCycleCounters_);
@@ -917,38 +924,10 @@ void gmx::LegacySimulator::do_md()
 
     bool        usedMdGpuGraphLastStep = false;
     const bool  useCurrentStepGaMD     = ir->bDoGaMD || getenv("GMX_USE_GAMD") != nullptr;
-    const char* residentEnergyRequest  = std::getenv("GMX_GAMD_GPU_RESIDENT_ENERGY");
-    const bool useResidentEnergy = residentEnergyRequest != nullptr && residentEnergyRequest[0] == '1'
-                                   && residentEnergyRequest[1] == '\0';
-    const char* deviceGlobalsRequest = std::getenv("GMX_GAMD_GPU_DEVICE_GLOBALS");
-    const bool  useDeviceGlobals = deviceGlobalsRequest != nullptr && deviceGlobalsRequest[0] == '1'
-                                  && deviceGlobalsRequest[1] == '\0';
-    const char* bufferedOutputRequest = std::getenv("GMX_GAMD_GPU_BUFFERED_OUTPUT");
-    const bool useBufferedOutput = bufferedOutputRequest != nullptr && bufferedOutputRequest[0] == '1'
-                                   && bufferedOutputRequest[1] == '\0';
-    if (residentEnergyRequest != nullptr && !useResidentEnergy
-        && !(residentEnergyRequest[0] == '0' && residentEnergyRequest[1] == '\0'))
-    {
-        gmx_fatal(FARGS, "GMX_GAMD_GPU_RESIDENT_ENERGY must be exactly 0 or 1; got '%s'.", residentEnergyRequest);
-    }
-    if (deviceGlobalsRequest != nullptr && !useDeviceGlobals
-        && !(deviceGlobalsRequest[0] == '0' && deviceGlobalsRequest[1] == '\0'))
-    {
-        gmx_fatal(FARGS, "GMX_GAMD_GPU_DEVICE_GLOBALS must be exactly 0 or 1; got '%s'.", deviceGlobalsRequest);
-    }
-    if (bufferedOutputRequest != nullptr && !useBufferedOutput
-        && !(bufferedOutputRequest[0] == '0' && bufferedOutputRequest[1] == '\0'))
-    {
-        gmx_fatal(FARGS, "GMX_GAMD_GPU_BUFFERED_OUTPUT must be exactly 0 or 1; got '%s'.", bufferedOutputRequest);
-    }
-    if (useDeviceGlobals && !useResidentEnergy)
-    {
-        gmx_fatal(FARGS, "GMX_GAMD_GPU_DEVICE_GLOBALS=1 requires GMX_GAMD_GPU_RESIDENT_ENERGY=1.");
-    }
-    if (useBufferedOutput && !useDeviceGlobals)
-    {
-        gmx_fatal(FARGS, "GMX_GAMD_GPU_BUFFERED_OUTPUT=1 requires GMX_GAMD_GPU_DEVICE_GLOBALS=1.");
-    }
+    const bool useResidentEnergy = simulationWork.useGpuResidentGaMD();
+    const bool useDeviceGlobals = useResidentEnergy;
+    const bool useBufferedOutput = useResidentEnergy;
+    gmx::gamdSetBufferedProductionOutputEnabled(useBufferedOutput);
     /* and stop now if we should */
     bLastStep = (bLastStep || (ir->nsteps >= 0 && step_rel > ir->nsteps));
     while (!bLastStep)
@@ -1271,18 +1250,18 @@ void gmx::LegacySimulator::do_md()
 
         if (useCurrentStepGaMD && useResidentEnergy)
         {
-            if (simulationWork.gamdExecutionMode != GaMDExecutionMode::GpuScalarSynchronized
+            if (simulationWork.gamdExecutionMode != GaMDExecutionMode::GpuResident
                 || fr_->listedForcesGpu == nullptr || !fr_->listedForcesGpu->gamdScaleFromDeviceEnabled())
             {
-                gmx_fatal(FARGS,
-                          "GMX_GAMD_GPU_RESIDENT_ENERGY=1 requires the supported single-rank "
-                          "GPU GaMD path and GMX_GAMD_GPU_SCALE_FROM_DEVICE=1.");
+                gmx_fatal(FARGS, "GPU-resident GaMD was selected but its GPU state is unavailable.");
             }
 
             const bool diagnosticHostState = fr_->listedForcesGpu->gamdEnergyShadowDiagnosticsEnabled()
                                              || fr_->listedForcesGpu->gamdDihedralShadowEnabled();
+            const bool doCRescaleThisStep = doCRescalePressureCouplingThisStep(*ir, step);
             const bool needHostEnergy = needEnergyAndVirial || diagnosticHostState
-                                        || gmx::gamdRequiresHostEnergyThisStep(step);
+                                        || gmx::gamdRequiresHostEnergyThisStep(step)
+                                        || doCRescaleThisStep;
             runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost = needHostEnergy;
 
             static bool loggedResidentEnergyMode = false;
@@ -1866,7 +1845,7 @@ void gmx::LegacySimulator::do_md()
 
                     if (((simulationWork.useGpuPme && simulationWork.useCpuPmePpCommunication)
                          || (!runScheduleWork_->stepWork.useGpuFBufferOps))
-                        && simulationWork.gamdExecutionMode != gmx::GaMDExecutionMode::GpuScalarSynchronized)
+                        && simulationWork.gamdExecutionMode != gmx::GaMDExecutionMode::GpuResident)
                     {
                         // The PME forces were recieved to the host, and reduced on the CPU with the
                         // rest of the forces computed on the GPU, so the final forces have to be
@@ -1879,7 +1858,7 @@ void gmx::LegacySimulator::do_md()
                              && do_per_step(step + ir->nsttcouple - 1, ir->nsttcouple));
 
                     GpuEventSynchronizer* forcesReadyForUpdate =
-                            (simulationWork.gamdExecutionMode == gmx::GaMDExecutionMode::GpuScalarSynchronized
+                            (simulationWork.gamdExecutionMode == gmx::GaMDExecutionMode::GpuResident
                                      ? fr_->listedForcesGpu->gamdForcesReadyEvent()
                                      : stateGpu->getLocalForcesReadyOnDeviceEvent(
                                                runScheduleWork_->stepWork, runScheduleWork_->simulationWork));

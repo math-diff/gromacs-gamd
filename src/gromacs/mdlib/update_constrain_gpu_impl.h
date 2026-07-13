@@ -85,6 +85,7 @@ public:
     Impl(const t_inputrec&    ir,
          const gmx_mtop_t&    mtop,
          int                  numTempScaleValues,
+         bool                 useGpuResidentGaMD,
          const DeviceContext& deviceContext,
          const DeviceStream&  deviceStream,
          gmx_wallcycle*       wcycle);

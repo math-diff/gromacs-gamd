@@ -603,7 +603,7 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
     }
     else
     {
-        GMX_RELEASE_ASSERT(simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuScalarSynchronized
+        GMX_RELEASE_ASSERT(simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuResident
                                    && fr->listedForcesGpu != nullptr
                                    && fr->listedForcesGpu->gamdScaleFromDeviceEnabled(),
                            "GaMD can skip host energy staging only with device scale correction");
@@ -616,7 +616,7 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
                     ? static_cast<real>(g_gamd_scale_P * (g_gamd_dih_ratio - 1.0))
                     : 0.0_real;
 
-    if (simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuScalarSynchronized)
+    if (simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuResident)
     {
         GMX_RELEASE_ASSERT(fr->stateGpu != nullptr && fr->listedForcesGpu != nullptr,
                            "GPU GaMD force correction requires GPU state and listed-force objects");
@@ -2101,13 +2101,13 @@ void do_force(FILE*                         fplog,
     const StepWorkload& stepWork = runScheduleWork.stepWork;
 
     const bool useGpuGaMDShortRangeVirial =
-            simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuScalarSynchronized
+            simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuResident
             && stepWork.computeVirial && stepWork.useGpuFBufferOps;
     static const bool gaMDGpuWorkloadDiagnosticsEnabled =
             (std::getenv("GMX_GAMD_GPU_DIAGNOSTICS") != nullptr);
     static bool printedGaMDGpuWorkloadDiagnostics = false;
     if (!printedGaMDGpuWorkloadDiagnostics && gaMDGpuWorkloadDiagnosticsEnabled
-        && simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuScalarSynchronized)
+        && simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuResident)
     {
         std::fprintf(stderr,
                      "[GaMD GPU diagnostics] cpuLocal=%d cpuListed=%d cpuBonded=%d special=%d "

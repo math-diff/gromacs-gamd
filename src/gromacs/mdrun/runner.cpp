@@ -1911,6 +1911,7 @@ int Mdrunner::mdrunner()
                     std::make_unique<ListedForcesGpu>(mtop.ffparams,
                                                       fr->ic->epsfac * fr->fudgeQQ,
                                                       inputrec->opts.ngener - inputrec->nwall,
+                                                      runScheduleWork.simulationWork.useGpuResidentGaMD(),
                                                       deviceStreamManager->context(),
                                                       deviceStreamManager->bondedStream(),
                                                       wcycle.get());

@@ -34,6 +34,7 @@ void                        gamdPrepareStep(long step, int nodeid);
 GaMDGpuProductionParameters gamdGpuProductionParameters();
 bool                        gamdRequiresHostEnergyThisStep(long step);
 bool                        gamdBufferedProductionOutputEnabled();
+void                        gamdSetBufferedProductionOutputEnabled(bool enabled);
 void                        gamdWriteBufferedProductionOutput(ArrayRef<const int64_t> deferredSteps,
                                                               ArrayRef<const std::array<real, F_NRE>> deferredEnergySamples,
                                                               long           currentStep,
@@ -57,7 +58,8 @@ GaMDExecutionMode       selectGaMDExecutionMode(bool useGaMD,
                                                 bool havePpDomainDecomposition,
                                                 bool haveSeparatePmeRank,
                                                 bool useMts,
-                                                bool havePressureCoupling,
+                                                PressureCoupling pressureCoupling,
+                                                PressureCouplingType pressureCouplingType,
                                                 int  nstfout);
 const char*             gaMDExecutionModeName(GaMDExecutionMode mode);
 class GaMDForceProvider final : public IForceProvider

@@ -85,79 +85,19 @@ private:
     std::filesystem::path path_;
 };
 
-class ScopedGaMDGpuEnvironment
-{
-public:
-    explicit ScopedGaMDGpuEnvironment(const char* value)
-    {
-        if (const char* originalValue = std::getenv("GMX_GAMD_GPU"))
-        {
-            originalValue_ = originalValue;
-        }
-        if (value == nullptr)
-        {
-            gmxUnsetenv("GMX_GAMD_GPU");
-        }
-        else
-        {
-            gmxSetenv("GMX_GAMD_GPU", value, 1);
-        }
-    }
-
-    ~ScopedGaMDGpuEnvironment()
-    {
-        if (originalValue_.has_value())
-        {
-            gmxSetenv("GMX_GAMD_GPU", originalValue_->c_str(), 1);
-        }
-        else
-        {
-            gmxUnsetenv("GMX_GAMD_GPU");
-        }
-    }
-
-private:
-    std::optional<std::string> originalValue_;
-};
-
-class ScopedGaMDBufferedOutputEnvironment
-{
-public:
-    explicit ScopedGaMDBufferedOutputEnvironment(const char* value)
-    {
-        if (const char* originalValue = std::getenv("GMX_GAMD_GPU_BUFFERED_OUTPUT"))
-        {
-            originalValue_ = originalValue;
-        }
-        if (value == nullptr)
-        {
-            gmxUnsetenv("GMX_GAMD_GPU_BUFFERED_OUTPUT");
-        }
-        else
-        {
-            gmxSetenv("GMX_GAMD_GPU_BUFFERED_OUTPUT", value, 1);
-        }
-    }
-
-    ~ScopedGaMDBufferedOutputEnvironment()
-    {
-        if (originalValue_.has_value())
-        {
-            gmxSetenv("GMX_GAMD_GPU_BUFFERED_OUTPUT", originalValue_->c_str(), 1);
-        }
-        else
-        {
-            gmxUnsetenv("GMX_GAMD_GPU_BUFFERED_OUTPUT");
-        }
-    }
-
-private:
-    std::optional<std::string> originalValue_;
-};
-
 GaMDExecutionMode selectSupportedGaMDExecutionMode()
 {
-    return selectGaMDExecutionMode(true, true, true, true, true, false, false, false, false, 0);
+    return selectGaMDExecutionMode(true,
+                                   true,
+                                   true,
+                                   true,
+                                   true,
+                                   false,
+                                   false,
+                                   false,
+                                   PressureCoupling::No,
+                                   PressureCouplingType::Isotropic,
+                                   0);
 }
 
 std::vector<std::vector<double>> readNumericRows(const std::filesystem::path& path)
@@ -378,8 +318,7 @@ TEST(GaMDTest, CurrentStepGpuCompatibilityAllowsGpuBondedAndGpuUpdate)
 
 TEST(GaMDTest, ResidentProductionEnergyStagesOnlyForHostConsumers)
 {
-    ScopedGaMDBufferedOutputEnvironment bufferedOutput(nullptr);
-    TestFileManager                     fileManager;
+    TestFileManager fileManager;
     const auto                          workDir =
             fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
@@ -419,8 +358,7 @@ TEST(GaMDTest, ResidentProductionEnergyStagesOnlyForHostConsumers)
 
 TEST(GaMDTest, BufferedProductionOutputDefersTextCadenceButNotCheckpointing)
 {
-    ScopedGaMDBufferedOutputEnvironment bufferedOutput("1");
-    TestFileManager                     fileManager;
+    TestFileManager fileManager;
     const auto                          workDir =
             fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
@@ -443,6 +381,7 @@ TEST(GaMDTest, BufferedProductionOutputDefersTextCadenceButNotCheckpointing)
     }
 
     gamdSetCheckpointingThisStep(false);
+    gamdSetBufferedProductionOutputEnabled(true);
     gamdPrepareStep(50, 0);
     EXPECT_TRUE(gamdBufferedProductionOutputEnabled());
     EXPECT_FALSE(gamdRequiresHostEnergyThisStep(50));
@@ -450,83 +389,104 @@ TEST(GaMDTest, BufferedProductionOutputDefersTextCadenceButNotCheckpointing)
     gamdSetCheckpointingThisStep(true);
     EXPECT_TRUE(gamdRequiresHostEnergyThisStep(51));
     gamdSetCheckpointingThisStep(false);
+    gamdSetBufferedProductionOutputEnabled(false);
 }
 
-TEST(GaMDTest, GaMDGpuExecutionModeDefaultsToCpuReference)
+TEST(GaMDTest, GaMDGpuExecutionModeSelectsResidentPathAutomatically)
 {
-    ScopedGaMDGpuEnvironment environment(nullptr);
-
-    EXPECT_EQ(GaMDExecutionMode::CpuReference, selectSupportedGaMDExecutionMode());
+    EXPECT_EQ(GaMDExecutionMode::GpuResident, selectSupportedGaMDExecutionMode());
 }
 
-TEST(GaMDTest, GaMDGpuExecutionModeCanBeForcedToCpuReference)
+TEST(GaMDTest, GaMDCpuUpdateSelectsCpuReference)
 {
-    ScopedGaMDGpuEnvironment environment("0");
-
     EXPECT_EQ(GaMDExecutionMode::CpuReference,
-              selectGaMDExecutionMode(true, false, false, false, false, true, true, true, true, 1));
+              selectGaMDExecutionMode(true,
+                                      false,
+                                      false,
+                                      false,
+                                      false,
+                                      true,
+                                      true,
+                                      true,
+                                      PressureCoupling::ParrinelloRahman,
+                                      PressureCouplingType::Anisotropic,
+                                      1));
 }
 
-TEST(GaMDTest, NonGaMDRunIgnoresGpuExecutionModeRequest)
+TEST(GaMDTest, NonGaMDGpuUpdateRetainsNormalExecutionMode)
 {
-    ScopedGaMDGpuEnvironment environment("invalid");
-
     EXPECT_EQ(GaMDExecutionMode::CpuReference,
-              selectGaMDExecutionMode(false, false, false, false, false, true, true, true, true, 1));
-}
-
-TEST(GaMDTest, GaMDGpuExecutionModeRejectsInvalidRequest)
-{
-    ScopedGaMDGpuEnvironment environment("true");
-
-    GMX_EXPECT_DEATH_IF_SUPPORTED(selectSupportedGaMDExecutionMode(),
-                                  "GMX_GAMD_GPU must be exactly 0 or 1");
+              selectGaMDExecutionMode(false,
+                                      false,
+                                      false,
+                                      false,
+                                      true,
+                                      true,
+                                      true,
+                                      true,
+                                      PressureCoupling::ParrinelloRahman,
+                                      PressureCouplingType::Anisotropic,
+                                      1));
 }
 
 #if GMX_GPU_CUDA
-TEST(GaMDTest, GaMDGpuExecutionModeSelectsScalarSynchronizedCudaPath)
+TEST(GaMDTest, GaMDGpuExecutionModeSelectsResidentCudaPath)
 {
-    ScopedGaMDGpuEnvironment environment("1");
-
-    EXPECT_EQ(GaMDExecutionMode::GpuScalarSynchronized, selectSupportedGaMDExecutionMode());
-    EXPECT_STREQ("GPU scalar-synchronized",
-                 gaMDExecutionModeName(GaMDExecutionMode::GpuScalarSynchronized));
+    EXPECT_EQ(GaMDExecutionMode::GpuResident, selectSupportedGaMDExecutionMode());
+    EXPECT_STREQ("GPU resident", gaMDExecutionModeName(GaMDExecutionMode::GpuResident));
 }
 
 TEST(GaMDTest, GaMDGpuExecutionModeRejectsUnsupportedWorkloads)
 {
-    ScopedGaMDGpuEnvironment environment("1");
-
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(true, false, true, true, true, false, false, false, false, 0),
+            selectGaMDExecutionMode(true, false, true, true, true, false, false, false,
+                                    PressureCoupling::No, PressureCouplingType::Isotropic, 0),
             "requires -nb gpu");
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(true, true, false, true, true, false, false, false, false, 0),
+            selectGaMDExecutionMode(true, true, false, true, true, false, false, false,
+                                    PressureCoupling::No, PressureCouplingType::Isotropic, 0),
             "requires -pme gpu");
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(true, true, true, false, true, false, false, false, false, 0),
+            selectGaMDExecutionMode(true, true, true, false, true, false, false, false,
+                                    PressureCoupling::No, PressureCouplingType::Isotropic, 0),
             "requires -bonded gpu");
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(true, true, true, true, false, false, false, false, false, 0),
-            "requires -update gpu");
-    GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(true, true, true, true, true, true, false, false, false, 0),
+            selectGaMDExecutionMode(true, true, true, true, true, true, false, false,
+                                    PressureCoupling::No, PressureCouplingType::Isotropic, 0),
             "without domain decomposition");
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(true, true, true, true, true, false, false, true, false, 0),
+            selectGaMDExecutionMode(true, true, true, true, true, false, false, true,
+                                    PressureCoupling::No, PressureCouplingType::Isotropic, 0),
             "does not support MTS");
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(true, true, true, true, true, false, false, false, true, 0),
-            "does not yet support pressure coupling");
+            selectGaMDExecutionMode(true, true, true, true, true, false, false, false,
+                                    PressureCoupling::ParrinelloRahman,
+                                    PressureCouplingType::Isotropic, 0),
+            "supports only no pressure coupling or C-rescale");
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(true, true, true, true, true, false, false, false, false, 10),
+            selectGaMDExecutionMode(true, true, true, true, true, false, false, false,
+                                    PressureCoupling::CRescale,
+                                    PressureCouplingType::Anisotropic, 0),
+            "supports only isotropic or semiisotropic");
+    GMX_EXPECT_DEATH_IF_SUPPORTED(
+            selectGaMDExecutionMode(true, true, true, true, true, false, false, false,
+                                    PressureCoupling::No, PressureCouplingType::Isotropic, 10),
             "requires nstfout=0");
+}
+
+TEST(GaMDTest, GaMDGpuExecutionModeAcceptsSupportedCRescaleTypes)
+{
+    for (const auto type : { PressureCouplingType::Isotropic,
+                             PressureCouplingType::SemiIsotropic })
+    {
+        EXPECT_EQ(GaMDExecutionMode::GpuResident,
+                  selectGaMDExecutionMode(true, true, true, true, true, false, false, false,
+                                          PressureCoupling::CRescale, type, 0));
+    }
 }
 #else
 TEST(GaMDTest, GaMDGpuExecutionModeRejectsNonCudaBuild)
 {
-    ScopedGaMDGpuEnvironment environment("1");
-
     GMX_EXPECT_DEATH_IF_SUPPORTED(selectSupportedGaMDExecutionMode(), "requires a CUDA build");
 }
 #endif

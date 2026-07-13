@@ -49,7 +49,6 @@ namespace gmx
 enum class GaMDExecutionMode
 {
     CpuReference,
-    GpuScalarSynchronized,
     GpuResident
 };
 
@@ -199,6 +198,8 @@ public:
     bool requireCpuForceBufferForPostProcessing = false;
     //! Current-step GaMD execution mode selected for this simulation.
     GaMDExecutionMode gamdExecutionMode = GaMDExecutionMode::CpuReference;
+    //! Whether the complete GPU-resident GaMD feature bundle is active.
+    bool useGpuResidentGaMD() const { return gamdExecutionMode == GaMDExecutionMode::GpuResident; }
     //! Whether filler particles are part of the local state
     bool haveFillerParticlesInLocalState = false;
     //! If PP domain decomposition is active.

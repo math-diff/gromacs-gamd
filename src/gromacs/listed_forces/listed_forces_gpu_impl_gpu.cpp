@@ -157,6 +157,7 @@ static int chooseSubGroupSizeForDevice(const DeviceInformation& deviceInfo)
 ListedForcesGpu::Impl::Impl(const gmx_ffparams_t& ffparams,
                             const float           electrostaticsScaleFactor,
                             const int             numEnergyGroupsForListedForces,
+                            const bool            useGpuResidentGaMD,
                             const DeviceContext&  deviceContext,
                             const DeviceStream&   deviceStream,
                             gmx_wallcycle*        wcycle) :
@@ -178,14 +179,9 @@ ListedForcesGpu::Impl::Impl(const gmx_ffparams_t& ffparams,
 #if GMX_GPU_CUDA
     gamdDihedralShadowEnabled_          = (std::getenv("GMX_GAMD_GPU_DIH_SHADOW") != nullptr);
     gamdEnergyShadowDiagnosticsEnabled_ = (std::getenv("GMX_GAMD_GPU_ENERGY_SHADOW") != nullptr);
-    const char* gamdGpuRequest          = std::getenv("GMX_GAMD_GPU");
-    gamdForceCorrectionEnabled_ = (gamdGpuRequest != nullptr && std::strcmp(gamdGpuRequest, "1") == 0);
-    const char* gamdScaleFromDeviceRequest = std::getenv("GMX_GAMD_GPU_SCALE_FROM_DEVICE");
-    gamdScaleFromDeviceEnabled_ = gamdForceCorrectionEnabled_ && gamdScaleFromDeviceRequest != nullptr
-                                  && std::strcmp(gamdScaleFromDeviceRequest, "1") == 0;
-    const char* gamdResidentEnergyRequest = std::getenv("GMX_GAMD_GPU_RESIDENT_ENERGY");
-    gamdEnergyHistoryEnabled_ = gamdScaleFromDeviceEnabled_ && gamdResidentEnergyRequest != nullptr
-                                && std::strcmp(gamdResidentEnergyRequest, "1") == 0;
+    gamdForceCorrectionEnabled_ = useGpuResidentGaMD;
+    gamdScaleFromDeviceEnabled_ = useGpuResidentGaMD;
+    gamdEnergyHistoryEnabled_   = useGpuResidentGaMD;
     gamdEnergyShadowEnabled_   = gamdEnergyShadowDiagnosticsEnabled_ || gamdScaleFromDeviceEnabled_;
     gamdDihedralBufferEnabled_ = gamdDihedralShadowEnabled_ || gamdForceCorrectionEnabled_;
     if (gamdForceCorrectionEnabled_)
@@ -446,7 +442,7 @@ void ListedForcesGpu::Impl::updateInteractionListsAndDeviceBuffers(ArrayRef<cons
         if (!idef.il[F_FOURDIHS].empty())
         {
             gmx_fatal(FARGS,
-                      "The GaMD GPU force path does not support FOURDIHS. Use GMX_GAMD_GPU=0 or "
+                      "The GaMD GPU force path does not support FOURDIHS. Use -update cpu or "
                       "add CUDA FOURDIHS support before using this topology.");
         }
         for (const int ftype : { F_PDIHS, F_RBDIHS, F_CMAP })
@@ -455,7 +451,7 @@ void ListedForcesGpu::Impl::updateInteractionListsAndDeviceBuffers(ArrayRef<cons
             {
                 gmx_fatal(FARGS,
                           "The GaMD GPU force path does not support perturbed %s interactions. "
-                          "Use GMX_GAMD_GPU=0 for this topology.",
+                          "Use -update cpu for this topology.",
                           interaction_function[ftype].longname);
             }
         }
@@ -749,10 +745,17 @@ GpuEventSynchronizer* ListedForcesGpu::Impl::gamdForcesReadyEvent()
 ListedForcesGpu::ListedForcesGpu(const gmx_ffparams_t& ffparams,
                                  const float           electrostaticsScaleFactor,
                                  const int             numEnergyGroupsForListedForces,
+                                 const bool            useGpuResidentGaMD,
                                  const DeviceContext&  deviceContext,
                                  const DeviceStream&   deviceStream,
                                  gmx_wallcycle*        wcycle) :
-    impl_(new Impl(ffparams, electrostaticsScaleFactor, numEnergyGroupsForListedForces, deviceContext, deviceStream, wcycle))
+    impl_(new Impl(ffparams,
+                   electrostaticsScaleFactor,
+                   numEnergyGroupsForListedForces,
+                   useGpuResidentGaMD,
+                   deviceContext,
+                   deviceStream,
+                   wcycle))
 {
 }
 

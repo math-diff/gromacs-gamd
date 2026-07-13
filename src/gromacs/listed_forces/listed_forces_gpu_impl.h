@@ -123,6 +123,7 @@ public:
     Impl(const gmx_ffparams_t& ffparams,
          float                 electrostaticsScaleFactor,
          int                   numEnergyGroupsForListedForces,
+         bool                  useGpuResidentGaMD,
          const DeviceContext&  deviceContext,
          const DeviceStream&   deviceStream,
          gmx_wallcycle*        wcycle);

@@ -74,6 +74,7 @@ class UpdateConstrainGpu::Impl
 UpdateConstrainGpu::UpdateConstrainGpu(const t_inputrec& /* ir   */,
                                        const gmx_mtop_t& /* mtop */,
                                        const int /* numTempScaleValues */,
+                                       const bool /* useGpuResidentGaMD */,
                                        const DeviceContext& /* deviceContext */,
                                        const DeviceStream& /* deviceStream */,
                                        gmx_wallcycle* /*wcycle*/) :

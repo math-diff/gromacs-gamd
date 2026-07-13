@@ -71,6 +71,7 @@ static int g_gamd_current_nodeid = 0;
 // Mirror the .cpt decision from md.cpp so GaMD restart state is written on the
 // same steps as checkpointing.
 static bool g_gamd_checkpointing_this_step = false;
+static bool g_gamd_buffered_production_output_enabled = false;
 
 static long g_gamd_suppressTextOutputStep = -1;
 
@@ -880,6 +881,7 @@ void gamdResetStateForTesting()
     g_gamd_force_production_restart = false;
     g_gamd_current_nodeid           = 0;
     g_gamd_checkpointing_this_step  = false;
+    g_gamd_buffered_production_output_enabled = false;
     g_gamd_suppressTextOutputStep   = -1;
     g_gamd_warnedScalePFloor        = false;
     g_gamd_warnedScaleDFloor        = false;
@@ -902,7 +904,6 @@ const char* gaMDExecutionModeName(GaMDExecutionMode mode)
     switch (mode)
     {
         case GaMDExecutionMode::CpuReference: return "CPU reference";
-        case GaMDExecutionMode::GpuScalarSynchronized: return "GPU scalar-synchronized";
         case GaMDExecutionMode::GpuResident: return "GPU resident";
     }
     return "unknown";
@@ -916,7 +917,8 @@ GaMDExecutionMode selectGaMDExecutionMode(bool useGaMD,
                                           bool havePpDomainDecomposition,
                                           bool haveSeparatePmeRank,
                                           bool useMts,
-                                          bool havePressureCoupling,
+                                          PressureCoupling pressureCoupling,
+                                          PressureCouplingType pressureCouplingType,
                                           int  nstfout)
 {
     if (!useGaMD)
@@ -924,60 +926,61 @@ GaMDExecutionMode selectGaMDExecutionMode(bool useGaMD,
         return GaMDExecutionMode::CpuReference;
     }
 
-    const char* request = std::getenv("GMX_GAMD_GPU");
-    if (request == nullptr || std::string(request) == "0")
+    // CPU update is the explicit GaMD reference path. GPU update requests the
+    // complete resident path; there are no independently selected partial modes.
+    if (!useGpuUpdate)
     {
         return GaMDExecutionMode::CpuReference;
-    }
-    if (std::string(request) != "1")
-    {
-        gmx_fatal(FARGS, "GMX_GAMD_GPU must be exactly 0 or 1; got '%s'.", request);
     }
 
     if (!GMX_GPU_CUDA)
     {
-        gmx_fatal(FARGS, "GMX_GAMD_GPU=1 currently requires a CUDA build.");
+        gmx_fatal(FARGS, "GPU-update GaMD currently requires a CUDA build.");
     }
     if (!useGpuNonbonded)
     {
-        gmx_fatal(FARGS, "GMX_GAMD_GPU=1 requires -nb gpu.");
+        gmx_fatal(FARGS, "GPU-update GaMD requires -nb gpu.");
     }
     if (!useGpuPme)
     {
-        gmx_fatal(FARGS, "GMX_GAMD_GPU=1 requires -pme gpu for the current production target.");
+        gmx_fatal(FARGS, "GPU-update GaMD requires -pme gpu for the current production target.");
     }
     if (!useGpuBonded)
     {
-        gmx_fatal(FARGS, "GMX_GAMD_GPU=1 requires -bonded gpu.");
-    }
-    if (!useGpuUpdate)
-    {
-        gmx_fatal(FARGS, "GMX_GAMD_GPU=1 requires -update gpu.");
+        gmx_fatal(FARGS, "GPU-update GaMD requires -bonded gpu.");
     }
     if (havePpDomainDecomposition || haveSeparatePmeRank)
     {
         gmx_fatal(FARGS,
-                  "GMX_GAMD_GPU=1 currently supports one PP rank without domain decomposition "
+                  "GPU-update GaMD currently supports one PP rank without domain decomposition "
                   "or a separate PME rank.");
     }
     if (useMts)
     {
-        gmx_fatal(FARGS, "GMX_GAMD_GPU=1 does not support MTS.");
+        gmx_fatal(FARGS, "GPU-update GaMD does not support MTS.");
     }
-    if (havePressureCoupling)
+    if (pressureCoupling != PressureCoupling::No && pressureCoupling != PressureCoupling::CRescale)
     {
         gmx_fatal(FARGS,
-                  "GMX_GAMD_GPU=1 does not yet support pressure coupling because device virial "
-                  "correction is not implemented.");
+                  "GPU-update GaMD supports only no pressure coupling or C-rescale pressure "
+                  "coupling.");
+    }
+    if (pressureCoupling == PressureCoupling::CRescale
+        && pressureCouplingType != PressureCouplingType::Isotropic
+        && pressureCouplingType != PressureCouplingType::SemiIsotropic)
+    {
+        gmx_fatal(FARGS,
+                  "GPU-update GaMD with C-rescale supports only isotropic or semiisotropic "
+                  "pressure coupling.");
     }
     if (nstfout != 0)
     {
         gmx_fatal(FARGS,
-                  "GMX_GAMD_GPU=1 currently requires nstfout=0 because corrected-force output "
+                  "GPU-update GaMD currently requires nstfout=0 because corrected-force output "
                   "staging is not implemented.");
     }
 
-    return GaMDExecutionMode::GpuScalarSynchronized;
+    return GaMDExecutionMode::GpuResident;
 }
 
 // ============================================================================
@@ -1654,8 +1657,12 @@ bool gamdRequiresHostEnergyThisStep(long step)
 
 bool gamdBufferedProductionOutputEnabled()
 {
-    const char* request = std::getenv("GMX_GAMD_GPU_BUFFERED_OUTPUT");
-    return request != nullptr && request[0] == '1' && request[1] == '\0';
+    return g_gamd_buffered_production_output_enabled;
+}
+
+void gamdSetBufferedProductionOutputEnabled(bool enabled)
+{
+    g_gamd_buffered_production_output_enabled = enabled;
 }
 
 void gamdWarnIfRunTooShort(int64_t initStep, int64_t nsteps, int nodeid)
