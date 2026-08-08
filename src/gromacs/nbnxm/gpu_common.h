@@ -272,7 +272,7 @@ bool gpu_try_finish_task(NbnxmGpu*           nb,
     // in current code as virial steps do CPU reduction.)
     const bool haveResultToWaitFor =
             (!stepWork.useGpuFBufferOps
-             || (aloc == AtomLocality::Local && (stepWork.computeEnergy || stepWork.computeVirial)));
+             || (aloc == AtomLocality::Local && stepWork.stageGpuEnergyAndVirialToHost));
 
     //  We skip when during the non-local phase there was actually no work to do.
     //  This is consistent with nbnxn_gpu_launch_kernel but it also considers possible
@@ -300,7 +300,7 @@ bool gpu_try_finish_task(NbnxmGpu*           nb,
         gpu_accumulate_timings(
                 nb->timings, nb->timers, nb->plist[iLocality].get(), aloc, stepWork, nb->bDoTime);
 
-        if (stepWork.computeEnergy || stepWork.computeVirial)
+        if (stepWork.stageGpuEnergyAndVirialToHost)
         {
             gpu_reduce_staged_outputs(nb->nbst,
                                       iLocality,

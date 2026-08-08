@@ -51,8 +51,12 @@
 
 #include <cassert>
 
+#include <algorithm>
+
 #include "gromacs/gpu_utils/cuda_arch_utils.cuh"
 #include "gromacs/gpu_utils/cudautils.cuh"
+#include "gromacs/gpu_utils/devicebuffer.h"
+#include "gromacs/gpu_utils/gpueventsynchronizer.h"
 #include "gromacs/gpu_utils/typecasts_cuda_hip.h"
 #include "gromacs/gpu_utils/vectype_ops_cuda.h"
 #include "gromacs/listed_forces/listed_forces_gpu.h"
@@ -64,6 +68,7 @@
 #include "gromacs/timing/wallcycle.h"
 #include "gromacs/utility/gmxassert.h"
 
+#include "gamd_scale_gpu.h"
 #include "listed_forces_gpu_impl.h"
 
 #if defined(_MSVC)
@@ -440,7 +445,7 @@ dopdihs_gpu(const float cpA, const float phiA, const int mult, const float phi, 
     *f    = -cpA * mult * sdphi;
 }
 
-template<bool calcVir>
+template<bool calcVir, bool accumulateGamdDihedral>
 __device__ __forceinline__ static void do_dih_fup_gpu(const int      i,
                                                       const int      j,
                                                       const int      k,
@@ -453,6 +458,8 @@ __device__ __forceinline__ static void do_dih_fup_gpu(const int      i,
                                                       const float3   n,
                                                       float3         gm_f[],
                                                       float3         sm_fShiftLoc[],
+                                                      float3         gm_gamdDihedralF[],
+                                                      float3         sm_gamdDihedralFShiftLoc[],
                                                       const PbcAiuc& pbcAiuc,
                                                       const float4   gm_xq[],
                                                       const int      t1,
@@ -486,6 +493,14 @@ __device__ __forceinline__ static void do_dih_fup_gpu(const int      i,
         staggeredAtomicAddForce(&gm_f[k], -f_k);
         staggeredAtomicAddForce(&gm_f[l], f_l);
 
+        if constexpr (accumulateGamdDihedral)
+        {
+            staggeredAtomicAddForce(&gm_gamdDihedralF[i], f_i);
+            staggeredAtomicAddForce(&gm_gamdDihedralF[j], -f_j);
+            staggeredAtomicAddForce(&gm_gamdDihedralF[k], -f_k);
+            staggeredAtomicAddForce(&gm_gamdDihedralF[l], f_l);
+        }
+
         if (calcVir)
         {
             float3 dx_jl;
@@ -495,11 +510,18 @@ __device__ __forceinline__ static void do_dih_fup_gpu(const int      i,
             staggeredAtomicAddForce(&sm_fShiftLoc[gmx::c_centralShiftIndex], -f_j);
             staggeredAtomicAddForce(&sm_fShiftLoc[t2], -f_k);
             staggeredAtomicAddForce(&sm_fShiftLoc[t3], f_l);
+            if constexpr (accumulateGamdDihedral)
+            {
+                staggeredAtomicAddForce(&sm_gamdDihedralFShiftLoc[t1], f_i);
+                staggeredAtomicAddForce(&sm_gamdDihedralFShiftLoc[gmx::c_centralShiftIndex], -f_j);
+                staggeredAtomicAddForce(&sm_gamdDihedralFShiftLoc[t2], -f_k);
+                staggeredAtomicAddForce(&sm_gamdDihedralFShiftLoc[t3], f_l);
+            }
         }
     }
 }
 
-template<bool calcVir, bool calcEner>
+template<bool calcVir, bool calcEner, bool accumulateGamdDihedral>
 __device__ __forceinline__ void pdihs_gpu(const int i,
                                           float*    vtot_loc,
 
@@ -508,6 +530,8 @@ __device__ __forceinline__ void pdihs_gpu(const int i,
                                           const float4    gm_xq[],
                                           float3          gm_f[],
                                           float3          sm_fShiftLoc[],
+                                          float3          gm_gamdDihedralF[],
+                                          float3          sm_gamdDihedralFShiftLoc[],
                                           const PbcAiuc   pbcAiuc)
 {
     int type = d_forceatoms[5 * i];
@@ -541,11 +565,27 @@ __device__ __forceinline__ void pdihs_gpu(const int i,
         *vtot_loc += vpd;
     }
 
-    do_dih_fup_gpu<calcVir>(
-            ai, aj, ak, al, ddphi, r_ij, r_kj, r_kl, m, n, gm_f, sm_fShiftLoc, pbcAiuc, gm_xq, t1, t2);
+    do_dih_fup_gpu<calcVir, accumulateGamdDihedral>(ai,
+                                                    aj,
+                                                    ak,
+                                                    al,
+                                                    ddphi,
+                                                    r_ij,
+                                                    r_kj,
+                                                    r_kl,
+                                                    m,
+                                                    n,
+                                                    gm_f,
+                                                    sm_fShiftLoc,
+                                                    gm_gamdDihedralF,
+                                                    sm_gamdDihedralFShiftLoc,
+                                                    pbcAiuc,
+                                                    gm_xq,
+                                                    t1,
+                                                    t2);
 }
 
-template<bool calcVir, bool calcEner>
+template<bool calcVir, bool calcEner, bool accumulateGamdDihedral>
 __device__ __forceinline__ void rbdihs_gpu(const int i,
                                            float*    vtot_loc,
 
@@ -554,6 +594,8 @@ __device__ __forceinline__ void rbdihs_gpu(const int i,
                                            const float4    gm_xq[],
                                            float3          gm_f[],
                                            float3          sm_fShiftLoc[],
+                                           float3          gm_gamdDihedralF[],
+                                           float3          sm_gamdDihedralFShiftLoc[],
                                            const PbcAiuc   pbcAiuc)
 {
     constexpr float c0 = 0.0F, c1 = 1.0F, c2 = 2.0F, c3 = 3.0F, c4 = 4.0F, c5 = 5.0F;
@@ -629,8 +671,24 @@ __device__ __forceinline__ void rbdihs_gpu(const int i,
 
     ddphi = ddphi * negative_sin_phi;
 
-    do_dih_fup_gpu<calcVir>(
-            ai, aj, ak, al, ddphi, r_ij, r_kj, r_kl, m, n, gm_f, sm_fShiftLoc, pbcAiuc, gm_xq, t1, t2);
+    do_dih_fup_gpu<calcVir, accumulateGamdDihedral>(ai,
+                                                    aj,
+                                                    ak,
+                                                    al,
+                                                    ddphi,
+                                                    r_ij,
+                                                    r_kj,
+                                                    r_kl,
+                                                    m,
+                                                    n,
+                                                    gm_f,
+                                                    sm_fShiftLoc,
+                                                    gm_gamdDihedralF,
+                                                    sm_gamdDihedralFShiftLoc,
+                                                    pbcAiuc,
+                                                    gm_xq,
+                                                    t1,
+                                                    t2);
     if (calcEner)
     {
         *vtot_loc += v;
@@ -648,6 +706,126 @@ __device__ __forceinline__ static void make_dp_periodic_gpu(float* dp)
     {
         *dp += 2.0F * CUDART_PI_F;
     }
+}
+
+template<bool calcVir, bool calcEner, bool accumulateGamdDihedral>
+__device__ __forceinline__ void cmap_gpu(const int i,
+                                         float*    vtot_loc,
+
+                                         const t_iatom   d_forceatoms[],
+                                         const t_iparams d_forceparams[],
+                                         const float*    d_cmapCoefficients,
+                                         const int       gridSpacing,
+                                         const int       coefficientsPerMap,
+                                         const float4    gm_xq[],
+                                         float3          gm_f[],
+                                         float3          sm_fShiftLoc[],
+                                         float3          gm_gamdDihedralF[],
+                                         float3          sm_gamdDihedralFShiftLoc[],
+                                         const PbcAiuc   pbcAiuc)
+{
+    constexpr int c_numCoefficients = 16;
+    const int     type              = d_forceatoms[6 * i];
+    const int     ai                = d_forceatoms[6 * i + 1];
+    const int     aj                = d_forceatoms[6 * i + 2];
+    const int     ak                = d_forceatoms[6 * i + 3];
+    const int     al                = d_forceatoms[6 * i + 4];
+    const int     am                = d_forceatoms[6 * i + 5];
+
+    float3      r1_ij, r1_kj, r1_kl, m1, n1;
+    float3      r2_ij, r2_kj, r2_kl, m2, n2;
+    int         t11, t21, t31, t12, t22, t32;
+    const float phi1 = dih_angle_gpu<calcVir>(
+            gm_xq[ai], gm_xq[aj], gm_xq[ak], gm_xq[al], pbcAiuc, &r1_ij, &r1_kj, &r1_kl, &m1, &n1, &t11, &t21, &t31);
+    const float phi2 = dih_angle_gpu<calcVir>(
+            gm_xq[aj], gm_xq[ak], gm_xq[al], gm_xq[am], pbcAiuc, &r2_ij, &r2_kj, &r2_kl, &m2, &n2, &t12, &t22, &t32);
+
+    const float twoPi = 2.0F * CUDART_PI_F;
+    float       xphi1 = phi1 + CUDART_PI_F;
+    float       xphi2 = phi2 + CUDART_PI_F;
+    if (xphi1 >= twoPi)
+    {
+        xphi1 -= twoPi;
+    }
+    if (xphi2 >= twoPi)
+    {
+        xphi2 -= twoPi;
+    }
+
+    constexpr float c_rad2DegFloat   = 180.0F / CUDART_PI_F;
+    const float     gridWidthRadians = twoPi / gridSpacing;
+    const int       iphi1            = static_cast<int>(xphi1 / gridWidthRadians);
+    const int       iphi2            = static_cast<int>(xphi2 / gridWidthRadians);
+    const float     gridWidthDegrees = 360.0F / gridSpacing;
+    const float     xphi1Degrees     = xphi1 * c_rad2DegFloat;
+    const float     xphi2Degrees     = xphi2 * c_rad2DegFloat;
+    const float     tt               = (xphi1Degrees - iphi1 * gridWidthDegrees) / gridWidthDegrees;
+    const float     tu               = (xphi2Degrees - iphi2 * gridWidthDegrees) / gridWidthDegrees;
+
+    const int cmapMap = d_forceparams[type].cmap.cmapA;
+    const int cell    = iphi1 * gridSpacing + iphi2;
+    const float* coefficients = d_cmapCoefficients + cmapMap * coefficientsPerMap + cell * c_numCoefficients;
+
+    float energy = 0.0F;
+    float df1    = 0.0F;
+    float df2    = 0.0F;
+    for (int row = 3; row >= 0; --row)
+    {
+        energy = tt * energy
+                 + ((coefficients[row * 4 + 3] * tu + coefficients[row * 4 + 2]) * tu
+                    + coefficients[row * 4 + 1])
+                           * tu
+                 + coefficients[row * 4];
+        df1 = tu * df1 + (3.0F * coefficients[row + 12] * tt + 2.0F * coefficients[row + 8]) * tt
+              + coefficients[row + 4];
+        df2 = tt * df2 + (3.0F * coefficients[row * 4 + 3] * tu + 2.0F * coefficients[row * 4 + 2]) * tu
+              + coefficients[row * 4 + 1];
+    }
+
+    const float derivativeScale = c_rad2DegFloat / gridWidthDegrees;
+    df1 *= derivativeScale;
+    df2 *= derivativeScale;
+
+    if (calcEner)
+    {
+        *vtot_loc += energy;
+    }
+    do_dih_fup_gpu<calcVir, accumulateGamdDihedral>(ai,
+                                                    aj,
+                                                    ak,
+                                                    al,
+                                                    df1,
+                                                    r1_ij,
+                                                    r1_kj,
+                                                    r1_kl,
+                                                    m1,
+                                                    n1,
+                                                    gm_f,
+                                                    sm_fShiftLoc,
+                                                    gm_gamdDihedralF,
+                                                    sm_gamdDihedralFShiftLoc,
+                                                    pbcAiuc,
+                                                    gm_xq,
+                                                    t11,
+                                                    t21);
+    do_dih_fup_gpu<calcVir, accumulateGamdDihedral>(aj,
+                                                    ak,
+                                                    al,
+                                                    am,
+                                                    df2,
+                                                    r2_ij,
+                                                    r2_kj,
+                                                    r2_kl,
+                                                    m2,
+                                                    n2,
+                                                    gm_f,
+                                                    sm_fShiftLoc,
+                                                    gm_gamdDihedralF,
+                                                    sm_gamdDihedralFShiftLoc,
+                                                    pbcAiuc,
+                                                    gm_xq,
+                                                    t12,
+                                                    t22);
 }
 
 template<bool calcVir, bool calcEner>
@@ -696,8 +874,8 @@ __device__ __forceinline__ void idihs_gpu(const int i,
 
     float ddphi = -kA * dp;
 
-    do_dih_fup_gpu<calcVir>(
-            ai, aj, ak, al, -ddphi, r_ij, r_kj, r_kl, m, n, gm_f, sm_fShiftLoc, pbcAiuc, gm_xq, t1, t2);
+    do_dih_fup_gpu<calcVir, false>(
+            ai, aj, ak, al, -ddphi, r_ij, r_kj, r_kl, m, n, gm_f, sm_fShiftLoc, nullptr, nullptr, pbcAiuc, gm_xq, t1, t2);
 
     if (calcEner)
     {
@@ -765,12 +943,14 @@ __device__ __forceinline__ void pairs_gpu(const int i,
 namespace gmx
 {
 
-template<bool calcVir, bool calcEner>
+template<bool calcVir, bool calcEner, bool accumulateGamdDihedral>
 __global__ void bonded_kernel_gpu(BondedGpuKernelParameters kernelParams,
                                   BondedGpuKernelBuffers    kernelBuffers,
                                   float4*                   gm_xq,
                                   float3*                   gm_f,
-                                  float3*                   gm_fShift)
+                                  float3*                   gm_fShift,
+                                  float3*                   gm_gamdDihedralF,
+                                  float3*                   gm_gamdDihedralFShift)
 {
     assert(blockDim.y == 1 && blockDim.z == 1);
     const int tid          = blockIdx.x * blockDim.x + threadIdx.x;
@@ -781,12 +961,17 @@ __global__ void bonded_kernel_gpu(BondedGpuKernelParameters kernelParams,
     char*                  sm_nextSlotPtr = sm_dynamicShmem;
     float3*                sm_fShiftLoc   = reinterpret_cast<float3*>(sm_nextSlotPtr);
     sm_nextSlotPtr += c_numShiftVectors * sizeof(float3);
+    float3* sm_gamdDihedralFShiftLoc = reinterpret_cast<float3*>(sm_nextSlotPtr);
 
     if (calcVir)
     {
         if (threadIdx.x < c_numShiftVectors)
         {
             sm_fShiftLoc[threadIdx.x] = make_float3(0.0F, 0.0F, 0.0F);
+            if constexpr (accumulateGamdDihedral)
+            {
+                sm_gamdDihedralFShiftLoc[threadIdx.x] = make_float3(0.0F, 0.0F, 0.0F);
+            }
         }
         __syncthreads();
     }
@@ -846,25 +1031,40 @@ __global__ void bonded_kernel_gpu(BondedGpuKernelParameters kernelParams,
                                                         kernelParams.pbcAiuc);
                     break;
                 case F_PDIHS:
+                    pdihs_gpu<calcVir, calcEner, accumulateGamdDihedral>(fTypeTid,
+                                                                         &vtot_loc,
+                                                                         iatoms,
+                                                                         kernelBuffers.d_forceParams,
+                                                                         gm_xq,
+                                                                         gm_f,
+                                                                         sm_fShiftLoc,
+                                                                         gm_gamdDihedralF,
+                                                                         sm_gamdDihedralFShiftLoc,
+                                                                         kernelParams.pbcAiuc);
+                    break;
                 case F_PIDIHS:
-                    pdihs_gpu<calcVir, calcEner>(fTypeTid,
-                                                 &vtot_loc,
-                                                 iatoms,
-                                                 kernelBuffers.d_forceParams,
-                                                 gm_xq,
-                                                 gm_f,
-                                                 sm_fShiftLoc,
-                                                 kernelParams.pbcAiuc);
+                    pdihs_gpu<calcVir, calcEner, false>(fTypeTid,
+                                                        &vtot_loc,
+                                                        iatoms,
+                                                        kernelBuffers.d_forceParams,
+                                                        gm_xq,
+                                                        gm_f,
+                                                        sm_fShiftLoc,
+                                                        nullptr,
+                                                        nullptr,
+                                                        kernelParams.pbcAiuc);
                     break;
                 case F_RBDIHS:
-                    rbdihs_gpu<calcVir, calcEner>(fTypeTid,
-                                                  &vtot_loc,
-                                                  iatoms,
-                                                  kernelBuffers.d_forceParams,
-                                                  gm_xq,
-                                                  gm_f,
-                                                  sm_fShiftLoc,
-                                                  kernelParams.pbcAiuc);
+                    rbdihs_gpu<calcVir, calcEner, accumulateGamdDihedral>(fTypeTid,
+                                                                          &vtot_loc,
+                                                                          iatoms,
+                                                                          kernelBuffers.d_forceParams,
+                                                                          gm_xq,
+                                                                          gm_f,
+                                                                          sm_fShiftLoc,
+                                                                          gm_gamdDihedralF,
+                                                                          sm_gamdDihedralFShiftLoc,
+                                                                          kernelParams.pbcAiuc);
                     break;
                 case F_IDIHS:
                     idihs_gpu<calcVir, calcEner>(fTypeTid,
@@ -875,6 +1075,21 @@ __global__ void bonded_kernel_gpu(BondedGpuKernelParameters kernelParams,
                                                  gm_f,
                                                  sm_fShiftLoc,
                                                  kernelParams.pbcAiuc);
+                    break;
+                case F_CMAP:
+                    cmap_gpu<calcVir, calcEner, accumulateGamdDihedral>(fTypeTid,
+                                                                        &vtot_loc,
+                                                                        iatoms,
+                                                                        kernelBuffers.d_forceParams,
+                                                                        kernelBuffers.d_cmapCoefficients,
+                                                                        kernelParams.cmapGridSpacing,
+                                                                        kernelParams.cmapCoefficientsPerMap,
+                                                                        gm_xq,
+                                                                        gm_f,
+                                                                        sm_fShiftLoc,
+                                                                        gm_gamdDihedralF,
+                                                                        sm_gamdDihedralFShiftLoc,
+                                                                        kernelParams.pbcAiuc);
                     break;
                 case F_LJ14:
                     pairs_gpu<calcVir, calcEner>(fTypeTid,
@@ -928,7 +1143,232 @@ __global__ void bonded_kernel_gpu(BondedGpuKernelParameters kernelParams,
         if (threadIdx.x < c_numShiftVectors)
         {
             staggeredAtomicAddForce(&gm_fShift[threadIdx.x], sm_fShiftLoc[threadIdx.x]);
+            if constexpr (accumulateGamdDihedral)
+            {
+                staggeredAtomicAddForce(&gm_gamdDihedralFShift[threadIdx.x],
+                                        sm_gamdDihedralFShiftLoc[threadIdx.x]);
+            }
         }
+    }
+}
+
+__global__ void mapNbnxnToStateForceKernel(const int     numAtoms,
+                                           const int*    gm_nbnxnAtomOrder,
+                                           const float3* gm_nbnxnForce,
+                                           float3*       gm_stateForce)
+{
+    const int atom = blockIdx.x * blockDim.x + threadIdx.x;
+    if (atom < numAtoms)
+    {
+        gm_stateForce[atom] = gm_nbnxnForce[gm_nbnxnAtomOrder[atom]];
+    }
+}
+
+__global__ void reduceGamdRawEnergiesKernel(const float* gm_nbLJEnergy,
+                                            const float* gm_nbElecEnergy,
+                                            const float* gm_pmeEnergy,
+                                            const float* gm_listedEnergies,
+                                            float*       gm_gamdEnergies)
+{
+    if (blockIdx.x == 0 && threadIdx.x == 0)
+    {
+        float totalEnergy = 0.0F;
+        for (int fType = 0; fType < F_EPOT; ++fType)
+        {
+            if (fType != F_DISRESVIOL && fType != F_ORIRESDEV)
+            {
+                float energy = gm_listedEnergies[fType];
+                if (fType == F_COUL_SR)
+                {
+                    energy = gm_nbElecEnergy[0];
+                }
+                else if (fType == F_LJ)
+                {
+                    energy = gm_nbLJEnergy[0];
+                }
+                else if (fType == F_COUL_RECIP)
+                {
+                    energy = gm_pmeEnergy[0];
+                }
+                totalEnergy += energy;
+            }
+        }
+
+        const float dihedralEnergy = gm_listedEnergies[F_PDIHS] + gm_listedEnergies[F_RBDIHS]
+                                     + gm_listedEnergies[F_FOURDIHS] + gm_listedEnergies[F_CMAP];
+        gm_gamdEnergies[0] = totalEnergy;
+        gm_gamdEnergies[1] = dihedralEnergy;
+    }
+}
+
+__global__ void recordGamdEnergySampleKernel(const float* gm_nbLJEnergy,
+                                             const float* gm_nbElecEnergy,
+                                             const float* gm_pmeEnergy,
+                                             const float* gm_listedEnergies,
+                                             const float* gm_gamdState,
+                                             int*         gm_historyCount,
+                                             const int    historyCapacity,
+                                             float*       gm_energyHistory)
+{
+    if (blockIdx.x == 0 && threadIdx.x == 0)
+    {
+        const int sampleIndex = atomicAdd(gm_historyCount, 1);
+        if (sampleIndex >= historyCapacity)
+        {
+            return;
+        }
+        float* sample = gm_energyHistory + sampleIndex * F_NRE;
+        for (int fType = 0; fType < F_NRE; ++fType)
+        {
+            sample[fType] = 0.0F;
+        }
+        for (int fType = 0; fType < F_EPOT; ++fType)
+        {
+            float energy = gm_listedEnergies[fType];
+            if (fType == F_COUL_SR)
+            {
+                energy = gm_nbElecEnergy[0];
+            }
+            else if (fType == F_LJ)
+            {
+                energy = gm_nbLJEnergy[0];
+            }
+            else if (fType == F_COUL_RECIP)
+            {
+                energy = gm_pmeEnergy[0];
+            }
+            sample[fType] = energy;
+        }
+        sample[F_EPOT] = gm_gamdState[0] + gm_gamdState[4] + gm_gamdState[5];
+    }
+}
+
+__global__ void recordGamdForceVirialSampleKernel(const float* gm_shortRangeVirial,
+                                                  const float* gm_dihedralVirial,
+                                                  const float* gm_pmeEnergyAndVirial,
+                                                  const float* gm_gamdState,
+                                                  const int*   gm_historyCount,
+                                                  const int    historyCapacity,
+                                                  float*       gm_forceVirialHistory)
+{
+    if (blockIdx.x == 0 && threadIdx.x == 0)
+    {
+        const int sampleIndex = gm_historyCount[0] - 1;
+        if (sampleIndex < 0 || sampleIndex >= historyCapacity)
+        {
+            return;
+        }
+        const float scaleP                  = gm_gamdState[2];
+        const float dihedralCorrectionScale = scaleP * (gm_gamdState[3] - 1.0F);
+        float*      sample                  = gm_forceVirialHistory + sampleIndex * DIM * DIM;
+        for (int component = 0; component < DIM * DIM; ++component)
+        {
+            sample[component] =
+                    scaleP * (gm_shortRangeVirial[component] + gm_pmeEnergyAndVirial[1 + component])
+                    + dihedralCorrectionScale * gm_dihedralVirial[component];
+        }
+    }
+}
+
+__global__ void gamdForceCorrectionShadowKernel(const int     numAtoms,
+                                                const float   totalScale,
+                                                const float   dihedralCorrectionScale,
+                                                const float*  gm_gamdState,
+                                                const bool    useDeviceScale,
+                                                const float3* gm_dihedralForce,
+                                                float3*       gm_force)
+{
+    const int atom = blockIdx.x * blockDim.x + threadIdx.x;
+    if (atom < numAtoms)
+    {
+        const float appliedTotalScale = useDeviceScale ? gm_gamdState[2] : totalScale;
+        const float appliedDihedralCorrectionScale =
+                useDeviceScale ? gm_gamdState[2] * (gm_gamdState[3] - 1.0F) : dihedralCorrectionScale;
+        const float3 rawForce      = gm_force[atom];
+        const float3 dihedralForce = gm_dihedralForce[atom];
+        gm_force[atom]             = make_float3(
+                appliedTotalScale * rawForce.x + appliedDihedralCorrectionScale * dihedralForce.x,
+                appliedTotalScale * rawForce.y + appliedDihedralCorrectionScale * dihedralForce.y,
+                appliedTotalScale * rawForce.z + appliedDihedralCorrectionScale * dihedralForce.z);
+    }
+}
+
+__global__ void reduceGamdDihedralVirialKernel(const int     numAtoms,
+                                               const float4* gm_xq,
+                                               const float3* gm_dihedralForce,
+                                               const float3* gm_dihedralShiftForce,
+                                               const PbcAiuc pbcAiuc,
+                                               float*        gm_virial)
+{
+    const int index                  = blockIdx.x * blockDim.x + threadIdx.x;
+    float     localVirial[DIM * DIM] = {};
+    if (index < numAtoms)
+    {
+        const float4 x = gm_xq[index];
+        const float3 f = gm_dihedralForce[index];
+        localVirial[0] = -0.5F * x.x * f.x;
+        localVirial[1] = -0.5F * x.x * f.y;
+        localVirial[2] = -0.5F * x.x * f.z;
+        localVirial[3] = -0.5F * x.y * f.x;
+        localVirial[4] = -0.5F * x.y * f.y;
+        localVirial[5] = -0.5F * x.y * f.z;
+        localVirial[6] = -0.5F * x.z * f.x;
+        localVirial[7] = -0.5F * x.z * f.y;
+        localVirial[8] = -0.5F * x.z * f.z;
+    }
+    if (index < gmx::c_numShiftVectors)
+    {
+        constexpr int c_nBoxX = 2 * gmx::c_dBoxX + 1;
+        constexpr int c_nBoxY = 2 * gmx::c_dBoxY + 1;
+        const int     sx      = index % c_nBoxX - gmx::c_dBoxX;
+        const int     yzIndex = index / c_nBoxX;
+        const int     sy      = yzIndex % c_nBoxY - gmx::c_dBoxY;
+        const int     sz      = yzIndex / c_nBoxY - gmx::c_dBoxZ;
+        const float3 shift = make_float3(sx * pbcAiuc.boxXX + sy * pbcAiuc.boxYX + sz * pbcAiuc.boxZX,
+                                         sy * pbcAiuc.boxYY + sz * pbcAiuc.boxZY,
+                                         sz * pbcAiuc.boxZZ);
+        const float3 f = gm_dihedralShiftForce[index];
+        localVirial[0] += -0.5F * shift.x * f.x;
+        localVirial[1] += -0.5F * shift.x * f.y;
+        localVirial[2] += -0.5F * shift.x * f.z;
+        localVirial[3] += -0.5F * shift.y * f.x;
+        localVirial[4] += -0.5F * shift.y * f.y;
+        localVirial[5] += -0.5F * shift.y * f.z;
+        localVirial[6] += -0.5F * shift.z * f.x;
+        localVirial[7] += -0.5F * shift.z * f.y;
+        localVirial[8] += -0.5F * shift.z * f.z;
+    }
+
+    const unsigned int activeMask = __activemask();
+    for (int offset = warpSize / 2; offset > 0; offset /= 2)
+    {
+        for (float& component : localVirial)
+        {
+            component += __shfl_down_sync(activeMask, component, offset);
+        }
+    }
+
+    extern __shared__ float sm_warpVirial[];
+    const int               lane = threadIdx.x % warpSize;
+    const int               warp = threadIdx.x / warpSize;
+    if (lane == 0)
+    {
+        for (int component = 0; component < DIM * DIM; ++component)
+        {
+            sm_warpVirial[warp * DIM * DIM + component] = localVirial[component];
+        }
+    }
+    __syncthreads();
+
+    const int numWarps = blockDim.x / warpSize;
+    if (threadIdx.x < DIM * DIM)
+    {
+        float blockVirial = 0.0F;
+        for (int warpIndex = 0; warpIndex < numWarps; ++warpIndex)
+        {
+            blockVirial += sm_warpVirial[warpIndex * DIM * DIM + threadIdx.x];
+        }
+        atomicAdd(&gm_virial[threadIdx.x], blockVirial);
     }
 }
 
@@ -952,20 +1392,360 @@ void ListedForcesGpu::Impl::launchKernel()
         return;
     }
 
-    auto kernelPtr = bonded_kernel_gpu<calcVir, calcEner>;
+    if (gamdDihedralBufferEnabled_)
+    {
+        clearDeviceBufferAsync(&d_gamdDihedralForcesNbnxn_, 0, gamdNbnxnForceSize_, deviceStream_);
+        clearDeviceBufferAsync(&d_gamdDihedralShiftForces_, 0, c_numShiftVectors, deviceStream_);
+    }
 
-    const auto kernelArgs = prepareGpuKernelArguments(
-            kernelPtr, kernelLaunchConfig_, &kernelParams_, &kernelBuffers_, &d_xq_, &d_f_, &d_fShift_);
+    auto kernelPtr = gamdDihedralBufferEnabled_ ? bonded_kernel_gpu<calcVir, calcEner, true>
+                                                : bonded_kernel_gpu<calcVir, calcEner, false>;
+    KernelLaunchConfig launchConfig = kernelLaunchConfig_;
+    if (gamdDihedralBufferEnabled_ && calcVir)
+    {
+        launchConfig.sharedMemorySize += c_numShiftVectors * sizeof(Float3);
+    }
 
-    launchGpuKernel(kernelPtr,
-                    kernelLaunchConfig_,
-                    deviceStream_,
-                    nullptr,
-                    "bonded_kernel_gpu<calcVir, calcEner>",
-                    kernelArgs);
+    const auto kernelArgs = prepareGpuKernelArguments(kernelPtr,
+                                                      launchConfig,
+                                                      &kernelParams_,
+                                                      &kernelBuffers_,
+                                                      &d_xq_,
+                                                      &d_f_,
+                                                      &d_fShift_,
+                                                      &d_gamdDihedralForcesNbnxn_,
+                                                      &d_gamdDihedralShiftForces_);
+
+    launchGpuKernel(
+            kernelPtr, launchConfig, deviceStream_, nullptr, "bonded_kernel_gpu<calcVir, calcEner>", kernelArgs);
 
     wallcycle_sub_stop(wcycle_, WallCycleSubCounter::LaunchGpuBonded);
     wallcycle_stop(wcycle_, WallCycleCounter::LaunchGpuPp);
+}
+
+void ListedForcesGpu::Impl::finishGamdDihedralBuffers()
+{
+    GMX_ASSERT(gamdDihedralBufferEnabled_, "GaMD dihedral buffers requested while disabled");
+    GMX_ASSERT(d_gamdDihedralForcesNbnxn_ != nullptr && d_gamdDihedralForcesState_ != nullptr
+                       && d_nbnxnAtomOrder_ != nullptr,
+               "GaMD dihedral buffers have not been initialized");
+
+    wallcycle_start_nocount(wcycle_, WallCycleCounter::LaunchGpuPp);
+    wallcycle_sub_start(wcycle_, WallCycleSubCounter::LaunchGpuBonded);
+
+    constexpr int      c_mappingThreadsPerBlock = 256;
+    KernelLaunchConfig mappingConfig;
+    mappingConfig.blockSize[0] = c_mappingThreadsPerBlock;
+    mappingConfig.blockSize[1] = 1;
+    mappingConfig.blockSize[2] = 1;
+    mappingConfig.gridSize[0] =
+            (gamdStateForceSize_ + c_mappingThreadsPerBlock - 1) / c_mappingThreadsPerBlock;
+    mappingConfig.gridSize[1]      = 1;
+    mappingConfig.gridSize[2]      = 1;
+    mappingConfig.sharedMemorySize = 0;
+
+    auto       mappingKernel     = mapNbnxnToStateForceKernel;
+    const auto mappingKernelArgs = prepareGpuKernelArguments(mappingKernel,
+                                                             mappingConfig,
+                                                             &gamdStateForceSize_,
+                                                             &d_nbnxnAtomOrder_,
+                                                             &d_gamdDihedralForcesNbnxn_,
+                                                             &d_gamdDihedralForcesState_);
+    launchGpuKernel(mappingKernel,
+                    mappingConfig,
+                    deviceStream_,
+                    nullptr,
+                    "Map GaMD dihedral forces to state order",
+                    mappingKernelArgs);
+
+    launchGamdVirialReductionKernel(d_gamdDihedralForcesNbnxn_,
+                                    d_gamdDihedralShiftForces_,
+                                    &d_gamdDihedralVirial_,
+                                    "Reduce GaMD dihedral virial");
+
+    wallcycle_sub_stop(wcycle_, WallCycleSubCounter::LaunchGpuBonded);
+    wallcycle_stop(wcycle_, WallCycleCounter::LaunchGpuPp);
+}
+
+DeviceBuffer<float> ListedForcesGpu::Impl::gamdPmeEnergyStagingBuffer()
+{
+    GMX_ASSERT(gamdEnergyShadowEnabled_, "GaMD device energy shadow requested while disabled");
+    return d_gamdPmeEnergy_;
+}
+
+GpuEventSynchronizer* ListedForcesGpu::Impl::gamdPmeEnergyReadyEvent()
+{
+    GMX_ASSERT(gamdPmeEnergyReadyEvent_ != nullptr,
+               "GaMD PME energy event requested while device energy shadow is disabled");
+    return gamdPmeEnergyReadyEvent_.get();
+}
+
+void ListedForcesGpu::Impl::launchGamdEnergyShadowReduction(int    igamd,
+                                                            int    stage,
+                                                            double thresholdP,
+                                                            double kP,
+                                                            double thresholdD,
+                                                            double kD,
+                                                            bool   recordEnergySample)
+{
+    GMX_ASSERT(gamdEnergyShadowEnabled_, "GaMD device energy shadow requested while disabled");
+    GMX_ASSERT(d_nbLJEnergy_ != nullptr && d_nbElecEnergy_ != nullptr && d_vTot_ != nullptr
+                       && d_gamdPmeEnergy_ != nullptr && d_gamdEnergyShadow_ != nullptr,
+               "GaMD device energy shadow buffers have not been initialized");
+
+    gamdPmeEnergyReadyEvent_->enqueueWaitEvent(deviceStream_);
+
+    KernelLaunchConfig config;
+    config.blockSize[0]     = 1;
+    config.blockSize[1]     = 1;
+    config.blockSize[2]     = 1;
+    config.gridSize[0]      = 1;
+    config.gridSize[1]      = 1;
+    config.gridSize[2]      = 1;
+    config.sharedMemorySize = 0;
+
+    auto       kernel     = reduceGamdRawEnergiesKernel;
+    const auto kernelArgs = prepareGpuKernelArguments(
+            kernel, config, &d_nbLJEnergy_, &d_nbElecEnergy_, &d_gamdPmeEnergy_, &d_vTot_, &d_gamdEnergyShadow_);
+    launchGpuKernel(kernel, config, deviceStream_, nullptr, "Reduce GaMD raw energies", kernelArgs);
+    launchGamdProductionScaleKernel(
+            d_gamdEnergyShadow_, igamd, stage, thresholdP, kP, thresholdD, kD, deviceStream_);
+    if (recordEnergySample)
+    {
+        GMX_RELEASE_ASSERT(gamdEnergyHistoryEnabled_ && d_gamdEnergyHistory_ != nullptr
+                                   && d_gamdEnergyHistoryCount_ != nullptr,
+                           "Deferred GaMD energy history requested while disabled");
+
+        auto       historyKernel     = recordGamdEnergySampleKernel;
+        const auto historyKernelArgs = prepareGpuKernelArguments(historyKernel,
+                                                                 config,
+                                                                 &d_nbLJEnergy_,
+                                                                 &d_nbElecEnergy_,
+                                                                 &d_gamdPmeEnergy_,
+                                                                 &d_vTot_,
+                                                                 &d_gamdEnergyShadow_,
+                                                                 &d_gamdEnergyHistoryCount_,
+                                                                 &c_gamdEnergyHistoryCapacity_,
+                                                                 &d_gamdEnergyHistory_);
+        launchGpuKernel(
+                historyKernel, config, deviceStream_, nullptr, "Record deferred GaMD energy sample", historyKernelArgs);
+    }
+    if (gamdEnergyShadowDiagnosticsEnabled_)
+    {
+        copyFromDeviceBuffer(h_gamdEnergyShadow_.data(),
+                             &d_gamdEnergyShadow_,
+                             0,
+                             6,
+                             deviceStream_,
+                             GpuApiCallBehavior::Async,
+                             nullptr);
+    }
+}
+
+std::array<double, 6> ListedForcesGpu::Impl::gamdEnergyShadowValues()
+{
+    GMX_ASSERT(gamdEnergyShadowDiagnosticsEnabled_,
+               "GaMD device energy diagnostics requested while disabled");
+    deviceStream_.synchronize();
+    return { h_gamdEnergyShadow_[0], h_gamdEnergyShadow_[1], h_gamdEnergyShadow_[2],
+             h_gamdEnergyShadow_[3], h_gamdEnergyShadow_[4], h_gamdEnergyShadow_[5] };
+}
+
+std::vector<std::array<real, F_NRE>> ListedForcesGpu::Impl::takeGamdEnergyHistory()
+{
+    GMX_RELEASE_ASSERT(gamdEnergyHistoryEnabled_,
+                       "Deferred GaMD energy history requested while disabled");
+    copyFromDeviceBuffer(h_gamdEnergyHistoryCount_.data(),
+                         &d_gamdEnergyHistoryCount_,
+                         0,
+                         1,
+                         deviceStream_,
+                         GpuApiCallBehavior::Sync,
+                         nullptr);
+    const int sampleCount = h_gamdEnergyHistoryCount_[0];
+    GMX_RELEASE_ASSERT(sampleCount <= c_gamdEnergyHistoryCapacity_,
+                       "Deferred GaMD energy history exceeded its fixed capacity");
+    if (sampleCount == 0)
+    {
+        return {};
+    }
+
+    copyFromDeviceBuffer(h_gamdEnergyHistory_.data(),
+                         &d_gamdEnergyHistory_,
+                         0,
+                         sampleCount * F_NRE,
+                         deviceStream_,
+                         GpuApiCallBehavior::Sync,
+                         nullptr);
+
+    std::vector<std::array<real, F_NRE>> samples(sampleCount);
+    for (int sample = 0; sample < sampleCount; ++sample)
+    {
+        std::copy_n(h_gamdEnergyHistory_.data() + sample * F_NRE, F_NRE, samples[sample].begin());
+    }
+    clearDeviceBufferAsync(&d_gamdEnergyHistoryCount_, 0, 1, deviceStream_);
+    return samples;
+}
+
+void ListedForcesGpu::Impl::recordGamdForceVirialSample()
+{
+    GMX_RELEASE_ASSERT(gamdEnergyHistoryEnabled_ && d_gamdForceVirialHistory_ != nullptr,
+                       "Deferred GaMD force-virial history requested while disabled");
+
+    KernelLaunchConfig config;
+    config.blockSize[0]     = 1;
+    config.blockSize[1]     = 1;
+    config.blockSize[2]     = 1;
+    config.gridSize[0]      = 1;
+    config.gridSize[1]      = 1;
+    config.gridSize[2]      = 1;
+    config.sharedMemorySize = 0;
+
+    auto       kernel     = recordGamdForceVirialSampleKernel;
+    const auto kernelArgs = prepareGpuKernelArguments(kernel,
+                                                      config,
+                                                      &d_gamdShortRangeVirial_,
+                                                      &d_gamdDihedralVirial_,
+                                                      &d_gamdPmeEnergy_,
+                                                      &d_gamdEnergyShadow_,
+                                                      &d_gamdEnergyHistoryCount_,
+                                                      &c_gamdEnergyHistoryCapacity_,
+                                                      &d_gamdForceVirialHistory_);
+    launchGpuKernel(kernel, config, deviceStream_, nullptr, "Record deferred GaMD force virial", kernelArgs);
+}
+
+std::vector<std::array<real, DIM * DIM>> ListedForcesGpu::Impl::takeGamdForceVirialHistory(const int numSamples)
+{
+    GMX_RELEASE_ASSERT(gamdEnergyHistoryEnabled_,
+                       "Deferred GaMD force-virial history requested while disabled");
+    GMX_RELEASE_ASSERT(numSamples >= 0 && numSamples <= c_gamdEnergyHistoryCapacity_,
+                       "Deferred GaMD force-virial sample count is out of range");
+    if (numSamples == 0)
+    {
+        return {};
+    }
+
+    copyFromDeviceBuffer(h_gamdForceVirialHistory_.data(),
+                         &d_gamdForceVirialHistory_,
+                         0,
+                         numSamples * DIM * DIM,
+                         deviceStream_,
+                         GpuApiCallBehavior::Sync,
+                         nullptr);
+    std::vector<std::array<real, DIM * DIM>> samples(numSamples);
+    for (int sample = 0; sample < numSamples; ++sample)
+    {
+        std::copy_n(h_gamdForceVirialHistory_.data() + sample * DIM * DIM,
+                    DIM * DIM,
+                    samples[sample].begin());
+    }
+    return samples;
+}
+
+void ListedForcesGpu::Impl::launchGamdVirialReductionKernel(DeviceBuffer<Float3> forces,
+                                                            DeviceBuffer<Float3> shiftForces,
+                                                            DeviceBuffer<float>* virial,
+                                                            const char*          kernelName)
+{
+    GMX_ASSERT(virial != nullptr, "GaMD virial reduction requires an output buffer");
+    clearDeviceBufferAsync(virial, 0, DIM * DIM, deviceStream_);
+
+    constexpr int      c_virialThreadsPerBlock = 256;
+    KernelLaunchConfig virialConfig;
+    virialConfig.blockSize[0] = c_virialThreadsPerBlock;
+    virialConfig.blockSize[1] = 1;
+    virialConfig.blockSize[2] = 1;
+    virialConfig.gridSize[0] = (gamdNbnxnForceSize_ + c_virialThreadsPerBlock - 1) / c_virialThreadsPerBlock;
+    virialConfig.gridSize[1]      = 1;
+    virialConfig.gridSize[2]      = 1;
+    virialConfig.sharedMemorySize = (c_virialThreadsPerBlock / 32) * DIM * DIM * sizeof(float);
+    auto       virialKernel       = reduceGamdDihedralVirialKernel;
+    const auto virialKernelArgs   = prepareGpuKernelArguments(virialKernel,
+                                                            virialConfig,
+                                                            &gamdNbnxnForceSize_,
+                                                            &d_xq_,
+                                                            &forces,
+                                                            &shiftForces,
+                                                            &kernelParams_.pbcAiuc,
+                                                            virial);
+    launchGpuKernel(virialKernel, virialConfig, deviceStream_, nullptr, kernelName, virialKernelArgs);
+}
+
+void ListedForcesGpu::Impl::launchGamdShortRangeVirialReduction()
+{
+    GMX_ASSERT(gamdForceCorrectionEnabled_,
+               "GaMD short-range virial reduction requested while disabled");
+    wallcycle_start_nocount(wcycle_, WallCycleCounter::LaunchGpuPp);
+    wallcycle_sub_start(wcycle_, WallCycleSubCounter::LaunchGpuBonded);
+    launchGamdVirialReductionKernel(
+            d_f_, d_fShift_, &d_gamdShortRangeVirial_, "Reduce GaMD short-range virial");
+    wallcycle_sub_stop(wcycle_, WallCycleSubCounter::LaunchGpuBonded);
+    wallcycle_stop(wcycle_, WallCycleCounter::LaunchGpuPp);
+}
+
+void ListedForcesGpu::Impl::launchGamdForceCorrectionKernel(DeviceBuffer<Float3> forces,
+                                                            real                 totalScale,
+                                                            real dihedralCorrectionScale,
+                                                            GpuEventSynchronizer* rawForcesReady)
+{
+    GMX_ASSERT(gamdForceCorrectionEnabled_, "GaMD GPU force correction requested while disabled");
+    GMX_ASSERT(!gamdScaleFromDeviceEnabled_ || d_gamdEnergyShadow_ != nullptr,
+               "GaMD device scale requested without device state storage");
+    rawForcesReady->enqueueWaitEvent(deviceStream_);
+
+    constexpr int      c_threadsPerBlock = 256;
+    KernelLaunchConfig config;
+    config.blockSize[0]     = c_threadsPerBlock;
+    config.blockSize[1]     = 1;
+    config.blockSize[2]     = 1;
+    config.gridSize[0]      = (gamdStateForceSize_ + c_threadsPerBlock - 1) / c_threadsPerBlock;
+    config.gridSize[1]      = 1;
+    config.gridSize[2]      = 1;
+    config.sharedMemorySize = 0;
+
+    auto       kernel     = gamdForceCorrectionShadowKernel;
+    const auto kernelArgs = prepareGpuKernelArguments(kernel,
+                                                      config,
+                                                      &gamdStateForceSize_,
+                                                      &totalScale,
+                                                      &dihedralCorrectionScale,
+                                                      &d_gamdEnergyShadow_,
+                                                      &gamdScaleFromDeviceEnabled_,
+                                                      &d_gamdDihedralForcesState_,
+                                                      &forces);
+    launchGpuKernel(kernel, config, deviceStream_, nullptr, "GaMD in-place force correction", kernelArgs);
+    gamdForcesReadyEvent_->markEvent(deviceStream_);
+}
+
+void ListedForcesGpu::Impl::launchGamdForceCorrectionShadowKernel(real totalScale, real dihedralCorrectionScale)
+{
+    GMX_ASSERT(gamdDihedralShadowEnabled_,
+               "GaMD force-correction shadow kernel requested while disabled");
+    GMX_ASSERT(d_gamdCorrectedForcesState_ != nullptr && d_gamdDihedralForcesState_ != nullptr,
+               "GaMD force-correction shadow buffers have not been initialized");
+
+    constexpr int      c_threadsPerBlock = 256;
+    KernelLaunchConfig config;
+    config.blockSize[0]     = c_threadsPerBlock;
+    config.blockSize[1]     = 1;
+    config.blockSize[2]     = 1;
+    config.gridSize[0]      = (gamdStateForceSize_ + c_threadsPerBlock - 1) / c_threadsPerBlock;
+    config.gridSize[1]      = 1;
+    config.gridSize[2]      = 1;
+    config.sharedMemorySize = 0;
+
+    auto       kernel         = gamdForceCorrectionShadowKernel;
+    const bool useDeviceScale = false;
+    const auto kernelArgs     = prepareGpuKernelArguments(kernel,
+                                                      config,
+                                                      &gamdStateForceSize_,
+                                                      &totalScale,
+                                                      &dihedralCorrectionScale,
+                                                      &d_gamdEnergyShadow_,
+                                                      &useDeviceScale,
+                                                      &d_gamdDihedralForcesState_,
+                                                      &d_gamdCorrectedForcesState_);
+    launchGpuKernel(kernel, config, deviceStream_, nullptr, "GaMD force-correction shadow", kernelArgs);
 }
 
 void ListedForcesGpu::launchKernel(const gmx::StepWorkload& stepWork)
@@ -982,6 +1762,11 @@ void ListedForcesGpu::launchKernel(const gmx::StepWorkload& stepWork)
     else
     {
         impl_->launchKernel<false, false>();
+    }
+
+    if (impl_->gamdDihedralBufferEnabled())
+    {
+        impl_->finishGamdDihedralBuffers();
     }
 }
 

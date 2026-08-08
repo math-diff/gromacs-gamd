@@ -47,7 +47,9 @@
 #ifndef GMX_LISTED_FORCES_LISTED_FORCES_GPU_H
 #define GMX_LISTED_FORCES_LISTED_FORCES_GPU_H
 
+#include <array>
 #include <memory>
+#include <vector>
 
 #include "gromacs/gpu_utils/devicebuffer_datatype.h"
 #include "gromacs/math/vectypes.h"
@@ -56,6 +58,7 @@
 
 class DeviceContext;
 class DeviceStream;
+class GpuEventSynchronizer;
 
 struct gmx_enerdata_t;
 struct gmx_ffparams_t;
@@ -72,7 +75,11 @@ class ArrayRef;
 class StepWorkload;
 
 /*! \brief The number on bonded function types supported on GPUs */
+#if GMX_GPU_CUDA
+static constexpr int numFTypesOnGpu = 9;
+#else
 static constexpr int numFTypesOnGpu = 8;
+#endif
 
 /*! \brief List of all bonded function types supported on GPUs
  *
@@ -81,9 +88,15 @@ static constexpr int numFTypesOnGpu = 8;
  * \note The function types in the list are ordered on increasing value.
  * \note Currently bonded are only supported with CUDA and SYCL, not with OpenCL.
  */
+#if GMX_GPU_CUDA
+constexpr std::array<int, numFTypesOnGpu> fTypesOnGpu = { F_BONDS,  F_ANGLES, F_UREY_BRADLEY,
+                                                          F_PDIHS,  F_RBDIHS, F_IDIHS,
+                                                          F_PIDIHS, F_CMAP,   F_LJ14 };
+#else
 constexpr std::array<int, numFTypesOnGpu> fTypesOnGpu = { F_BONDS,  F_ANGLES, F_UREY_BRADLEY,
                                                           F_PDIHS,  F_RBDIHS, F_IDIHS,
                                                           F_PIDIHS, F_LJ14 };
+#endif
 
 /*! \brief Checks whether the GROMACS build allows to compute bonded interactions on a GPU.
  *
@@ -124,6 +137,7 @@ public:
     ListedForcesGpu(const gmx_ffparams_t& ffparams,
                     float                 electrostaticsScaleFactor,
                     int                   numEnergyGroupsForListedForces,
+                    bool                  useGpuResidentGaMD,
                     const DeviceContext&  deviceContext,
                     const DeviceStream&   deviceStream,
                     gmx_wallcycle*        wcycle);
@@ -200,6 +214,75 @@ public:
     /*! \brief Clears the device side energy buffer
      */
     void clearEnergies();
+
+    /*! \brief Returns whether the diagnostic GaMD dihedral shadow path is enabled. */
+    bool gamdDihedralShadowEnabled() const;
+
+    /*! \brief Returns whether device GaMD dihedral-force production is enabled. */
+    bool gamdDihedralBufferEnabled() const;
+
+    /*! \brief Returns whether the device GaMD energy/scale path is enabled. */
+    bool gamdEnergyShadowEnabled() const;
+
+    /*! \brief Returns whether host/device energy-state comparison is enabled. */
+    bool gamdEnergyShadowDiagnosticsEnabled() const;
+
+    /*! \brief Returns whether in-place correction consumes device GaMD scales. */
+    bool gamdScaleFromDeviceEnabled() const;
+
+    /*! \brief Returns PME reciprocal-energy staging owned by the GaMD consumer. */
+    DeviceBuffer<float> gamdPmeEnergyStagingBuffer();
+
+    /*! \brief Returns the event marked by PME after staging reciprocal energy. */
+    GpuEventSynchronizer* gamdPmeEnergyReadyEvent();
+
+    /*! \brief Reduces raw energies and evaluates production GaMD scales on device. */
+    void launchGamdEnergyShadowReduction(int    igamd,
+                                         int    stage,
+                                         double thresholdP,
+                                         double kP,
+                                         double thresholdD,
+                                         double kD,
+                                         bool   recordEnergySample);
+
+    /*! \brief Returns device VP, VD, scaleP, scaleD, boostP, and boostD. */
+    std::array<double, 6> gamdEnergyShadowValues();
+
+    /*! \brief Copies and clears device-resident deferred F_NRE energy samples. */
+    std::vector<std::array<real, F_NRE>> takeGamdEnergyHistory();
+
+    /*! \brief Records the corrected force virial for the current deferred energy sample. */
+    void recordGamdForceVirialSample();
+
+    /*! \brief Copies device-resident corrected force-virial samples. */
+    std::vector<std::array<real, DIM * DIM>> takeGamdForceVirialHistory(int numSamples);
+
+    /*! \brief Copies the state-order diagnostic GaMD dihedral force buffer to the host. */
+    void copyGamdDihedralShadowForces(ArrayRef<RVec> forces);
+
+    /*! \brief Copies the device-reduced raw GaMD dihedral virial to the host. */
+    void copyGamdDihedralVirial(std::array<real, DIM * DIM>* virial);
+
+    /*! \brief Reduces the complete raw short-range virial after GPU NB/listed completion. */
+    void launchGamdShortRangeVirialReduction();
+
+    /*! \brief Copies the device-reduced complete raw short-range virial to the host. */
+    void copyGamdShortRangeVirial(std::array<real, DIM * DIM>* virial);
+
+    /*! \brief Applies the GaMD force formula in a diagnostic device buffer. */
+    void applyGamdForceCorrectionShadow(ArrayRef<const RVec> rawForces,
+                                        real                 totalScale,
+                                        real                 dihedralCorrectionScale,
+                                        ArrayRef<RVec>       correctedForces);
+
+    /*! \brief Applies GaMD force correction in-place after raw GPU force reduction. */
+    void applyGamdForceCorrection(DeviceBuffer<RVec>    forces,
+                                  real                  totalScale,
+                                  real                  dihedralCorrectionScale,
+                                  GpuEventSynchronizer* rawForcesReady);
+
+    /*! \brief Returns the event marked after in-place GaMD force correction. */
+    GpuEventSynchronizer* gamdForcesReadyEvent();
 
 private:
     class Impl;

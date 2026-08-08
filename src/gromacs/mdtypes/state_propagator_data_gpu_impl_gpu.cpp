@@ -781,6 +781,13 @@ GpuEventSynchronizer* StatePropagatorDataGpu::Impl::fReducedOnDevice(AtomLocalit
     return &fReducedOnDevice_[atomLocality];
 }
 
+void StatePropagatorDataGpu::Impl::setFReducedOnDeviceEventExpectedConsumptionCount(
+        AtomLocality atomLocality, int expectedConsumptionCount)
+{
+    fReducedOnDevice_[atomLocality].setConsumptionLimits(expectedConsumptionCount,
+                                                         expectedConsumptionCount);
+}
+
 void StatePropagatorDataGpu::Impl::consumeForcesReducedOnDeviceEvent(AtomLocality atomLocality)
 {
     fReducedOnDevice_[atomLocality].consume();
@@ -980,6 +987,13 @@ GpuEventSynchronizer* StatePropagatorDataGpu::getLocalForcesReadyOnDeviceEvent(S
 GpuEventSynchronizer* StatePropagatorDataGpu::fReducedOnDevice(AtomLocality atomLocality)
 {
     return impl_->fReducedOnDevice(atomLocality);
+}
+
+void StatePropagatorDataGpu::setFReducedOnDeviceEventExpectedConsumptionCount(
+        AtomLocality atomLocality, int expectedConsumptionCount)
+{
+    impl_->setFReducedOnDeviceEventExpectedConsumptionCount(atomLocality,
+                                                            expectedConsumptionCount);
 }
 
 void StatePropagatorDataGpu::consumeForcesReducedOnDeviceEvent(AtomLocality atomLocality)

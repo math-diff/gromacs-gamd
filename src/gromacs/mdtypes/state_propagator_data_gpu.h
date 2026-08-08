@@ -370,6 +370,10 @@ public:
      */
     GpuEventSynchronizer* fReducedOnDevice(AtomLocality atomLocality);
 
+    /*! \brief Set the expected consumption count for the force-reduction event. */
+    void setFReducedOnDeviceEventExpectedConsumptionCount(AtomLocality atomLocality,
+                                                           int          expectedConsumptionCount);
+
     /*! \brief Consume the event for when the forces are reduced on the GPU.
      *
      *  \param[in] atomLocality      Locality of the particles to wait for.

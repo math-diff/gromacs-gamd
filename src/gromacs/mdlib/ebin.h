@@ -128,6 +128,9 @@ int get_ebin_space(t_ebin* eb, int nener, const char* const enm[], const char* u
  */
 void add_ebin(t_ebin* eb, int entryIndex, int nener, const real ener[], gmx_bool bSum);
 
+/*! \brief Add deferred contiguous samples in their original logical order. */
+void add_ebin_deferred(t_ebin* eb, int entryIndex, int nener, gmx::ArrayRef<const real> ener, int numSamples);
+
 
 /*! \brief Add values from array to the bins if the matching entry in \c shouldUse is true.
  *
@@ -146,6 +149,17 @@ void add_ebin_indexed(t_ebin*                   eb,
                       gmx::ArrayRef<bool>       shouldUse,
                       gmx::ArrayRef<const real> ener,
                       gmx_bool                  bSum);
+
+/*! \brief Add deferred indexed samples in their original logical order.
+ *
+ * The global sum count must already include all deferred samples. The flat
+ * \p ener array contains \p numSamples rows, each with shouldUse.size() values.
+ */
+void add_ebin_indexed_deferred(t_ebin*                   eb,
+                               int                       entryIndex,
+                               gmx::ArrayRef<bool>       shouldUse,
+                               gmx::ArrayRef<const real> ener,
+                               int                       numSamples);
 
 /*! \brief Increase the counters for the sums.
  *

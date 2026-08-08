@@ -196,7 +196,7 @@
 #include "gromacs/utility/programcontext.h"
 #include "gromacs/utility/smalloc.h"
 #include "gromacs/utility/stringutil.h"
-
+#include "gromacs/applied_forces/gamd/gamdforceprovider.h"
 #include "isimulator.h"
 #include "membedholder.h"
 #include "replicaexchange.h"
@@ -1834,6 +1834,9 @@ int Mdrunner::mdrunner()
         /* Initiate forcerecord */
         fr                 = std::make_unique<t_forcerec>();
         fr->forceProviders = mdModules_->initForceProviders(wcycle.get());
+        // Current-step GaMD is prepared explicitly in the MD loop before do_force() and applies
+        // its correction after raw energies are available. Registering its no-op force provider
+        // here would incorrectly classify the run as having CPU special-force work.
         init_forcerec(fplog,
                       mdlog,
                       runScheduleWork.simulationWork,
@@ -1908,6 +1911,7 @@ int Mdrunner::mdrunner()
                     std::make_unique<ListedForcesGpu>(mtop.ffparams,
                                                       fr->ic->epsfac * fr->fudgeQQ,
                                                       inputrec->opts.ngener - inputrec->nwall,
+                                                      runScheduleWork.simulationWork.useGpuResidentGaMD(),
                                                       deviceStreamManager->context(),
                                                       deviceStreamManager->bondedStream(),
                                                       wcycle.get());

@@ -74,6 +74,7 @@ class UpdateConstrainGpu::Impl
 UpdateConstrainGpu::UpdateConstrainGpu(const t_inputrec& /* ir   */,
                                        const gmx_mtop_t& /* mtop */,
                                        const int /* numTempScaleValues */,
+                                       const bool /* useGpuResidentGaMD */,
                                        const DeviceContext& /* deviceContext */,
                                        const DeviceStream& /* deviceStream */,
                                        gmx_wallcycle* /*wcycle*/) :
@@ -89,6 +90,7 @@ void UpdateConstrainGpu::integrate(GpuEventSynchronizer* /* fReadyOnDevice */,
                                    const real /* dt */,
                                    const bool /* updateVelocities */,
                                    const bool /* computeVirial */,
+                                   const bool /* deferVirialToHost */,
                                    tensor /* virialScaled */,
                                    const bool /* doTemperatureScaling */,
                                    gmx::ArrayRef<const t_grp_tcstat> /* tcstat */,
@@ -98,6 +100,33 @@ void UpdateConstrainGpu::integrate(GpuEventSynchronizer* /* fReadyOnDevice */,
 {
     GMX_ASSERT(!impl_,
                "A CPU stub for UpdateConstrain was called instead of the correct implementation.");
+}
+
+void UpdateConstrainGpu::copyConstraintVirialToHost(const real /* dt */, tensor /* virial */)
+{
+    GMX_ASSERT(!impl_,
+               "A CPU stub for UpdateConstrain was called instead of the correct implementation.");
+}
+
+std::vector<std::array<real, DIM * DIM>> UpdateConstrainGpu::takeConstraintVirialHistory()
+{
+    GMX_ASSERT(!impl_,
+               "A CPU stub for UpdateConstrain was called instead of the correct implementation.");
+    return {};
+}
+
+GpuKineticEnergyHistory UpdateConstrainGpu::takeKineticEnergyHistory()
+{
+    GMX_ASSERT(!impl_,
+               "A CPU stub for UpdateConstrain was called instead of the correct implementation.");
+    return {};
+}
+
+std::vector<std::array<real, DIM * DIM>> UpdateConstrainGpu::previousHalfStepKineticEnergy()
+{
+    GMX_ASSERT(!impl_,
+               "A CPU stub for UpdateConstrain was called instead of the correct implementation.");
+    return {};
 }
 
 void UpdateConstrainGpu::scaleCoordinates(const Matrix3x3& /* scalingMatrix */)

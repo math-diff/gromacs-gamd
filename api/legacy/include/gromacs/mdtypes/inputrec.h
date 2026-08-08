@@ -41,6 +41,7 @@
 
 #include "gromacs/math/vectypes.h"
 #include "gromacs/mdtypes/md_enums.h"
+#include "gromacs/mdtypes/gamd_params.h"
 #include "gromacs/utility/enumerationhelpers.h"
 #include "gromacs/utility/real.h"
 
@@ -577,6 +578,12 @@ struct t_inputrec // NOLINT (clang-analyzer-optin.performance.Padding)
     bool bDoAwh = false;
     //! AWH biasing parameters
     std::unique_ptr<gmx::AwhParams> awhParams;
+
+    /* GaMD bias data */
+    //! Whether to use Gaussian accelerated molecular dynamics (GaMD)
+    bool bDoGaMD = false;
+    //! GaMD parameters
+    std::unique_ptr<gmx::GaMDParams> gamdParams;
 
     /* Enforced rotation data */
     //! Whether to calculate enforced rotation potential(s)

@@ -444,6 +444,10 @@ bool ModularSimulator::isInputCompatible(bool                             exitOn
                                              "AWH is not supported by the modular simulator.");
     isInputCompatible =
             isInputCompatible
+            && conditionalAssert(!(inputrec->bDoGaMD || getenv("GMX_USE_GAMD") != nullptr),
+                                 "GaMD is not supported by the modular simulator.");
+    isInputCompatible =
+            isInputCompatible
             && conditionalAssert(gmx_mtop_ftype_count(globalTopology, F_DISRES) == 0,
                                  "Distance restraints are not supported by the modular simulator.");
     isInputCompatible =

@@ -96,8 +96,11 @@ void LincsDeviceConstraintsRunner::applyConstraints(ConstraintsTestData* testDat
     {
         copyToDeviceBuffer(&d_v, h_v, 0, numAtoms, deviceStream, GpuApiCallBehavior::Sync, nullptr);
     }
-    lincsGpu->apply(
-            d_x, d_xp, updateVelocities, d_v, testData->invdt_, testData->computeVirial_, testData->virialScaled_, pbcAiuc);
+    lincsGpu->apply(d_x, d_xp, updateVelocities, d_v, testData->invdt_, testData->computeVirial_, pbcAiuc);
+    if (testData->computeVirial_)
+    {
+        lincsGpu->copyVirialToHost(testData->virialScaled_);
+    }
 
     copyFromDeviceBuffer(h_xp, &d_xp, 0, numAtoms, deviceStream, GpuApiCallBehavior::Sync, nullptr);
     if (updateVelocities)

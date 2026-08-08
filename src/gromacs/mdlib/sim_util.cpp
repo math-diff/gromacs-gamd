@@ -42,6 +42,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <algorithm>
 #include <array>
 #include <filesystem>
 #include <memory>
@@ -52,6 +53,7 @@
 #include <vector>
 
 #include "gromacs/applied_forces/awh/awh.h"
+#include "gromacs/applied_forces/gamd/gamdforceprovider.h"
 #include "gromacs/domdec/dlbtiming.h"
 #include "gromacs/domdec/domdec.h"
 #include "gromacs/domdec/domdec_struct.h"
@@ -69,6 +71,7 @@
 #include "gromacs/gmxlib/nrnb.h"
 #include "gromacs/gpu_utils/devicebuffer_datatype.h"
 #include "gromacs/gpu_utils/gpu_utils.h"
+#include "gromacs/gpu_utils/gpueventsynchronizer.h"
 #include "gromacs/imd/imd.h"
 #include "gromacs/listed_forces/disre.h"
 #include "gromacs/listed_forces/listed_forces.h"
@@ -142,6 +145,10 @@
 #include "gromacs/utility/sysinfo.h"
 
 #include "gpuforcereduction.h"
+
+extern double g_gamd_scale_P;
+extern double g_gamd_dih_ratio;
+extern double g_gamd_last_total_boost;
 
 class GpuEventSynchronizer;
 struct gmx_edsam;
@@ -347,7 +354,7 @@ static void postProcessForceWithShiftForces(t_nrnb*              nrnb,
         forceWithShiftForces.haveSpreadVsiteForces() = true;
     }
 
-    if (stepWork.computeVirial)
+    if (stepWork.computeVirial && !stepWork.useGpuFBufferOps)
     {
         /* Calculation of the virial must be done after vsites! */
         calc_virial(
@@ -424,6 +431,546 @@ static void postProcessForces(const t_commrec*     cr,
     {
         print_large_forces(stderr, mdatoms, cr, step, fr->print_force, x, f);
     }
+}
+
+struct GaMDForceComparison
+{
+    double     maxAbsoluteError = 0.0;
+    double     rmsError         = 0.0;
+    gmx::Index worstAtom        = 0;
+    int        worstComponent   = 0;
+};
+
+static GaMDForceComparison compareGaMDForceBuffers(ArrayRef<const RVec> reference,
+                                                   ArrayRef<const RVec> candidate)
+{
+    GMX_RELEASE_ASSERT(reference.size() == candidate.size() && !reference.empty(),
+                       "GaMD GPU shadow-force comparison requires equally sized non-empty buffers");
+
+    GaMDForceComparison comparison;
+    double              sumSquaredError = 0.0;
+    for (gmx::Index atom = 0; atom < reference.ssize(); ++atom)
+    {
+        for (int component = 0; component < DIM; ++component)
+        {
+            const double error = static_cast<double>(candidate[atom][component])
+                                 - static_cast<double>(reference[atom][component]);
+            const double absoluteError = std::abs(error);
+            sumSquaredError += error * error;
+            if (absoluteError > comparison.maxAbsoluteError)
+            {
+                comparison.maxAbsoluteError = absoluteError;
+                comparison.worstAtom        = atom;
+                comparison.worstComponent   = component;
+            }
+        }
+    }
+    comparison.rmsError = std::sqrt(sumSquaredError / (DIM * reference.size()));
+    return comparison;
+}
+
+static void validateGaMDGpuShadowForces(const char*          label,
+                                        int64_t              step,
+                                        ArrayRef<const RVec> reference,
+                                        ArrayRef<const RVec> candidate,
+                                        double               maxAbsoluteTolerance,
+                                        double               rmsTolerance)
+{
+    const GaMDForceComparison comparison = compareGaMDForceBuffers(reference, candidate);
+    std::fprintf(stderr,
+                 "[GaMD GPU shadow] %s step=%lld max_abs=%.9g rms=%.9g "
+                 "worst_atom=%td component=%d cpu=%.9g gpu=%.9g\n",
+                 label,
+                 static_cast<long long>(step),
+                 comparison.maxAbsoluteError,
+                 comparison.rmsError,
+                 comparison.worstAtom,
+                 comparison.worstComponent,
+                 static_cast<double>(reference[comparison.worstAtom][comparison.worstComponent]),
+                 static_cast<double>(candidate[comparison.worstAtom][comparison.worstComponent]));
+
+    if (!std::isfinite(comparison.maxAbsoluteError) || !std::isfinite(comparison.rmsError)
+        || comparison.maxAbsoluteError > maxAbsoluteTolerance || comparison.rmsError > rmsTolerance)
+    {
+        gmx_fatal(FARGS,
+                  "GaMD GPU %s shadow forces exceed provisional mixed-precision tolerances "
+                  "(max %.9g > %.9g or RMS %.9g > %.9g).",
+                  label,
+                  comparison.maxAbsoluteError,
+                  maxAbsoluteTolerance,
+                  comparison.rmsError,
+                  rmsTolerance);
+    }
+}
+
+static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
+                                           const t_inputrec&            inputrec,
+                                           int64_t                      step,
+                                           const gmx_localtop_t&        top,
+                                           const matrix                 box,
+                                           ArrayRefWithPadding<RVec>    x,
+                                           ArrayRef<RVec>               force,
+                                           tensor                       vir_force,
+                                           const t_mdatoms&             mdatoms,
+                                           gmx_enerdata_t*              enerd,
+                                           ArrayRef<const real>         lambda,
+                                           t_forcerec*                  fr,
+                                           VirtualSitesHandler*         vsite,
+                                           t_nrnb*                      nrnb,
+                                           gmx_wallcycle*               wcycle,
+                                           const MdrunScheduleWorkload& runScheduleWork)
+{
+    const bool useGaMD = (inputrec.bDoGaMD || std::getenv("GMX_USE_GAMD") != nullptr);
+    if (!useGaMD)
+    {
+        return;
+    }
+
+    const auto& simulationWork = runScheduleWork.simulationWork;
+    const auto& domainWork     = runScheduleWork.domainWork;
+    const auto& stepWork       = runScheduleWork.stepWork;
+
+    if (!stepWork.computeForces)
+    {
+        return;
+    }
+
+    if (!stepWork.computeEnergy)
+    {
+        gmx_fatal(FARGS, "Current-step GaMD requires nstcalcenergy = 1.");
+    }
+
+    if (simulationWork.useMts)
+    {
+        gmx_fatal(FARGS, "Current-step GaMD does not support MTS.");
+    }
+
+    if (const char* gpuIncompatibilityReason = gmx::currentStepGaMDGpuIncompatibilityReason(
+                simulationWork.useGpuUpdate, domainWork.haveGpuBondedWork))
+    {
+        gmx_fatal(FARGS, "%s", gpuIncompatibilityReason);
+    }
+
+    if (stepWork.stageGpuEnergyAndVirialToHost)
+    {
+        sum_epot(enerd->grpp, enerd->term.data());
+        const double rawPotentialEnergy = enerd->term[F_EPOT];
+        const double rawDihedralEnergy  = enerd->term[F_PDIHS] + enerd->term[F_RBDIHS]
+                                         + enerd->term[F_FOURDIHS] + enerd->term[F_CMAP];
+
+        gmx::gamdFinalizeCurrentStep(
+                static_cast<long>(step), cr->nodeid, rawPotentialEnergy, rawDihedralEnergy, wcycle);
+
+        if (fr->listedForcesGpu != nullptr && fr->listedForcesGpu->gamdEnergyShadowDiagnosticsEnabled())
+        {
+            const std::array<double, 6> deviceState = fr->listedForcesGpu->gamdEnergyShadowValues();
+            const double                totalDifference    = deviceState[0] - rawPotentialEnergy;
+            const double                dihedralDifference = deviceState[1] - rawDihedralEnergy;
+            const double                scalePDifference   = deviceState[2] - g_gamd_scale_P;
+            const double                scaleDDifference   = deviceState[3] - g_gamd_dih_ratio;
+            const double totalBoostDifference = deviceState[4] + deviceState[5] - g_gamd_last_total_boost;
+            std::fprintf(stderr,
+                         "[GaMD GPU energy shadow] step=%lld total_diff=%.9g dihedral_diff=%.9g "
+                         "scaleP_diff=%.9g scaleD_diff=%.9g total_boost_diff=%.9g\n",
+                         static_cast<long long>(step),
+                         totalDifference,
+                         dihedralDifference,
+                         scalePDifference,
+                         scaleDDifference,
+                         totalBoostDifference);
+            // At the TC5b potential magnitude, one single-precision ULP is 0.0625 kJ/mol.
+            // Allow four ULPs for the different but deterministic summation order.
+            constexpr double c_totalEnergyTolerance    = 0.25;
+            constexpr double c_dihedralEnergyTolerance = 0.001;
+            constexpr double c_scaleTolerance          = 2e-5;
+            constexpr double c_boostTolerance          = 0.1;
+            if (std::abs(totalDifference) > c_totalEnergyTolerance
+                || std::abs(dihedralDifference) > c_dihedralEnergyTolerance
+                || std::abs(scalePDifference) > c_scaleTolerance || std::abs(scaleDDifference) > c_scaleTolerance
+                || std::abs(totalBoostDifference) > c_boostTolerance)
+            {
+                gmx_fatal(FARGS,
+                          "GaMD GPU energy/state shadow mismatch at step %lld: total %.9g, "
+                          "dihedral %.9g, scaleP %.9g, scaleD %.9g, total boost %.9g.",
+                          static_cast<long long>(step),
+                          totalDifference,
+                          dihedralDifference,
+                          scalePDifference,
+                          scaleDDifference,
+                          totalBoostDifference);
+            }
+        }
+    }
+    else
+    {
+        GMX_RELEASE_ASSERT(simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuResident
+                                   && fr->listedForcesGpu != nullptr
+                                   && fr->listedForcesGpu->gamdScaleFromDeviceEnabled(),
+                           "GaMD can skip host energy staging only with device scale correction");
+    }
+
+    const real totalScale =
+            stepWork.stageGpuEnergyAndVirialToHost ? static_cast<real>(g_gamd_scale_P) : 1.0_real;
+    const real dihedralCorrectionScale =
+            stepWork.stageGpuEnergyAndVirialToHost
+                    ? static_cast<real>(g_gamd_scale_P * (g_gamd_dih_ratio - 1.0))
+                    : 0.0_real;
+
+    if (simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuResident)
+    {
+        GMX_RELEASE_ASSERT(fr->stateGpu != nullptr && fr->listedForcesGpu != nullptr,
+                           "GPU GaMD force correction requires GPU state and listed-force objects");
+        GMX_RELEASE_ASSERT(fr->listedForcesGpu->gamdDihedralBufferEnabled(),
+                           "GPU GaMD force correction requires the device dihedral-force buffer");
+        if (haveDDAtomOrdering(*cr))
+        {
+            gmx_fatal(FARGS, "GPU GaMD force correction does not support domain decomposition.");
+        }
+        if (vsite != nullptr)
+        {
+            gmx_fatal(FARGS,
+                      "GPU GaMD force correction does not yet support virtual-site force "
+                      "spreading.");
+        }
+        if (fr->pbcType == PbcType::Screw)
+        {
+            gmx_fatal(FARGS,
+                      "GPU GaMD dihedral virial reduction does not support screw periodic "
+                      "boundary conditions.");
+        }
+
+        const bool validateLiveGpuCorrection = fr->listedForcesGpu->gamdDihedralShadowEnabled();
+        static std::vector<gmx::RVec> gamdGpuModeDihedralForces;
+        static std::vector<gmx::RVec> gamdGpuModeDihedralShiftForces;
+        static std::vector<gmx::RVec> gpuShadowDihedralForces;
+        std::array<real, DIM * DIM>   gpuDihedralVirial = {};
+
+        if (stepWork.stageGpuEnergyAndVirialToHost && totalScale != 1.0)
+        {
+            for (int i = 0; i < DIM; ++i)
+            {
+                for (int j = 0; j < DIM; ++j)
+                {
+                    vir_force[i][j] *= totalScale;
+                }
+            }
+        }
+
+        if (stepWork.stageGpuEnergyAndVirialToHost && dihedralCorrectionScale != 0.0)
+        {
+            wallcycle_start(wcycle, WallCycleCounter::GaMDDihedral);
+            fr->listedForcesGpu->copyGamdDihedralVirial(&gpuDihedralVirial);
+
+            if (validateLiveGpuCorrection)
+            {
+                // GPU update leaves the host coordinate buffer stale on ordinary steps.
+                // Refresh it only for this explicit CPU/GPU diagnostic comparison.
+                fr->stateGpu->copyCoordinatesFromGpu(x.unpaddedArrayRef(), AtomLocality::Local);
+                fr->stateGpu->waitCoordinatesReadyOnHost(AtomLocality::Local);
+
+                gamdGpuModeDihedralForces.resize(force.ssize(), gmx::RVec(0.0_real, 0.0_real, 0.0_real));
+                gamdGpuModeDihedralShiftForces.resize(gmx::c_numShiftVectors,
+                                                      gmx::RVec(0.0_real, 0.0_real, 0.0_real));
+
+                t_pbc        pbc;
+                const t_pbc* pbcPtr = nullptr;
+                if (fr->bMolPBC)
+                {
+                    set_pbc_dd(&pbc, fr->pbcType, nullptr, TRUE, box);
+                    pbcPtr = &pbc;
+                }
+
+                const double savedGaMDDihRatio = g_gamd_dih_ratio;
+                g_gamd_dih_ratio               = 1.0;
+                calculateGaMDDihedralListedForces(top.idef,
+                                                  x,
+                                                  gamdGpuModeDihedralForces,
+                                                  gamdGpuModeDihedralShiftForces,
+                                                  fr,
+                                                  pbcPtr,
+                                                  fr->fcdata.get(),
+                                                  nrnb,
+                                                  lambda,
+                                                  nullptr);
+                g_gamd_dih_ratio = savedGaMDDihRatio;
+
+                gpuShadowDihedralForces.resize(force.size());
+                fr->listedForcesGpu->copyGamdDihedralShadowForces(gpuShadowDihedralForces);
+                validateGaMDGpuShadowForces(
+                        "live-dihedral", step, gamdGpuModeDihedralForces, gpuShadowDihedralForces, 0.005, 0.0001);
+
+                tensor cpuDihedralVirial = { { 0 } };
+                calc_vir(c_numShiftVectors,
+                         as_rvec_array(fr->shift_vec.data()),
+                         as_rvec_array(gamdGpuModeDihedralShiftForces.data()),
+                         cpuDihedralVirial,
+                         fr->pbcType == PbcType::Screw,
+                         box);
+                f_calc_vir(0,
+                           mdatoms.homenr,
+                           as_rvec_array(x.unpaddedArrayRef().data()),
+                           as_rvec_array(gamdGpuModeDihedralForces.data()),
+                           cpuDihedralVirial,
+                           box);
+                double maxVirialError = 0.0;
+                for (int i = 0; i < DIM; ++i)
+                {
+                    for (int j = 0; j < DIM; ++j)
+                    {
+                        maxVirialError =
+                                std::max(maxVirialError,
+                                         std::abs(static_cast<double>(gpuDihedralVirial[i * DIM + j])
+                                                  - static_cast<double>(cpuDihedralVirial[i][j])));
+                    }
+                }
+                std::fprintf(stderr,
+                             "[GaMD GPU shadow] live-dihedral-virial step=%lld max_abs=%.9g\n",
+                             static_cast<long long>(step),
+                             maxVirialError);
+                if (!std::isfinite(maxVirialError) || maxVirialError > 0.01)
+                {
+                    gmx_fatal(FARGS,
+                              "GaMD GPU dihedral virial exceeds provisional mixed-precision "
+                              "tolerance (max %.9g > 0.01).",
+                              maxVirialError);
+                }
+            }
+            wallcycle_stop(wcycle, WallCycleCounter::GaMDDihedral);
+
+            if (stepWork.computeVirial)
+            {
+                wallcycle_start(wcycle, WallCycleCounter::GaMDForceScale);
+                for (int i = 0; i < DIM; ++i)
+                {
+                    for (int j = 0; j < DIM; ++j)
+                    {
+                        vir_force[i][j] += dihedralCorrectionScale * gpuDihedralVirial[i * DIM + j];
+                    }
+                }
+                wallcycle_stop(wcycle, WallCycleCounter::GaMDForceScale);
+            }
+        }
+
+        static std::vector<gmx::RVec> referenceCorrectedForces;
+        static std::vector<gmx::RVec> liveGpuCorrectedForces;
+        static std::vector<gmx::RVec> rawReducedForcesForShadow;
+
+        GpuEventSynchronizer* rawForcesReady = nullptr;
+        if (stepWork.useGpuFBufferOps)
+        {
+            rawForcesReady = fr->stateGpu->fReducedOnDevice(AtomLocality::Local);
+            if (validateLiveGpuCorrection)
+            {
+                rawReducedForcesForShadow.resize(force.size());
+                rawForcesReady->waitForEvent();
+                fr->stateGpu->copyForcesFromGpu(rawReducedForcesForShadow, AtomLocality::Local);
+                fr->stateGpu->waitForcesReadyOnHost(AtomLocality::Local);
+            }
+        }
+        else
+        {
+            fr->stateGpu->copyForcesToGpu(force, AtomLocality::Local);
+            rawForcesReady = fr->stateGpu->fReadyOnDevice(AtomLocality::Local);
+        }
+        if (validateLiveGpuCorrection)
+        {
+            const ArrayRef<const RVec> rawReference =
+                    stepWork.useGpuFBufferOps ? makeConstArrayRef(rawReducedForcesForShadow) : force;
+            referenceCorrectedForces.assign(rawReference.begin(), rawReference.end());
+            liveGpuCorrectedForces.resize(force.size());
+            for (gmx::Index atom = 0; atom < force.ssize(); ++atom)
+            {
+                referenceCorrectedForces[atom] *= totalScale;
+                if (dihedralCorrectionScale != 0.0)
+                {
+                    referenceCorrectedForces[atom] +=
+                            dihedralCorrectionScale * gamdGpuModeDihedralForces[atom];
+                }
+            }
+        }
+        fr->listedForcesGpu->applyGamdForceCorrection(
+                fr->stateGpu->getForces(), totalScale, dihedralCorrectionScale, rawForcesReady);
+        if (stepWork.useGpuFBufferOps && validateLiveGpuCorrection)
+        {
+            fr->stateGpu->setFReducedOnDeviceEventExpectedConsumptionCount(AtomLocality::Local, 1);
+        }
+        if (validateLiveGpuCorrection)
+        {
+            // The event has a second consumer in diagnostic mode; GPU update consumes the other.
+            fr->listedForcesGpu->gamdForcesReadyEvent()->waitForEvent();
+            fr->stateGpu->copyForcesFromGpu(liveGpuCorrectedForces, AtomLocality::Local);
+            fr->stateGpu->waitForcesReadyOnHost(AtomLocality::Local);
+            validateGaMDGpuShadowForces(
+                    "live-force-correction", step, referenceCorrectedForces, liveGpuCorrectedForces, 0.005, 0.0001);
+        }
+        return;
+    }
+
+    const bool gpuShadowEnabled =
+            (fr->listedForcesGpu != nullptr && fr->listedForcesGpu->gamdDihedralShadowEnabled());
+    if (gpuShadowEnabled && haveDDAtomOrdering(*cr))
+    {
+        gmx_fatal(FARGS,
+                  "GMX_GAMD_GPU_DIH_SHADOW currently supports only one rank without domain "
+                  "decomposition.");
+    }
+    if (gpuShadowEnabled && vsite != nullptr)
+    {
+        gmx_fatal(FARGS,
+                  "GMX_GAMD_GPU_DIH_SHADOW does not yet apply virtual-site force spreading on "
+                  "the device.");
+    }
+    static bool                   correctionShadowCompared = false;
+    static std::vector<gmx::RVec> rawForcesForGpuShadow;
+    static std::vector<gmx::RVec> correctedGpuShadowForces;
+    if (gpuShadowEnabled && !correctionShadowCompared)
+    {
+        rawForcesForGpuShadow.assign(force.begin(), force.end());
+        correctedGpuShadowForces.resize(force.size());
+    }
+
+    const auto compareCorrectionShadow = [&]()
+    {
+        if (gpuShadowEnabled && !correctionShadowCompared)
+        {
+            fr->listedForcesGpu->applyGamdForceCorrectionShadow(
+                    rawForcesForGpuShadow, totalScale, dihedralCorrectionScale, correctedGpuShadowForces);
+            validateGaMDGpuShadowForces(
+                    "force-correction", step, force, correctedGpuShadowForces, 0.1, 0.01);
+            correctionShadowCompared = true;
+        }
+    };
+
+    if (totalScale == 1.0 && dihedralCorrectionScale == 0.0)
+    {
+        compareCorrectionShadow();
+        return;
+    }
+
+    if (totalScale != 1.0)
+    {
+        wallcycle_start(wcycle, WallCycleCounter::GaMDForceScale);
+        const int numThreads =
+                gmx_omp_nthreads_get_simple_rvec_task(ModuleMultiThread::Default, force.ssize());
+#pragma omp parallel for num_threads(numThreads) schedule(static)
+        for (gmx::Index i = 0; i < force.ssize(); ++i)
+        {
+            force[i] *= totalScale;
+        }
+
+        for (int i = 0; i < DIM; ++i)
+        {
+            for (int j = 0; j < DIM; ++j)
+            {
+                vir_force[i][j] *= totalScale;
+            }
+        }
+        wallcycle_stop(wcycle, WallCycleCounter::GaMDForceScale);
+    }
+
+    if (dihedralCorrectionScale == 0.0)
+    {
+        compareCorrectionShadow();
+        return;
+    }
+
+    wallcycle_start(wcycle, WallCycleCounter::GaMDDihedral);
+
+    static std::vector<gmx::RVec> gamdDihedralForces;
+    static std::vector<gmx::RVec> gamdDihedralShiftForces;
+    gamdDihedralForces.resize(force.ssize(), gmx::RVec(0.0_real, 0.0_real, 0.0_real));
+    gamdDihedralShiftForces.resize(gmx::c_numShiftVectors, gmx::RVec(0.0_real, 0.0_real, 0.0_real));
+
+    t_pbc        pbc;
+    const t_pbc* pbcPtr = nullptr;
+    if (fr->bMolPBC)
+    {
+        set_pbc_dd(&pbc, fr->pbcType, haveDDAtomOrdering(*cr) ? &cr->dd->numCells : nullptr, TRUE, box);
+        pbcPtr = &pbc;
+    }
+
+    const double savedGaMDDihRatio = g_gamd_dih_ratio;
+    g_gamd_dih_ratio               = 1.0;
+    calculateGaMDDihedralListedForces(top.idef,
+                                      x,
+                                      gamdDihedralForces,
+                                      gamdDihedralShiftForces,
+                                      fr,
+                                      pbcPtr,
+                                      fr->fcdata.get(),
+                                      nrnb,
+                                      lambda,
+                                      haveDDAtomOrdering(*cr) ? cr->dd->globalAtomIndices.data() : nullptr);
+    g_gamd_dih_ratio = savedGaMDDihRatio;
+
+    if (gpuShadowEnabled)
+    {
+        static bool                   shadowCompared = false;
+        static std::vector<gmx::RVec> gpuShadowForces;
+        if (!shadowCompared)
+        {
+            gpuShadowForces.resize(gamdDihedralForces.size());
+            fr->listedForcesGpu->copyGamdDihedralShadowForces(gpuShadowForces);
+            validateGaMDGpuShadowForces("dihedral", step, gamdDihedralForces, gpuShadowForces, 0.1, 0.01);
+            shadowCompared = true;
+        }
+    }
+
+    if (vsite)
+    {
+        using VirialHandling = VirtualSitesHandler::VirialHandling;
+        const VirialHandling virialHandling =
+                (stepWork.computeVirial ? VirialHandling::Pbc : VirialHandling::None);
+        vsite->spreadForces(x.unpaddedArrayRef(),
+                            gamdDihedralForces,
+                            virialHandling,
+                            gamdDihedralShiftForces,
+                            nullptr,
+                            nrnb,
+                            box,
+                            wcycle);
+    }
+
+    wallcycle_stop(wcycle, WallCycleCounter::GaMDDihedral);
+
+    wallcycle_start(wcycle, WallCycleCounter::GaMDForceScale);
+    const int numThreads =
+            gmx_omp_nthreads_get_simple_rvec_task(ModuleMultiThread::Default, force.ssize());
+#pragma omp parallel for num_threads(numThreads) schedule(static)
+    for (gmx::Index i = 0; i < force.ssize(); ++i)
+    {
+        force[i] += dihedralCorrectionScale * gamdDihedralForces[i];
+    }
+
+    if (stepWork.computeVirial)
+    {
+        tensor dihVirial = { { 0 } };
+        calc_vir(c_numShiftVectors,
+                 as_rvec_array(fr->shift_vec.data()),
+                 as_rvec_array(gamdDihedralShiftForces.data()),
+                 dihVirial,
+                 fr->pbcType == PbcType::Screw,
+                 box);
+        inc_nrnb(nrnb, eNR_VIRIAL, c_numShiftVectors);
+
+        f_calc_vir(0,
+                   mdatoms.homenr,
+                   as_rvec_array(x.unpaddedArrayRef().data()),
+                   as_rvec_array(gamdDihedralForces.data()),
+                   dihVirial,
+                   box);
+        inc_nrnb(nrnb, eNR_VIRIAL, mdatoms.homenr);
+
+        for (int i = 0; i < DIM; ++i)
+        {
+            for (int j = 0; j < DIM; ++j)
+            {
+                vir_force[i][j] += dihedralCorrectionScale * dihVirial[i][j];
+            }
+        }
+    }
+    wallcycle_stop(wcycle, WallCycleCounter::GaMDForceScale);
+    compareCorrectionShadow();
 }
 
 static void do_nb_verlet(t_forcerec*                fr,
@@ -982,10 +1529,13 @@ static void launchGpuEndOfStepTasks(nonbonded_verlet_t*          nbv,
 
     if (runScheduleWork.domainWork.haveGpuBondedWork && runScheduleWork.stepWork.computeEnergy)
     {
-        // in principle this should be included in the DD balancing region,
-        // but generally it is infrequent so we'll omit it for the sake of
-        // simpler code
-        listedForcesGpu->waitAccumulateEnergyTerms(enerd);
+        if (runScheduleWork.stepWork.stageGpuEnergyAndVirialToHost)
+        {
+            // in principle this should be included in the DD balancing region,
+            // but generally it is infrequent so we'll omit it for the sake of
+            // simpler code
+            listedForcesGpu->waitAccumulateEnergyTerms(enerd);
+        }
 
         listedForcesGpu->clearEnergies();
     }
@@ -1049,7 +1599,9 @@ static int getExpectedLocalXReadyOnDeviceConsumptionCount(const SimulationWorklo
         // Event is consumed by force clearing which waits for the update to complete
         result++;
     }
-    if (simulationWork.useGpuUpdate && domainWork.haveCpuLocalForceWork)
+    const bool needCpuForceBufferBeforeUpdate =
+            domainWork.haveCpuLocalForceWork || simulationWork.requireCpuForceBufferForPostProcessing;
+    if (simulationWork.useGpuUpdate && needCpuForceBufferBeforeUpdate)
     {
         // Event is consumed when waiting for it on the CPU prior to CPU force buffer clearing.
         // The actual data dependency does not involve coordinates, but we use this event
@@ -1548,6 +2100,35 @@ void do_force(FILE*                         fplog,
 
     const StepWorkload& stepWork = runScheduleWork.stepWork;
 
+    const bool useGpuGaMDShortRangeVirial =
+            simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuResident
+            && stepWork.computeVirial && stepWork.useGpuFBufferOps;
+    static const bool gaMDGpuWorkloadDiagnosticsEnabled =
+            (std::getenv("GMX_GAMD_GPU_DIAGNOSTICS") != nullptr);
+    static bool printedGaMDGpuWorkloadDiagnostics = false;
+    if (!printedGaMDGpuWorkloadDiagnostics && gaMDGpuWorkloadDiagnosticsEnabled
+        && simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuResident)
+    {
+        std::fprintf(stderr,
+                     "[GaMD GPU diagnostics] cpuLocal=%d cpuListed=%d cpuBonded=%d special=%d "
+                     "freeEnergy=%d gpuFBufferOps=%d computeVirial=%d shortRangeVirial=%d\n",
+                     domainWork.haveCpuLocalForceWork,
+                     domainWork.haveCpuListedForceWork,
+                     domainWork.haveCpuBondedWork,
+                     domainWork.haveSpecialForces,
+                     domainWork.haveFreeEnergyWork,
+                     stepWork.useGpuFBufferOps,
+                     stepWork.computeVirial,
+                     useGpuGaMDShortRangeVirial);
+        printedGaMDGpuWorkloadDiagnostics = true;
+    }
+    if (useGpuGaMDShortRangeVirial && fr->wholeMoleculeTransform != nullptr)
+    {
+        gmx_fatal(FARGS,
+                  "GPU GaMD short-range virial reduction does not support whole-molecule host "
+                  "coordinate transforms.");
+    }
+
     const bool pmeSendCoordinatesFromGpu =
             simulationWork.useGpuPmePpCommunication && !stepWork.doNeighborSearch;
 
@@ -1629,9 +2210,10 @@ void do_force(FILE*                         fplog,
     // search steps the current coordinates are already on the host,
     // hence copy is not needed.
     if (simulationWork.useGpuUpdate && !stepWork.doNeighborSearch
-        && (runScheduleWork.domainWork.haveCpuLocalForceWork || stepWork.computeVirial
+        && (runScheduleWork.domainWork.haveCpuLocalForceWork
+            || (stepWork.computeVirial && !useGpuGaMDShortRangeVirial)
             || simulationWork.useCpuPmePpCommunication || simulationWork.useCpuHaloExchange
-            || simulationWork.computeMuTot))
+            || simulationWork.computeMuTot || simulationWork.requireCpuForceBufferForPostProcessing))
     {
         stateGpu->copyCoordinatesFromGpu(x.unpaddedArrayRef(), AtomLocality::Local);
         haveCopiedXFromGpu = true;
@@ -1889,7 +2471,7 @@ void do_force(FILE*                         fplog,
         gpu_launch_cpyback(nbv->gpuNbv(), &nbv->nbat(), stepWork, AtomLocality::Local);
         wallcycle_sub_stop(wcycle, WallCycleSubCounter::LaunchGpuNonBonded);
 
-        if (domainWork.haveGpuBondedWork && stepWork.computeEnergy)
+        if (domainWork.haveGpuBondedWork && stepWork.computeEnergy && stepWork.stageGpuEnergyAndVirialToHost)
         {
             fr->listedForcesGpu->launchEnergyTransfer();
         }
@@ -1906,7 +2488,9 @@ void do_force(FILE*                         fplog,
     // force reduction has already completed. To minimize the cross-step dependencies
     // we wait on the coordinates to be updated on the device which is sufficient but
     // a later event than what we strictly need to synchronize with.
-    if (simulationWork.useGpuUpdate && domainWork.haveCpuLocalForceWork)
+    const bool needCpuForceBufferBeforeUpdate =
+            domainWork.haveCpuLocalForceWork || simulationWork.requireCpuForceBufferForPostProcessing;
+    if (simulationWork.useGpuUpdate && needCpuForceBufferBeforeUpdate)
     {
         const bool coordinatesAlreadyUpdatedOnDevice =
                 stepWork.doNeighborSearch || simulationWork.useCpuHaloExchange
@@ -1962,7 +2546,9 @@ void do_force(FILE*                         fplog,
     if (simulationWork.useGpuUpdate && !stepWork.doNeighborSearch)
     {
         const bool needCoordsOnHost = (runScheduleWork.domainWork.haveCpuLocalForceWork
-                                       || stepWork.computeVirial || simulationWork.computeMuTot);
+                                       || (stepWork.computeVirial && !useGpuGaMDShortRangeVirial)
+                                       || simulationWork.computeMuTot
+                                       || simulationWork.requireCpuForceBufferForPostProcessing);
         const bool haveAlreadyWaited =
                 simulationWork.useCpuHaloExchange
                 || (stepWork.computePmeOnSeparateRank && !pmeSendCoordinatesFromGpu);
@@ -1998,7 +2584,7 @@ void do_force(FILE*                         fplog,
     }
 
     /* Reset energies */
-    reset_enerdata(enerd);
+    reset_enerdata(enerd, step);
 
     if (haveDDAtomOrdering(*cr) && simulationWork.haveSeparatePmeRank)
     {
@@ -2453,6 +3039,23 @@ void do_force(FILE*                         fplog,
                 forceOutNonbonded->forceWithShiftForces().shiftForces(),
                 wcycle);
 
+        if (useGpuGaMDShortRangeVirial)
+        {
+            fr->listedForcesGpu->launchGamdShortRangeVirialReduction();
+            if (stepWork.stageGpuEnergyAndVirialToHost)
+            {
+                std::array<real, DIM * DIM> shortRangeVirial = {};
+                fr->listedForcesGpu->copyGamdShortRangeVirial(&shortRangeVirial);
+                for (int i = 0; i < DIM; ++i)
+                {
+                    for (int j = 0; j < DIM; ++j)
+                    {
+                        vir_force[i][j] += shortRangeVirial[i * DIM + j];
+                    }
+                }
+            }
+        }
+
         if (ddBalanceRegionHandler.useBalancingRegion())
         {
             DdBalanceRegionWaitedForGpu waitedForGpu = DdBalanceRegionWaitedForGpu::yes;
@@ -2530,6 +3133,10 @@ void do_force(FILE*                         fplog,
 
             if (stepWork.computeNonbondedForces)
             {
+                if (useGpuGaMDShortRangeVirial && fr->listedForcesGpu->gamdDihedralShadowEnabled())
+                {
+                    stateGpu->setFReducedOnDeviceEventExpectedConsumptionCount(AtomLocality::Local, 2);
+                }
                 fr->gpuForceReduction[AtomLocality::Local]->execute();
             }
 
@@ -2566,6 +3173,26 @@ void do_force(FILE*                         fplog,
         /* The same fReadyOnDevice device synchronizer is later used to track buffer clearing,
          * so we reset the expected consumption value back to the default (1). */
         stateGpu->setFReadyOnDeviceEventExpectedConsumptionCount(AtomLocality::Local, 1);
+    }
+
+    if (stepWork.computeEnergy && fr->listedForcesGpu != nullptr
+        && fr->listedForcesGpu->gamdEnergyShadowEnabled())
+    {
+        pme_gpu_stage_gamd_reciprocal_energy(fr->pmedata,
+                                             fr->listedForcesGpu->gamdPmeEnergyStagingBuffer(),
+                                             fr->listedForcesGpu->gamdPmeEnergyReadyEvent());
+        const GaMDGpuProductionParameters gamdParameters = gamdGpuProductionParameters();
+        fr->listedForcesGpu->launchGamdEnergyShadowReduction(gamdParameters.igamd,
+                                                             gamdParameters.stage,
+                                                             gamdParameters.thresholdP,
+                                                             gamdParameters.kP,
+                                                             gamdParameters.thresholdD,
+                                                             gamdParameters.kD,
+                                                             !stepWork.stageGpuEnergyAndVirialToHost);
+        if (useGpuGaMDShortRangeVirial && !stepWork.stageGpuEnergyAndVirialToHost)
+        {
+            fr->listedForcesGpu->recordGamdForceVirialSample();
+        }
     }
 
     launchGpuEndOfStepTasks(
@@ -2627,9 +3254,26 @@ void do_force(FILE*                         fplog,
                              forceView->forceMtsCombined(),
                              inputrec.mtsLevels[1].stepFactor);
         }
+
+        applyGaMDCurrentStepCorrection(cr,
+                                       inputrec,
+                                       step,
+                                       *top,
+                                       box,
+                                       x,
+                                       force.unpaddedArrayRef(),
+                                       vir_force,
+                                       *mdatoms,
+                                       enerd,
+                                       lambda,
+                                       fr,
+                                       vsite,
+                                       nrnb,
+                                       wcycle,
+                                       runScheduleWork);
     }
 
-    if (stepWork.computeEnergy)
+    if (stepWork.computeEnergy && stepWork.stageGpuEnergyAndVirialToHost)
     {
         /* Compute the final potential energy terms */
         accumulatePotentialEnergies(enerd, lambda, inputrec.fepvals.get());

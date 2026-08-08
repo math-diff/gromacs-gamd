@@ -52,7 +52,10 @@ if(GMX_GPU_CUDA)
     # Clang-18 seems to emit bad ptx for this file, so we omit it from
     # the CI build that does clang-tidy analysis of a CUDA build.
     if (NOT GMX_CLANG_TIDY)
-       gmx_add_libgromacs_sources(listed_forces_gpu_internal.cu)
+       gmx_add_libgromacs_sources(
+           gamd_scale_gpu.cu
+           listed_forces_gpu_internal.cu
+           )
     endif()
     _gmx_add_files_to_property(CUDA_SOURCES
       listed_forces_gpu_impl_gpu.cpp

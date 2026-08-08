@@ -308,6 +308,7 @@ __launch_bounds__(THREADS_PER_BLOCK, MIN_BLOCKS_PER_MP)
     float2* ljcpib = reinterpret_cast<float2*>(sm_nextSlotPtr);
     sm_nextSlotPtr += (c_superClusterSize * c_clusterSize * sizeof(*ljcpib));
 #    endif
+
     /*********************************************************************/
 
     nb_sci         = pl_sci[bidx];         /* my i super-cluster's index = current bidx */

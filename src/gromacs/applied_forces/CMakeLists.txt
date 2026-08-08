@@ -69,6 +69,7 @@ add_subdirectory(qmmm)
 add_subdirectory(colvars)
 add_subdirectory(plumed)
 add_subdirectory(nnpot)
+add_subdirectory(gamd)
 
 if (BUILD_TESTING)
     add_subdirectory(tests)

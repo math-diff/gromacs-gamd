@@ -34,7 +34,7 @@
 #include "gmxpre.h"
 
 #include "enerdata_utils.h"
-
+#include "gromacs/applied_forces/gamd/gamdforceprovider.h"
 #include <cmath>
 #include <cstdio>
 
@@ -53,7 +53,7 @@
 #include "gromacs/utility/enumerationhelpers.h"
 #include "gromacs/utility/fatalerror.h"
 #include "gromacs/utility/gmxassert.h"
-
+extern double g_gamd_last_total_boost;
 ForeignLambdaTerms::ForeignLambdaTerms(
         const gmx::EnumerationArray<FreeEnergyPerturbationCouplingType, std::vector<double>>* allLambdas) :
     numLambdas_(allLambdas ? gmx::ssize((*allLambdas)[FreeEnergyPerturbationCouplingType::Fep]) : 0),
@@ -304,12 +304,18 @@ void accumulatePotentialEnergies(gmx_enerdata_t* enerd, gmx::ArrayRef<const real
 {
     sum_epot(enerd->grpp, enerd->term.data());
 
+    /* GaMD output bookkeeping:
+     * sum_epot() reconstructs F_EPOT from physical energy components and overwrites
+     * any previous value written by a force provider. Add the GaMD boost back here
+     * so that log/edr Potential contains the boosted total potential energy.
+     */
+    enerd->term[F_EPOT] += g_gamd_last_total_boost;
+
     if (fepvals)
     {
         enerd->term[F_DVDL] = 0.0;
         for (auto i : gmx::EnumerationWrapper<FreeEnergyPerturbationCouplingType>{})
         {
-            // Skip kinetic terms here, as those are not available here yet
             if (i != FreeEnergyPerturbationCouplingType::Mass)
             {
                 set_dhdl_output(enerd, i, *fepvals);
@@ -404,9 +410,11 @@ void reset_dvdl_enerdata(gmx_enerdata_t* enerd)
     }
 }
 
-void reset_enerdata(gmx_enerdata_t* enerd)
+void reset_enerdata(gmx_enerdata_t* enerd, int64_t step)
 {
     int i, j;
+
+    gmx::gamdWriteRestartState(static_cast<long>(step));
 
     /* First reset all energy components. */
     for (i = 0; (i < static_cast<int>(NonBondedEnergyTerms::Count)); i++)
@@ -430,6 +438,7 @@ void reset_enerdata(gmx_enerdata_t* enerd)
     enerd->term[F_DVDL_RESTRAINT] = 0.0_real;
     enerd->term[F_DKDL]           = 0.0_real;
     enerd->foreignLambdaTerms.zeroAllTerms();
+
     /* reset dvdl - separate function since it is also called elsewhere */
     reset_dvdl_enerdata(enerd);
 }

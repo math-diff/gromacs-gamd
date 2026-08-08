@@ -345,6 +345,10 @@ public:
      */
     GpuEventSynchronizer* fReducedOnDevice(AtomLocality atomLocality);
 
+    //! \copydoc StatePropagatorDataGpu::setFReducedOnDeviceEventExpectedConsumptionCount
+    void setFReducedOnDeviceEventExpectedConsumptionCount(AtomLocality atomLocality,
+                                                           int          expectedConsumptionCount);
+
     //! \brief Consume the event for when the forces are reduced on device.
     void consumeForcesReducedOnDeviceEvent(AtomLocality atomLocality);
 

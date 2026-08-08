@@ -68,7 +68,6 @@ void SettleGpu::apply(const DeviceBuffer<Float3>& d_x,
                       DeviceBuffer<Float3>        d_v,
                       const real                  invdt,
                       const bool                  computeVirial,
-                      tensor                      virialScaled,
                       const PbcAiuc&              pbcAiuc)
 {
     // Early exit if no settles
@@ -96,26 +95,40 @@ void SettleGpu::apply(const DeviceBuffer<Float3>& d_x,
                           d_virialScaled_,
                           pbcAiuc,
                           deviceStream_);
+}
 
-
-    if (computeVirial)
+void SettleGpu::copyVirialToHost(tensor virialScaled)
+{
+    if (numSettles_ == 0)
     {
-        copyFromDeviceBuffer(
-                h_virialScaled_.data(), &d_virialScaled_, 0, 6, deviceStream_, GpuApiCallBehavior::Sync, nullptr);
-
-        // Mapping [XX, XY, XZ, YY, YZ, ZZ] internal format to a tensor object
-        virialScaled[XX][XX] += h_virialScaled_[0];
-        virialScaled[XX][YY] += h_virialScaled_[1];
-        virialScaled[XX][ZZ] += h_virialScaled_[2];
-
-        virialScaled[YY][XX] += h_virialScaled_[1];
-        virialScaled[YY][YY] += h_virialScaled_[3];
-        virialScaled[YY][ZZ] += h_virialScaled_[4];
-
-        virialScaled[ZZ][XX] += h_virialScaled_[2];
-        virialScaled[ZZ][YY] += h_virialScaled_[4];
-        virialScaled[ZZ][ZZ] += h_virialScaled_[5];
+        return;
     }
+
+    copyFromDeviceBuffer(
+            h_virialScaled_.data(), &d_virialScaled_, 0, 6, deviceStream_, GpuApiCallBehavior::Sync, nullptr);
+
+    // Mapping [XX, XY, XZ, YY, YZ, ZZ] internal format to a tensor object
+    virialScaled[XX][XX] += h_virialScaled_[0];
+    virialScaled[XX][YY] += h_virialScaled_[1];
+    virialScaled[XX][ZZ] += h_virialScaled_[2];
+
+    virialScaled[YY][XX] += h_virialScaled_[1];
+    virialScaled[YY][YY] += h_virialScaled_[3];
+    virialScaled[YY][ZZ] += h_virialScaled_[4];
+
+    virialScaled[ZZ][XX] += h_virialScaled_[2];
+    virialScaled[ZZ][YY] += h_virialScaled_[4];
+    virialScaled[ZZ][ZZ] += h_virialScaled_[5];
+}
+
+bool SettleGpu::hasSettles() const
+{
+    return numSettles_ != 0;
+}
+
+DeviceBuffer<float> SettleGpu::virialDeviceBuffer() const
+{
+    return d_virialScaled_;
 }
 
 SettleGpu::SettleGpu(const gmx_mtop_t& mtop, const DeviceContext& deviceContext, const DeviceStream& deviceStream) :

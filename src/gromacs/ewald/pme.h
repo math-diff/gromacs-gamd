@@ -537,6 +537,16 @@ GPU_FUNC_QUALIFIER void pme_gpu_set_device_x(const gmx_pme_t* GPU_FUNC_ARGUMENT(
 GPU_FUNC_QUALIFIER DeviceBuffer<gmx::RVec> pme_gpu_get_device_f(const gmx_pme_t* GPU_FUNC_ARGUMENT(pme))
         GPU_FUNC_TERM_WITH_RETURN(DeviceBuffer<gmx::RVec>{});
 
+/*! \brief Stage the primary-grid reciprocal energy into a consumer-owned buffer.
+ *
+ * The operation is enqueued on the PME stream and marks \p readyEvent after
+ * the scaled energy is available.
+ */
+GPU_FUNC_QUALIFIER void pme_gpu_stage_gamd_reciprocal_energy(
+        const gmx_pme_t*             GPU_FUNC_ARGUMENT(pme),
+        DeviceBuffer<float>          GPU_FUNC_ARGUMENT(destination),
+        GpuEventSynchronizer*        GPU_FUNC_ARGUMENT(readyEvent)) GPU_FUNC_TERM;
+
 /*! \brief Get pointer to the device synchronizer object that allows syncing on PME force calculation completion
  * \param[in] pme            The PME data structure.
  * \returns                  Pointer to synchronizer

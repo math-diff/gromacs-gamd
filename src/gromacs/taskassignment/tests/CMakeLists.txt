@@ -33,6 +33,7 @@
 
 gmx_add_unit_test(TaskAssignmentUnitTests taskassignment-test
     CPP_SOURCE_FILES
+        decidesimulationworkload.cpp
         usergpuids.cpp
         )
 target_link_libraries(taskassignment-test PRIVATE taskassignment)

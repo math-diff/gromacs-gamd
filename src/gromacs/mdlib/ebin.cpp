@@ -190,6 +190,41 @@ void add_ebin(t_ebin* eb, int entryIndex, int nener, const real ener[], gmx_bool
     }
 }
 
+void add_ebin_deferred(t_ebin* eb, const int entryIndex, const int nener, gmx::ArrayRef<const real> ener, const int numSamples)
+{
+    GMX_ASSERT(numSamples >= 0 && nener >= 0, "Deferred energy dimensions must be non-negative");
+    GMX_ASSERT(ener.ssize() == numSamples * nener,
+               "Deferred contiguous samples must match their declared dimensions");
+    GMX_ASSERT(entryIndex >= 0 && entryIndex + nener <= eb->nener,
+               "Deferred contiguous energy-bin entries must be in range");
+    GMX_ASSERT(eb->nsum >= numSamples, "The energy-bin count must already include deferred samples");
+
+    const int firstSampleCount = eb->nsum - numSamples;
+    for (int sample = 0; sample < numSamples; ++sample)
+    {
+        const int m = firstSampleCount + sample;
+        for (int term = 0; term < nener; ++term)
+        {
+            t_energy&    energyEntry = eb->e[entryIndex + term];
+            t_energy&    simEntry    = eb->e_sim[entryIndex + term];
+            const double value       = ener[sample * nener + term];
+            energyEntry.e            = value;
+            if (m == 0)
+            {
+                energyEntry.eav  = 0;
+                energyEntry.esum = value;
+            }
+            else
+            {
+                const double difference = energyEntry.esum - m * value;
+                energyEntry.eav += difference * difference * (1.0 / m) / (m + 1.0);
+                energyEntry.esum += value;
+            }
+            simEntry.esum += value;
+        }
+    }
+}
+
 // TODO It would be faster if this function was templated on both bSum
 // and whether eb->nsum was zero, to lift the branches out of the loop
 // over all possible energy terms, but that is true for a lot of the
@@ -241,6 +276,56 @@ void add_ebin_indexed(t_ebin*                   eb,
             ++energyEntry;
         }
         ++shouldUseIter;
+    }
+}
+
+void add_ebin_indexed_deferred(t_ebin*                   eb,
+                               int                       entryIndex,
+                               gmx::ArrayRef<bool>       shouldUse,
+                               gmx::ArrayRef<const real> ener,
+                               const int                 numSamples)
+{
+    GMX_ASSERT(numSamples >= 0, "Deferred energy sample count must be non-negative");
+    GMX_ASSERT(ener.ssize() == numSamples * shouldUse.ssize(),
+               "Deferred energy samples must match the energy-term stride");
+    GMX_ASSERT(eb->nsum >= numSamples, "The energy-bin count must already include deferred samples");
+
+    const int numUsed = std::count(shouldUse.begin(), shouldUse.end(), true);
+    GMX_ASSERT(entryIndex >= 0 && entryIndex + numUsed <= eb->nener,
+               "Deferred energy-bin entries must be in range");
+
+    const int firstSampleCount = eb->nsum - numSamples;
+    for (int sample = 0; sample < numSamples; ++sample)
+    {
+        const int  m            = firstSampleCount + sample;
+        const auto sampleValues = ener.subArray(sample * shouldUse.ssize(), shouldUse.ssize());
+        t_energy*  energyEntry  = &eb->e[entryIndex];
+        t_energy*  simEntry     = &eb->e_sim[entryIndex];
+
+        for (int term = 0; term < shouldUse.ssize(); ++term)
+        {
+            if (!shouldUse[term])
+            {
+                continue;
+            }
+
+            const double value = sampleValues[term];
+            energyEntry->e     = value;
+            if (m == 0)
+            {
+                energyEntry->eav  = 0;
+                energyEntry->esum = value;
+            }
+            else
+            {
+                const double difference = energyEntry->esum - m * value;
+                energyEntry->eav += difference * difference * (1.0 / m) / (m + 1.0);
+                energyEntry->esum += value;
+            }
+            simEntry->esum += value;
+            ++energyEntry;
+            ++simEntry;
+        }
     }
 }
 

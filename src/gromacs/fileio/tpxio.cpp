@@ -200,6 +200,7 @@ enum tpxv
     tpxv_RefScaleMultipleCOMs, /**< Add multiple COM groups for refcoord-scale */
     tpxv_InputHistogramCounts, /**< Provide input histogram counts for current expanded ensemble state */
     tpxv_NNPotIFuncType,       /**< Add interaction function type for neural network potential */
+    tpxv_GaMDInputrecFlag,     /**< Store GaMD on/off flag in inputrec */
     tpxv_Count                 /**< the total number of tpxv versions */
 };
 
@@ -1848,6 +1849,27 @@ static void do_inputrec(gmx::ISerializer* serializer, t_inputrec* ir, int file_v
             dummyIntVec.clear();
         }
         /* end of QMMM stuff */
+    }
+
+    if (file_version >= tpxv_GaMDInputrecFlag)
+    {
+        serializer->doBool(&ir->bDoGaMD);
+        if (serializer->reading())
+        {
+            if (ir->bDoGaMD && !ir->gamdParams)
+            {
+                ir->gamdParams = std::make_unique<gmx::GaMDParams>();
+            }
+            else if (!ir->bDoGaMD)
+            {
+                ir->gamdParams.reset();
+            }
+        }
+    }
+    else
+    {
+        ir->bDoGaMD = false;
+        ir->gamdParams.reset();
     }
 
     if (file_version >= tpxv_GenericParamsForElectricField)

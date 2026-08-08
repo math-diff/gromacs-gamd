@@ -45,6 +45,13 @@
 namespace gmx
 {
 
+//! Selects where current-step GaMD force correction is executed.
+enum class GaMDExecutionMode
+{
+    CpuReference,
+    GpuResident
+};
+
 /*! \libinternal
  * \brief Describes work done on this domain by the current rank that may change per-step.
  *
@@ -75,6 +82,8 @@ public:
     bool computeVirial = false;
     //! Whether energies need to be computed this step this step
     bool computeEnergy = false;
+    //! Whether GPU energy and virial results need to be staged to host this step
+    bool stageGpuEnergyAndVirialToHost = false;
     //! Whether (any) forces need to be computed this step, not only energies
     bool computeForces = false;
     //! Whether only the MTS combined force buffers are needed and not the separate normal force buffer.
@@ -185,6 +194,12 @@ public:
     bool useGpuXBufferOpsWhenAllowed = false;
     //! If F buffer operations are allowed on GPU (actual use depends on other activities that step).
     bool useGpuFBufferOpsWhenAllowed = false;
+    //! If host-side force post-processing needs the final force buffer before GPU update.
+    bool requireCpuForceBufferForPostProcessing = false;
+    //! Current-step GaMD execution mode selected for this simulation.
+    GaMDExecutionMode gamdExecutionMode = GaMDExecutionMode::CpuReference;
+    //! Whether the complete GPU-resident GaMD feature bundle is active.
+    bool useGpuResidentGaMD() const { return gamdExecutionMode == GaMDExecutionMode::GpuResident; }
     //! Whether filler particles are part of the local state
     bool haveFillerParticlesInLocalState = false;
     //! If PP domain decomposition is active.

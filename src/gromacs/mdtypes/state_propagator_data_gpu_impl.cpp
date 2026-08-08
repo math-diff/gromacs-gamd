@@ -279,6 +279,14 @@ GpuEventSynchronizer* StatePropagatorDataGpu::fReducedOnDevice(AtomLocality /*at
     return nullptr;
 }
 
+void StatePropagatorDataGpu::setFReducedOnDeviceEventExpectedConsumptionCount(
+        AtomLocality /*atomLocality*/, int /*expectedConsumptionCount*/)
+{
+    GMX_ASSERT(!impl_,
+               "A CPU stub method from GPU state propagator data was called instead of one from "
+               "GPU implementation.");
+}
+
 void StatePropagatorDataGpu::consumeForcesReducedOnDeviceEvent(AtomLocality /*atomLocality*/)
 {
     GMX_ASSERT(!impl_,

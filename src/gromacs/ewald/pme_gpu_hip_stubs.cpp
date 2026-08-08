@@ -79,7 +79,8 @@ void pme_gpu_solve(PmeGpu* /* pmeGpu */,
                    int /* gridIndex */,
                    t_complex* /* h_grid */,
                    GridOrdering /* gridOrdering */,
-                   bool /* computeEnergyAndVirial */)
+                   bool /* computeEnergyAndVirial */,
+                   bool /* stageEnergyAndVirialToHost */)
 {
     GMX_RELEASE_ASSERT(false, "HIP PME not implemented yet");
 }

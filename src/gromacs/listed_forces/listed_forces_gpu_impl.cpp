@@ -157,6 +157,7 @@ class ListedForcesGpu::Impl
 ListedForcesGpu::ListedForcesGpu(const gmx_ffparams_t& /* ffparams */,
                                  const float /* electrostaticsScaleFactor */,
                                  const int /* numEnergyGroupsForListedForces */,
+                                 const bool /* useGpuResidentGaMD */,
                                  const DeviceContext& /* deviceContext */,
                                  const DeviceStream& /* deviceStream */,
                                  gmx_wallcycle* /* wcycle */) :
@@ -198,6 +199,95 @@ void ListedForcesGpu::waitAccumulateEnergyTerms(gmx_enerdata_t* /* enerd */) {}
 
 void ListedForcesGpu::clearEnergies() {}
 
-#endif // !GMX_GPU_CUDA
+bool ListedForcesGpu::gamdDihedralShadowEnabled() const
+{
+    return false;
+}
+
+bool ListedForcesGpu::gamdDihedralBufferEnabled() const
+{
+    return false;
+}
+
+bool ListedForcesGpu::gamdEnergyShadowEnabled() const
+{
+    return false;
+}
+
+bool ListedForcesGpu::gamdEnergyShadowDiagnosticsEnabled() const
+{
+    return false;
+}
+
+bool ListedForcesGpu::gamdScaleFromDeviceEnabled() const
+{
+    return false;
+}
+
+DeviceBuffer<float> ListedForcesGpu::gamdPmeEnergyStagingBuffer()
+{
+    return nullptr;
+}
+
+GpuEventSynchronizer* ListedForcesGpu::gamdPmeEnergyReadyEvent()
+{
+    return nullptr;
+}
+
+void ListedForcesGpu::launchGamdEnergyShadowReduction(int /* igamd */,
+                                                      int /* stage */,
+                                                      double /* thresholdP */,
+                                                      double /* kP */,
+                                                      double /* thresholdD */,
+                                                      double /* kD */,
+                                                      bool /* recordEnergySample */)
+{
+}
+
+std::array<double, 6> ListedForcesGpu::gamdEnergyShadowValues()
+{
+    return { 0.0, 0.0, 1.0, 1.0, 0.0, 0.0 };
+}
+
+std::vector<std::array<real, F_NRE>> ListedForcesGpu::takeGamdEnergyHistory()
+{
+    return {};
+}
+
+void ListedForcesGpu::recordGamdForceVirialSample() {}
+
+std::vector<std::array<real, DIM * DIM>> ListedForcesGpu::takeGamdForceVirialHistory(int /* numSamples */)
+{
+    return {};
+}
+
+void ListedForcesGpu::copyGamdDihedralShadowForces(ArrayRef<RVec> /* forces */) {}
+
+void ListedForcesGpu::copyGamdDihedralVirial(std::array<real, DIM * DIM>* /* virial */) {}
+
+void ListedForcesGpu::launchGamdShortRangeVirialReduction() {}
+
+void ListedForcesGpu::copyGamdShortRangeVirial(std::array<real, DIM * DIM>* /* virial */) {}
+
+void ListedForcesGpu::applyGamdForceCorrectionShadow(ArrayRef<const RVec> /* rawForces */,
+                                                     real /* totalScale */,
+                                                     real /* dihedralCorrectionScale */,
+                                                     ArrayRef<RVec> /* correctedForces */)
+{
+}
+
+void ListedForcesGpu::applyGamdForceCorrection(DeviceBuffer<RVec> /* forces */,
+                                               real /* totalScale */,
+                                               real /* dihedralCorrectionScale */,
+                                               GpuEventSynchronizer* /* rawForcesReady */)
+{
+}
+
+GpuEventSynchronizer* ListedForcesGpu::gamdForcesReadyEvent()
+{
+    return nullptr;
+}
+
+#endif // !GMX_GPU_CUDA && !GMX_GPU_SYCL
 
 } // namespace gmx

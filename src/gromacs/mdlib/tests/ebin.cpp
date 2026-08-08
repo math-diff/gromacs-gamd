@@ -37,6 +37,8 @@
 
 #include <cstdio>
 
+#include <algorithm>
+#include <array>
 #include <filesystem>
 #include <string>
 
@@ -88,6 +90,20 @@ public:
     {
     }
 };
+
+void expectEnergyBinsEqual(const t_ebin& reference, const t_ebin& candidate)
+{
+    ASSERT_EQ(reference.nener, candidate.nener);
+    ASSERT_EQ(reference.nsum, candidate.nsum);
+    ASSERT_EQ(reference.nsum_sim, candidate.nsum_sim);
+    for (int i = 0; i < reference.nener; ++i)
+    {
+        EXPECT_DOUBLE_EQ(reference.e[i].e, candidate.e[i].e);
+        EXPECT_DOUBLE_EQ(reference.e[i].eav, candidate.e[i].eav);
+        EXPECT_DOUBLE_EQ(reference.e[i].esum, candidate.e[i].esum);
+        EXPECT_DOUBLE_EQ(reference.e_sim[i].esum, candidate.e_sim[i].esum);
+    }
+}
 
 TEST_F(PrEbinTest, HandlesAverages)
 {
@@ -143,6 +159,76 @@ TEST_F(PrEbinTest, HandlesEmptyAverages)
 
     checker_.checkInteger(ebin->nener, "Number of Energy Terms");
     checker_.checkString(TextReader::readFileToString(logFilename_), "log");
+}
+
+TEST(EbinDeferredTest, MatchesSequentialContiguousUpdates)
+{
+    unique_cptr<t_ebin, done_ebin> reference(mk_ebin());
+    unique_cptr<t_ebin, done_ebin> deferred(mk_ebin());
+    const char*                    names[] = { "first", "second" };
+    get_ebin_space(reference.get(), 2, names, nullptr);
+    get_ebin_space(deferred.get(), 2, names, nullptr);
+
+    constexpr std::array<std::array<real, 2>, 4> samples = {
+        { { 1.0_real, 20.0_real }, { 2.0_real, 40.0_real }, { -3.0_real, 10.0_real }, { 8.0_real, -5.0_real } }
+    };
+    for (const auto& sample : samples)
+    {
+        add_ebin(reference.get(), 0, sample.size(), sample.data(), TRUE);
+        ebin_increase_count(1, reference.get(), TRUE);
+    }
+
+    add_ebin(deferred.get(), 0, samples[0].size(), samples[0].data(), TRUE);
+    ebin_increase_count(1, deferred.get(), TRUE);
+    std::array<real, 6> deferredSamples;
+    for (std::size_t sample = 1; sample < samples.size(); ++sample)
+    {
+        std::copy(samples[sample].begin(),
+                  samples[sample].end(),
+                  deferredSamples.begin() + (sample - 1) * samples[sample].size());
+    }
+    constexpr int numDeferredSamples = samples.size() - 1;
+    ebin_increase_count(numDeferredSamples, deferred.get(), TRUE);
+    add_ebin_deferred(deferred.get(), 0, 2, deferredSamples, numDeferredSamples);
+
+    expectEnergyBinsEqual(*reference, *deferred);
+}
+
+TEST(EbinDeferredTest, MatchesSequentialIndexedUpdates)
+{
+    unique_cptr<t_ebin, done_ebin> reference(mk_ebin());
+    unique_cptr<t_ebin, done_ebin> deferred(mk_ebin());
+    const char*                    names[] = { "first", "second" };
+    get_ebin_space(reference.get(), 2, names, nullptr);
+    get_ebin_space(deferred.get(), 2, names, nullptr);
+
+    std::array<bool, 4>                          shouldUse = { true, false, true, false };
+    constexpr std::array<std::array<real, 4>, 4> samples   = {
+        { { 1.0_real, 100.0_real, 20.0_real, 200.0_real },
+            { 2.0_real, 101.0_real, 40.0_real, 201.0_real },
+            { -3.0_real, 102.0_real, 10.0_real, 202.0_real },
+            { 8.0_real, 103.0_real, -5.0_real, 203.0_real } }
+    };
+    for (const auto& sample : samples)
+    {
+        add_ebin_indexed(reference.get(), 0, shouldUse, sample, TRUE);
+        ebin_increase_count(1, reference.get(), TRUE);
+    }
+
+    add_ebin_indexed(deferred.get(), 0, shouldUse, samples[0], TRUE);
+    ebin_increase_count(1, deferred.get(), TRUE);
+    std::array<real, 12> deferredSamples;
+    for (std::size_t sample = 1; sample < samples.size(); ++sample)
+    {
+        std::copy(samples[sample].begin(),
+                  samples[sample].end(),
+                  deferredSamples.begin() + (sample - 1) * samples[sample].size());
+    }
+    constexpr int numDeferredSamples = samples.size() - 1;
+    ebin_increase_count(numDeferredSamples, deferred.get(), TRUE);
+    add_ebin_indexed_deferred(deferred.get(), 0, shouldUse, deferredSamples, numDeferredSamples);
+
+    expectEnergyBinsEqual(*reference, *deferred);
 }
 
 } // namespace

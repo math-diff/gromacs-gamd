@@ -39,7 +39,7 @@
 #include "gromacs/math/vectypes.h"
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/real.h"
-
+#include <cstdint>
 struct gmx_enerdata_t;
 struct gmx_grppairener_t;
 struct t_lambda;
@@ -47,7 +47,7 @@ struct t_lambda;
 void reset_dvdl_enerdata(gmx_enerdata_t* enerd);
 /* Resets only the dvdl energy data */
 
-void reset_enerdata(gmx_enerdata_t* enerd);
+void reset_enerdata(gmx_enerdata_t* enerd, int64_t step);
 /* Resets the energy data */
 
 /*! \brief Sums energy group pair contributions into epot */

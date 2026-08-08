@@ -52,6 +52,8 @@
 #include <string_view>
 
 #include "gromacs/applied_forces/awh/read_params.h"
+#include "gromacs/applied_forces/gamd/read_params.h"
+#include "gromacs/mdtypes/gamd_params.h"
 #include "gromacs/fileio/readinp.h"
 #include "gromacs/fileio/warninp.h"
 #include "gromacs/gmxlib/network.h"
@@ -2611,6 +2613,14 @@ void get_ir(const char*     mdparin,
         ir->awhParams = std::make_unique<gmx::AwhParams>(&inp, wi);
     }
 
+    /* GaMD biasing */
+    printStringNewline(&inp, "GaMD biasing");
+    ir->bDoGaMD = (getEnum<Boolean>(&inp, "gamd", wi) != Boolean::No);
+    if (ir->bDoGaMD)
+    {
+        ir->gamdParams = std::make_unique<gmx::GaMDParams>();   // 改成默认构造
+    }
+
     /* Enforced rotation */
     printStringNewline(&inp, "ENFORCED ROTATION");
     printStringNoNewline(&inp, "Enforced rotation: No or Yes");
@@ -3192,6 +3202,11 @@ void get_ir(const char*     mdparin,
     if (ir->bDoAwh)
     {
         gmx::checkAwhParams(*ir->awhParams, *ir, wi);
+    }
+
+    if (ir->bDoGaMD)
+    {
+        gmx::checkGaMDParams(*ir->gamdParams, *ir, wi);
     }
 
     sfree(dumstr[0]);

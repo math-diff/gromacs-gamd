@@ -45,11 +45,13 @@
 #include "config.h"
 
 #include <cstdint>
+#include <cstdlib>
 
 #include <bitset>
 #include <memory>
 #include <vector>
 
+#include "gromacs/applied_forces/gamd/gamdforceprovider.h"
 #include "gromacs/essentialdynamics/edsam.h"
 #include "gromacs/ewald/pme.h"
 #include "gromacs/listed_forces/listed_forces.h"
@@ -127,6 +129,38 @@ SimulationWorkload createSimulationWorkload(const gmx::MDLogger& mdlog,
     simulationWorkload.useGpuPmeDecomposition       = useGpuPmeDecomposition;
     simulationWorkload.haveEwaldSurfaceContribution = haveEwaldSurfaceContribution(inputrec);
     simulationWorkload.useMts                       = inputrec.useMts;
+    const bool useCurrentStepGaMD = inputrec.bDoGaMD || getenv("GMX_USE_GAMD") != nullptr;
+    simulationWorkload.gamdExecutionMode =
+            selectGaMDExecutionMode(useCurrentStepGaMD,
+                                    useGpuForNonbonded,
+                                    simulationWorkload.useGpuPme,
+                                    useGpuForBonded,
+                                    useGpuForUpdate,
+                                    havePpDomainDecomposition,
+                                    haveSeparatePmeRank,
+                                    inputrec.useMts,
+                                    inputrec.pressureCouplingOptions.epc,
+                                    inputrec.pressureCouplingOptions.epct,
+                                    inputrec.nstfout);
+    const bool useGpuGaMDForceCorrection = simulationWorkload.useGpuResidentGaMD();
+    const bool useResidentGpuGaMD = useGpuGaMDForceCorrection;
+    simulationWorkload.requireCpuForceBufferForPostProcessing =
+            useCurrentStepGaMD && useGpuForUpdate && !useGpuGaMDForceCorrection;
+    if (useCurrentStepGaMD)
+    {
+        GMX_LOG(mdlog.info)
+                .asParagraph()
+                .appendTextFormatted("GaMD execution mode: %s.",
+                                     gaMDExecutionModeName(simulationWorkload.gamdExecutionMode));
+    }
+    if (simulationWorkload.requireCpuForceBufferForPostProcessing)
+    {
+        GMX_LOG(mdlog.info)
+                .asParagraph()
+                .appendText(
+                        "Current-step GaMD with GPU update uses the CPU force buffer for "
+                        "the GaMD force correction before GPU integration.");
+    }
     const bool featuresRequireGpuBufferOps = useGpuForUpdate || simulationWorkload.useGpuDirectCommunication;
 
     const bool disableGpuBufferOps = (getenv("GMX_GPU_DISABLE_BUFFER_OPS") != nullptr);
@@ -155,12 +189,22 @@ SimulationWorkload createSimulationWorkload(const gmx::MDLogger& mdlog,
     // Disallow use of native FFT libraries until ext_codeplay_enqueue_native_command is used.
     constexpr bool haveSyclWithGraphIncompatibleGpuFftLibrary =
             GMX_GPU_SYCL && !(GMX_GPU_FFT_BBFFT || GMX_GPU_FFT_MKL || GMX_GPU_FFT_ONEMATH);
+    const bool enableMdGpuGraph =
+            devFlags.enableCudaGraphs || (useResidentGpuGaMD && GMX_HAVE_GPU_GRAPH_SUPPORT);
     simulationWorkload.useMdGpuGraph =
-            devFlags.enableCudaGraphs && useGpuForUpdate
+            enableMdGpuGraph && useGpuForUpdate
+            && !simulationWorkload.requireCpuForceBufferForPostProcessing
+            && (!useCurrentStepGaMD || useResidentGpuGaMD)
             && (simulationWorkload.haveSeparatePmeRank ? simulationWorkload.useGpuPmePpCommunication : true)
             && (havePpDomainDecomposition ? simulationWorkload.useGpuHaloExchange : true)
             && (havePpDomainDecomposition ? (GMX_THREAD_MPI > 0) : true)
             && !(haveSyclWithGraphIncompatibleGpuFftLibrary && simulationWorkload.useGpuPmeFft);
+    if (useResidentGpuGaMD && simulationWorkload.useMdGpuGraph)
+    {
+        GMX_LOG(mdlog.info)
+                .asParagraph()
+                .appendText("CUDA Graph eligibility enabled automatically for GPU-resident GaMD.");
+    }
 
     simulationWorkload.useNvshmem = devFlags.enableNvshmem && simulationWorkload.useGpuDirectCommunication;
     return simulationWorkload;
@@ -252,6 +296,7 @@ StepWorkload setupStepWorkload(const int                     legacyFlags,
     flags.computeSlowForces             = computeSlowForces;
     flags.computeVirial                 = ((legacyFlags & GMX_FORCE_VIRIAL) != 0);
     flags.computeEnergy                 = ((legacyFlags & GMX_FORCE_ENERGY) != 0);
+    flags.stageGpuEnergyAndVirialToHost = flags.computeEnergy || flags.computeVirial;
     flags.computeForces                 = ((legacyFlags & GMX_FORCE_FORCES) != 0);
     flags.useOnlyMtsCombinedForceBuffer = ((legacyFlags & GMX_FORCE_DO_NOT_NEED_NORMAL_FORCE) != 0);
     flags.computeListedForces           = ((legacyFlags & GMX_FORCE_LISTED) != 0);
@@ -266,8 +311,14 @@ StepWorkload setupStepWorkload(const int                     legacyFlags,
                    "Can only offload buffer ops if nonbonded computation is also offloaded");
     }
     flags.useGpuXBufferOps = simulationWork.useGpuXBufferOpsWhenAllowed && !flags.doNeighborSearch;
-    // on virial steps the CPU reduction path is taken
-    flags.useGpuFBufferOps = simulationWork.useGpuFBufferOpsWhenAllowed && !flags.computeVirial;
+    // Generic virial steps take the CPU reduction path. The validated single-rank GPU GaMD
+    // path computes the short-range virial before PME force reduction and can keep forces on GPU.
+    const bool useGpuGaMDShortRangeVirial =
+            flags.computeVirial && simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuResident
+            && !domainWork.haveCpuLocalForceWork;
+    flags.useGpuFBufferOps = simulationWork.useGpuFBufferOpsWhenAllowed
+                             && (!flags.computeVirial || useGpuGaMDShortRangeVirial)
+                             && !simulationWork.requireCpuForceBufferForPostProcessing;
     flags.useGpuPmeFReduction =
             flags.computeSlowForces && flags.useGpuFBufferOps
             && (simulationWork.haveGpuPmeOnPpRank() || simulationWork.useGpuPmePpCommunication);
