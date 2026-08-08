@@ -557,7 +557,7 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
 
         gaMDModule->finalizeCurrentStep(step, cr->nodeid, rawPotentialEnergy, rawDihedralEnergy, wcycle);
 
-        if (fr->listedForcesGpu != nullptr
+        if (fr->listedForcesGpu != nullptr && runScheduleWork.gaMDModule->gpuExecutor() != nullptr
             && runScheduleWork.gaMDModule->gpuExecutor()->energyDiagnosticsEnabled())
         {
             const std::array<double, 6> deviceState =
@@ -805,7 +805,7 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
     }
 
     const bool gpuShadowEnabled =
-            (fr->listedForcesGpu != nullptr
+            (fr->listedForcesGpu != nullptr && runScheduleWork.gaMDModule->gpuExecutor() != nullptr
              && runScheduleWork.gaMDModule->gpuExecutor()->dihedralShadowEnabled());
     if (gpuShadowEnabled && haveDDAtomOrdering(*cr))
     {
@@ -3166,16 +3166,10 @@ void do_force(FILE*                         fplog,
         stateGpu->setFReadyOnDeviceEventExpectedConsumptionCount(AtomLocality::Local, 1);
     }
 
-    if (stepWork.computeEnergy && simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuResident
-        && fr->listedForcesGpu != nullptr)
+    if (stepWork.computeEnergy && fr->listedForcesGpu != nullptr
+        && runScheduleWork.gaMDModule != nullptr && runScheduleWork.gaMDModule->gpuExecutor() != nullptr
+        && runScheduleWork.gaMDModule->gpuExecutor()->energyEnabled())
     {
-        GMX_RELEASE_ASSERT(runScheduleWork.gaMDModule != nullptr
-                                   && runScheduleWork.gaMDModule->gpuExecutor() != nullptr,
-                           "GPU-resident GaMD requires the built-in GaMD module and GPU executor");
-        if (!runScheduleWork.gaMDModule->gpuExecutor()->energyEnabled())
-        {
-            gmx_fatal(FARGS, "GPU-resident GaMD requires GPU energy reduction.");
-        }
         pme_gpu_stage_gamd_reciprocal_energy(
                 fr->pmedata,
                 runScheduleWork.gaMDModule->gpuExecutor()->pmeEnergyStagingBuffer(),
