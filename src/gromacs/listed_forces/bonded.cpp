@@ -49,6 +49,8 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 
 #include <algorithm>
 #include <array>
@@ -79,16 +81,9 @@
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/smalloc.h"
 
-#include "listed_internal.h"
 #include "cmap_coefficients.h"
+#include "listed_internal.h"
 #include "restcbt.h"
-
-#include <cstdio>
-#include <cstdlib>
-/* GaMD Ultimate Dual-Boost Ratio */
-extern double g_gamd_dih_ratio;
-extern int g_gamd_debug;
-extern long g_gamd_debug_current_step;
 
 using namespace gmx; // TODO: Remove when this file is moved into gmx namespace
 
@@ -100,6 +95,15 @@ const EnumerationArray<BondedKernelFlavor, std::string> c_bondedKernelFlavorStri
 };
 namespace
 {
+
+double gaMDDihedralRatio(const t_fcdata* forceCalculationData)
+{
+    if (forceCalculationData == nullptr)
+    {
+        return 1.0;
+    }
+    return forceCalculationData->gaMDDihedralForceScale;
+}
 
 //! Type of CPU function to compute a bonded interaction.
 using BondedFunction = real (*)(int                       nbonds,
@@ -135,22 +139,24 @@ int pbc_rvec_sub(const t_pbc* pbc, const rvec xi, const rvec xj, rvec dx)
 
 struct GaMDDihForceDebugState
 {
-    bool initialized = false;
-    long step        = -1;
-    int  begin       = 0;
-    int  count       = -1;
-    FILE* fp         = nullptr;
+    bool  initialized = false;
+    long  step        = -1;
+    int   begin       = 0;
+    int   count       = -1;
+    FILE* fp          = nullptr;
 
-    long preparedStep = -1;
-    long flushedStep  = -1;
+    long    preparedStep = -1;
+    long    flushedStep  = -1;
+    int64_t currentStep  = -1;
 
 
     std::vector<gmx::RVec> buffer;
 };
 struct GaMDDihRawDebugState
 {
-    bool initialized = false;
-    FILE* fp         = nullptr;
+    bool    initialized = false;
+    FILE*   fp          = nullptr;
+    int64_t currentStep = -1;
 };
 
 static GaMDDihRawDebugState g_gamdDihRawDebug;
@@ -168,8 +174,9 @@ static void initGaMDDihRawDebug()
         g_gamdDihRawDebug.fp = std::fopen(s, "w");
         if (g_gamdDihRawDebug.fp != nullptr)
         {
-            std::fprintf(g_gamdDihRawDebug.fp,
-                         "# step atom fx fy fz   (raw applied dihedral-like force contributions)\n");
+            std::fprintf(
+                    g_gamdDihRawDebug.fp,
+                    "# step atom fx fy fz   (raw applied dihedral-like force contributions)\n");
             std::fflush(g_gamdDihRawDebug.fp);
         }
     }
@@ -190,17 +197,15 @@ static void gamdDihRawDebugAddOne(int atom, const rvec fAtom)
 
     std::fprintf(g_gamdDihRawDebug.fp,
                  "%ld %d %.9e %.9e %.9e\n",
-                 g_gamd_debug_current_step,
+                 static_cast<long>(g_gamdDihRawDebug.currentStep),
                  atom,
                  static_cast<double>(fAtom[0]),
                  static_cast<double>(fAtom[1]),
                  static_cast<double>(fAtom[2]));
 }
 
-static void gamdDihRawDebugAddFour(int ai, const rvec f_i,
-                                   int aj, const rvec f_j,
-                                   int ak, const rvec f_k,
-                                   int al, const rvec f_l)
+static void
+gamdDihRawDebugAddFour(int ai, const rvec f_i, int aj, const rvec f_j, int ak, const rvec f_k, int al, const rvec f_l)
 {
     gamdDihRawDebugAddOne(ai, f_i);
     gamdDihRawDebugAddOne(aj, f_j);
@@ -211,9 +216,9 @@ static void gamdDihRawDebugAddFour(int ai, const rvec f_i,
 
 static bool getForcedGaMDRatio(double* ratioOut)
 {
-    static bool initialized = false;
-    static bool active      = false;
-    static double ratio     = 1.0;
+    static bool   initialized = false;
+    static bool   active      = false;
+    static double ratio       = 1.0;
 
     if (!initialized)
     {
@@ -235,7 +240,6 @@ static bool getForcedGaMDRatio(double* ratioOut)
             // forces so the final dihedral weight becomes scaleP * scaleD.
             ratio  = scaleD;
             active = true;
-
         }
     }
 
@@ -284,9 +288,8 @@ static void initGaMDDihForceDebug()
 static bool gamdDihForceDebugActiveForCurrentStep()
 {
     initGaMDDihForceDebug();
-    return (g_gamdDihForceDebug.fp != nullptr
-            && g_gamdDihForceDebug.step >= 0
-            && g_gamd_debug_current_step == g_gamdDihForceDebug.step
+    return (g_gamdDihForceDebug.fp != nullptr && g_gamdDihForceDebug.step >= 0
+            && g_gamdDihForceDebug.currentStep == g_gamdDihForceDebug.step
             && g_gamdDihForceDebug.count != 0);
 }
 
@@ -314,7 +317,7 @@ static void gamdDihForceDebugEnsurePrepared(int nAtoms)
     {
         return;
     }
-    if (g_gamd_debug_current_step != g_gamdDihForceDebug.step)
+    if (g_gamdDihForceDebug.currentStep != g_gamdDihForceDebug.step)
     {
         return;
     }
@@ -329,13 +332,12 @@ static void gamdDihForceDebugEnsurePrepared(int nAtoms)
 
     g_gamdDihForceDebug.begin = begin;
 
-    if (g_gamdDihForceDebug.preparedStep != g_gamd_debug_current_step
+    if (g_gamdDihForceDebug.preparedStep != g_gamdDihForceDebug.currentStep
         || static_cast<int>(g_gamdDihForceDebug.buffer.size()) != count)
     {
         g_gamdDihForceDebug.buffer.resize(count);
         gamdDihForceDebugZeroBuffer();
-        g_gamdDihForceDebug.preparedStep = g_gamd_debug_current_step;
-
+        g_gamdDihForceDebug.preparedStep = g_gamdDihForceDebug.currentStep;
     }
 }
 
@@ -355,13 +357,10 @@ static void gamdDihForceDebugAddOne(int atom, const rvec fAtom)
     }
 
     rvec_inc(g_gamdDihForceDebug.buffer[atom - begin], fAtom);
-
 }
 
-static void gamdDihForceDebugAddFour(int ai, const rvec f_i,
-                                     int aj, const rvec f_j,
-                                     int ak, const rvec f_k,
-                                     int al, const rvec f_l)
+static void
+gamdDihForceDebugAddFour(int ai, const rvec f_i, int aj, const rvec f_j, int ak, const rvec f_k, int al, const rvec f_l)
 {
     gamdDihForceDebugAddOne(ai, f_i);
     gamdDihForceDebugAddOne(aj, f_j);
@@ -2227,7 +2226,7 @@ pdihs(int             nbonds,
         /* GaMD: Scale the total dihedral derivative for Type 9 / Scalar path */
         if constexpr (applyGaMDRatio)
         {
-            double gamdRatioLocal = g_gamd_dih_ratio;
+            double gamdRatioLocal = gaMDDihedralRatio(fcd);
             double forcedRatio    = 1.0;
             if (getForcedGaMDRatio(&forcedRatio))
             {
@@ -2347,10 +2346,10 @@ pdihs(int              nbonds,
         mddphi_S = cp_S * mult_S * sin_S;
         if constexpr (applyGaMDRatio)
         {
-            mddphi_S = mddphi_S * SimdReal(g_gamd_dih_ratio);
+            mddphi_S = mddphi_S * SimdReal(gaMDDihedralRatio(fcd));
         }
-        sf_i_S   = mddphi_S * nrkj_m2_S;
-        msf_l_S  = mddphi_S * nrkj_n2_S;
+        sf_i_S  = mddphi_S * nrkj_m2_S;
+        msf_l_S = mddphi_S * nrkj_n2_S;
 
         /* After this m?_S will contain f[i] */
         mx_S = sf_i_S * mx_S;
@@ -2478,7 +2477,7 @@ rbdihs(int              nbonds,
          * in the normal RB code. This is corrected for through (m)sf below.
          */
         // GaMD 拦截：在此处注入二面角补偿系数
-        ddphi_S = (ddphi_S * sin_S) * SimdReal(g_gamd_dih_ratio);
+        ddphi_S = (ddphi_S * sin_S) * SimdReal(gaMDDihedralRatio(fcd));
 
         sf_i_S  = ddphi_S * nrkj_m2_S;
         msf_l_S = ddphi_S * nrkj_n2_S;
@@ -3265,7 +3264,7 @@ rbdihs(int             nbonds,
 
         ddphi = -ddphi * sin_phi; /*  11		*/
         {
-            double gamdRatioLocal = g_gamd_dih_ratio;
+            double gamdRatioLocal = gaMDDihedralRatio(fcd);
             double forcedRatio    = 1.0;
             if (getForcedGaMDRatio(&forcedRatio))
             {
@@ -3275,8 +3274,9 @@ rbdihs(int             nbonds,
 
             ddphi *= gamdRatioLocal;
         }
-        do_dih_fup<flavor, true>(ai, aj, ak, al, ddphi, r_ij, r_kj, r_kl, m, n, f, fshift, pbc, x, t1, t2, t3); /* 112
-                                                                                                               */
+        do_dih_fup<flavor, true>(
+                ai, aj, ak, al, ddphi, r_ij, r_kj, r_kl, m, n, f, fshift, pbc, x, t1, t2, t3); /* 112
+                                                                                                */
 
         vtot += v;
     }
@@ -3673,7 +3673,7 @@ real cmap_dihs(int                 nbonds,
         df2            = df2 * fac;
 
         /* GaMD: include CMAP in dihedral-force scaling */
-        double gamdRatioLocal = g_gamd_dih_ratio;
+        double gamdRatioLocal = gaMDDihedralRatio(fcd);
         double forcedRatio    = 1.0;
         if (getForcedGaMDRatio(&forcedRatio))
         {
@@ -4295,13 +4295,13 @@ constexpr std::array<BondedInteractions, F_NRE> c_bondedInteractionFunctions = {
     BondedInteractions{ urey_bradley<flavor>, eNR_UREY_BRADLEY },         // F_UREY_BRADLEY
     BondedInteractions{ quartic_angles<flavor>, eNR_QANGLES },            // F_QUARTIC_ANGLES
     BondedInteractions{ tab_angles<flavor>, eNR_TABANGLES },              // F_TABANGLES
-    BondedInteractions{ pdihs<flavor, true>, eNR_PROPER },                       // F_PDIHS
+    BondedInteractions{ pdihs<flavor, true>, eNR_PROPER },                // F_PDIHS
     BondedInteractions{ rbdihs<flavor>, eNR_RB },                         // F_RBDIHS
     BondedInteractions{ restrdihs<flavor>, eNR_PROPER },                  // F_RESTRDIHS
     BondedInteractions{ cbtdihs<flavor>, eNR_RB },                        // F_CBTDIHS
     BondedInteractions{ rbdihs<flavor>, eNR_FOURDIH },                    // F_FOURDIHS
     BondedInteractions{ idihs<flavor>, eNR_IMPROPER },                    // F_IDIHS
-    BondedInteractions{ pdihs<flavor, false>, eNR_IMPROPER },                    // F_PIDIHS
+    BondedInteractions{ pdihs<flavor, false>, eNR_IMPROPER },             // F_PIDIHS
     BondedInteractions{ tab_dihs<flavor>, eNR_TABDIHS },                  // F_TABDIHS
     BondedInteractions{ unimplemented, eNR_CMAP },                        // F_CMAP
     BondedInteractions{ unimplemented, -1 },                              // F_GB12_NOLONGERUSED
@@ -4382,8 +4382,10 @@ constexpr gmx::EnumerationArray<BondedKernelFlavor, std::array<BondedInteraction
 //! \endcond
 
 } // namespace
-void gmx_gamd_dih_force_debug_prepare_step(int nAtoms)
+void gmx_gamd_dih_force_debug_prepare_step(int64_t step, int nAtoms)
 {
+    g_gamdDihForceDebug.currentStep = step;
+    g_gamdDihRawDebug.currentStep   = step;
     gamdDihForceDebugEnsurePrepared(nAtoms);
 }
 
@@ -4395,7 +4397,6 @@ void gmx_gamd_dih_force_debug_flush(long step)
     {
         return;
     }
-
 
 
     if (step != g_gamdDihForceDebug.step)
@@ -4416,23 +4417,15 @@ void gmx_gamd_dih_force_debug_flush(long step)
     const int end   = begin + count;
 
 
-
     for (int i = 0; i < count; ++i)
     {
-        const int atom = begin + i;
-        const double fx = g_gamdDihForceDebug.buffer[i][0];
-        const double fy = g_gamdDihForceDebug.buffer[i][1];
-        const double fz = g_gamdDihForceDebug.buffer[i][2];
-        const double fn = std::sqrt(fx * fx + fy * fy + fz * fz);
+        const int    atom = begin + i;
+        const double fx   = g_gamdDihForceDebug.buffer[i][0];
+        const double fy   = g_gamdDihForceDebug.buffer[i][1];
+        const double fz   = g_gamdDihForceDebug.buffer[i][2];
+        const double fn   = std::sqrt(fx * fx + fy * fy + fz * fz);
 
-        std::fprintf(g_gamdDihForceDebug.fp,
-                     "%ld %d %.9e %.9e %.9e %.9e\n",
-                     step,
-                     atom,
-                     fx,
-                     fy,
-                     fz,
-                     fn);
+        std::fprintf(g_gamdDihForceDebug.fp, "%ld %d %.9e %.9e %.9e %.9e\n", step, atom, fx, fy, fz, fn);
     }
     std::fflush(g_gamdDihForceDebug.fp);
 

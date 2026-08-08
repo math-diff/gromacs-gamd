@@ -66,6 +66,8 @@ class t_state;
 
 namespace gmx
 {
+
+class GaMDMDModule;
 enum class StartingBehavior;
 class BoxDeformation;
 class Constraints;
@@ -125,6 +127,7 @@ public:
                         BoxDeformation*                     deform,
                         IMDOutputProvider*                  outputProvider,
                         const MDModulesNotifiers&           mdModulesNotifiers,
+                        GaMDMDModule*                       gaMDModule,
                         t_inputrec*                         inputrec,
                         ImdSession*                         imdSession,
                         pull_t*                             pull_work,
@@ -162,6 +165,7 @@ public:
         deform_(deform),
         outputProvider_(outputProvider),
         mdModulesNotifiers_(mdModulesNotifiers),
+        gaMDModule_(gaMDModule),
         inputRec_(inputrec),
         imdSession_(imdSession),
         pullWork_(pull_work),
@@ -217,6 +221,8 @@ public:
     IMDOutputProvider* outputProvider_;
     //! Handles notifications to MDModules for checkpoint writing
     const MDModulesNotifiers& mdModulesNotifiers_;
+    //! Owns no data; MDModules keeps this built-in module alive for the simulation.
+    GaMDMDModule* gaMDModule_;
     //! Contains user input mdp options. Note: The const-ness is casted away in a few instances, see #3854.
     const t_inputrec* inputRec_;
     //! The Interactive Molecular Dynamics session.

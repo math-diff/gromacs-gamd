@@ -45,6 +45,8 @@
 namespace gmx
 {
 
+class GaMDMDModule;
+
 //! Selects where current-step GaMD force correction is executed.
 enum class GaMDExecutionMode
 {
@@ -241,6 +243,9 @@ public:
 class MdrunScheduleWorkload
 {
 public:
+    //! Non-owning access to the built-in GaMD module for integration bridges.
+    GaMDMDModule* gaMDModule = nullptr;
+
     //! Workload descriptor for information constant for an entire run
     SimulationWorkload simulationWork;
 

@@ -57,7 +57,7 @@
 
 #include "gromacs/applied_forces/awh/awh.h"
 #include "gromacs/applied_forces/awh/read_params.h"
-#include "gromacs/applied_forces/gamd/gamdforceprovider.h"
+#include "gromacs/applied_forces/gamd/gamdmdmodule.h"
 #include "gromacs/commandline/filenm.h"
 #include "gromacs/compat/pointers.h"
 #include "gromacs/domdec/collect.h"
@@ -179,15 +179,8 @@
 #include "replicaexchange.h"
 #include "shellfc.h"
 
-/* GaMD Ultimate Total Potential Scale */
-extern double g_gamd_scale_P;
-extern int    g_gamd_debug;
-extern double g_gamd_dih_ratio;
-extern double g_gamd_last_total_boost;
-extern long   g_gamd_debug_current_step;
-
 /* bonded.cpp dihedral-only debug dump hooks */
-void gmx_gamd_dih_force_debug_prepare_step(int nAtoms);
+void gmx_gamd_dih_force_debug_prepare_step(int64_t step, int nAtoms);
 void gmx_gamd_dih_force_debug_flush(long step);
 
 struct gmx_mdoutf;
@@ -401,6 +394,9 @@ void gmx::LegacySimulator::do_md()
                                    mdModulesNotifiers_);
 
     gmx_global_stat_t gstat = global_stat_init(ir);
+
+    GMX_RELEASE_ASSERT(gaMDModule_ != nullptr, "MDModules must provide the built-in GaMD module");
+    runScheduleWork_->gaMDModule = gaMDModule_;
 
     const auto& simulationWork     = runScheduleWork_->simulationWork;
     const bool  useGpuForPme       = simulationWork.useGpuPme;
@@ -922,12 +918,12 @@ void gmx::LegacySimulator::do_md()
         logInitialMultisimStatus(ms_, cr_, mdLog_, simulationsShareState, ir->nsteps, ir->init_step);
     }
 
-    bool        usedMdGpuGraphLastStep = false;
-    const bool  useCurrentStepGaMD     = ir->bDoGaMD || getenv("GMX_USE_GAMD") != nullptr;
-    const bool useResidentEnergy = simulationWork.useGpuResidentGaMD();
-    const bool useDeviceGlobals = useResidentEnergy;
-    const bool useBufferedOutput = useResidentEnergy;
-    gmx::gamdSetBufferedProductionOutputEnabled(useBufferedOutput);
+    bool       usedMdGpuGraphLastStep = false;
+    const bool useCurrentStepGaMD     = ir->bDoGaMD || getenv("GMX_USE_GAMD") != nullptr;
+    const bool useResidentEnergy      = simulationWork.useGpuResidentGaMD();
+    const bool useDeviceGlobals       = useResidentEnergy;
+    const bool useBufferedOutput      = useResidentEnergy;
+    gaMDModule_->setBufferedProductionOutputEnabled(useBufferedOutput);
     /* and stop now if we should */
     bLastStep = (bLastStep || (ir->nsteps >= 0 && step_rel > ir->nsteps));
     while (!bLastStep)
@@ -1151,7 +1147,7 @@ void gmx::LegacySimulator::do_md()
         clear_mat(force_vir);
 
         checkpointHandler->decideIfCheckpointingThisStep(bNS, bFirstStep, bLastStep);
-        gmx::gamdSetCheckpointingThisStep(checkpointHandler->isCheckpointingStep());
+        gaMDModule_->setCheckpointingThisStep(checkpointHandler->isCheckpointingStep());
 
         if (useCurrentStepGaMD)
         {
@@ -1181,8 +1177,9 @@ void gmx::LegacySimulator::do_md()
                 }
             }
 
-            gmx::gamdPrepareStep(step, cr_->nodeid);
-            gmx::gamdWarnIfRunTooShort(ir->init_step, ir->nsteps, cr_->nodeid);
+            const bool pressureCouplingThisStep = doCRescalePressureCouplingThisStep(*ir, step);
+            gaMDModule_->prepareStep(step, cr_->nodeid, pressureCouplingThisStep);
+            gaMDModule_->warnIfRunTooShort(ir->init_step, ir->nsteps, cr_->nodeid);
         }
 
         /* Determine the energy and pressure:
@@ -1258,10 +1255,8 @@ void gmx::LegacySimulator::do_md()
 
             const bool diagnosticHostState = fr_->listedForcesGpu->gamdEnergyShadowDiagnosticsEnabled()
                                              || fr_->listedForcesGpu->gamdDihedralShadowEnabled();
-            const bool doCRescaleThisStep = doCRescalePressureCouplingThisStep(*ir, step);
             const bool needHostEnergy = needEnergyAndVirial || diagnosticHostState
-                                        || gmx::gamdRequiresHostEnergyThisStep(step)
-                                        || doCRescaleThisStep;
+                                        || gaMDModule_->requiresHostEnergyThisStep(step);
             runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost = needHostEnergy;
 
             static bool loggedResidentEnergyMode = false;
@@ -1389,9 +1384,8 @@ void gmx::LegacySimulator::do_md()
                  * This is parallellized as well, and does communication too.
                  * Check comments in sim_util.c
                  */
-                g_gamd_debug_current_step = step;
 
-                gmx_gamd_dih_force_debug_prepare_step(state_->numAtoms());
+                gmx_gamd_dih_force_debug_prepare_step(step, state_->numAtoms());
 
                 do_force(fpLog_,
                          cr_,
@@ -1427,7 +1421,7 @@ void gmx::LegacySimulator::do_md()
             /* ==========================================================
              * GaMD Total Force Interception
              * ========================================================== */
-            double scalePForScaling = g_gamd_scale_P;
+            double scalePForScaling = gaMDModule_->stepResult().scaleP;
             double forcedScaleP     = 1.0;
             if (getForcedGaMDScaleP(&forcedScaleP))
             {
@@ -2339,11 +2333,11 @@ void gmx::LegacySimulator::do_md()
                             GMX_RELEASE_ASSERT(
                                     deferredGamdOutputSteps.size() == deferredEnergySamples.size(),
                                     "Buffered GaMD output steps and energy samples must match");
-                            gmx::gamdWriteBufferedProductionOutput(deferredGamdOutputSteps,
-                                                                   deferredEnergySamples,
-                                                                   step,
-                                                                   cr_->nodeid,
-                                                                   wallCycleCounters_);
+                            gaMDModule_->writeBufferedProductionOutput(deferredGamdOutputSteps,
+                                                                       deferredEnergySamples,
+                                                                       step,
+                                                                       cr_->nodeid,
+                                                                       wallCycleCounters_);
                             deferredGamdOutputSteps.clear();
                         }
                         deferredKineticTensors.clear();

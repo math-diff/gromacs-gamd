@@ -51,6 +51,7 @@ namespace gmx
 {
 
 class ForceProviders;
+class GaMDMDModule;
 class KeyValueTreeObjectBuilder;
 class KeyValueTreeObject;
 class IKeyValueTreeErrorHandler;
@@ -146,6 +147,9 @@ public:
      * \returns an object for computing forces from the modules.
      */
     ForceProviders* initForceProviders(gmx_wallcycle* wallCycle);
+
+    /*! \brief Returns the built-in GaMD module owned by this container. */
+    GaMDMDModule* gaMDModule();
 
     /*! \brief Subscribe MDModules to simulation setup notifications.
      *

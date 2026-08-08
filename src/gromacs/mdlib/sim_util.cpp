@@ -53,7 +53,7 @@
 #include <vector>
 
 #include "gromacs/applied_forces/awh/awh.h"
-#include "gromacs/applied_forces/gamd/gamdforceprovider.h"
+#include "gromacs/applied_forces/gamd/gamdmdmodule.h"
 #include "gromacs/domdec/dlbtiming.h"
 #include "gromacs/domdec/domdec.h"
 #include "gromacs/domdec/domdec_struct.h"
@@ -146,9 +146,6 @@
 
 #include "gpuforcereduction.h"
 
-extern double g_gamd_scale_P;
-extern double g_gamd_dih_ratio;
-extern double g_gamd_last_total_boost;
 
 class GpuEventSynchronizer;
 struct gmx_edsam;
@@ -526,6 +523,9 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
         return;
     }
 
+    GaMDMDModule* gaMDModule = runScheduleWork.gaMDModule;
+    GMX_RELEASE_ASSERT(gaMDModule != nullptr, "Current-step GaMD requires the built-in GaMD module");
+
     const auto& simulationWork = runScheduleWork.simulationWork;
     const auto& domainWork     = runScheduleWork.domainWork;
     const auto& stepWork       = runScheduleWork.stepWork;
@@ -545,12 +545,6 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
         gmx_fatal(FARGS, "Current-step GaMD does not support MTS.");
     }
 
-    if (const char* gpuIncompatibilityReason = gmx::currentStepGaMDGpuIncompatibilityReason(
-                simulationWork.useGpuUpdate, domainWork.haveGpuBondedWork))
-    {
-        gmx_fatal(FARGS, "%s", gpuIncompatibilityReason);
-    }
-
     if (stepWork.stageGpuEnergyAndVirialToHost)
     {
         sum_epot(enerd->grpp, enerd->term.data());
@@ -558,17 +552,17 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
         const double rawDihedralEnergy  = enerd->term[F_PDIHS] + enerd->term[F_RBDIHS]
                                          + enerd->term[F_FOURDIHS] + enerd->term[F_CMAP];
 
-        gmx::gamdFinalizeCurrentStep(
-                static_cast<long>(step), cr->nodeid, rawPotentialEnergy, rawDihedralEnergy, wcycle);
+        gaMDModule->finalizeCurrentStep(step, cr->nodeid, rawPotentialEnergy, rawDihedralEnergy, wcycle);
 
         if (fr->listedForcesGpu != nullptr && fr->listedForcesGpu->gamdEnergyShadowDiagnosticsEnabled())
         {
             const std::array<double, 6> deviceState = fr->listedForcesGpu->gamdEnergyShadowValues();
+            const GaMDStepResult&       stepResult  = gaMDModule->stepResult();
             const double                totalDifference    = deviceState[0] - rawPotentialEnergy;
             const double                dihedralDifference = deviceState[1] - rawDihedralEnergy;
-            const double                scalePDifference   = deviceState[2] - g_gamd_scale_P;
-            const double                scaleDDifference   = deviceState[3] - g_gamd_dih_ratio;
-            const double totalBoostDifference = deviceState[4] + deviceState[5] - g_gamd_last_total_boost;
+            const double                scalePDifference   = deviceState[2] - stepResult.scaleP;
+            const double                scaleDDifference   = deviceState[3] - stepResult.scaleD;
+            const double totalBoostDifference = deviceState[4] + deviceState[5] - stepResult.totalBoost();
             std::fprintf(stderr,
                          "[GaMD GPU energy shadow] step=%lld total_diff=%.9g dihedral_diff=%.9g "
                          "scaleP_diff=%.9g scaleD_diff=%.9g total_boost_diff=%.9g\n",
@@ -609,11 +603,12 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
                            "GaMD can skip host energy staging only with device scale correction");
     }
 
-    const real totalScale =
-            stepWork.stageGpuEnergyAndVirialToHost ? static_cast<real>(g_gamd_scale_P) : 1.0_real;
+    const GaMDStepResult& stepResult = gaMDModule->stepResult();
+    const real            totalScale =
+            stepWork.stageGpuEnergyAndVirialToHost ? static_cast<real>(stepResult.scaleP) : 1.0_real;
     const real dihedralCorrectionScale =
             stepWork.stageGpuEnergyAndVirialToHost
-                    ? static_cast<real>(g_gamd_scale_P * (g_gamd_dih_ratio - 1.0))
+                    ? static_cast<real>(stepResult.scaleP * (stepResult.scaleD - 1.0))
                     : 0.0_real;
 
     if (simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuResident)
@@ -680,8 +675,6 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
                     pbcPtr = &pbc;
                 }
 
-                const double savedGaMDDihRatio = g_gamd_dih_ratio;
-                g_gamd_dih_ratio               = 1.0;
                 calculateGaMDDihedralListedForces(top.idef,
                                                   x,
                                                   gamdGpuModeDihedralForces,
@@ -692,8 +685,6 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
                                                   nrnb,
                                                   lambda,
                                                   nullptr);
-                g_gamd_dih_ratio = savedGaMDDihRatio;
-
                 gpuShadowDihedralForces.resize(force.size());
                 fr->listedForcesGpu->copyGamdDihedralShadowForces(gpuShadowDihedralForces);
                 validateGaMDGpuShadowForces(
@@ -889,8 +880,6 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
         pbcPtr = &pbc;
     }
 
-    const double savedGaMDDihRatio = g_gamd_dih_ratio;
-    g_gamd_dih_ratio               = 1.0;
     calculateGaMDDihedralListedForces(top.idef,
                                       x,
                                       gamdDihedralForces,
@@ -901,8 +890,6 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
                                       nrnb,
                                       lambda,
                                       haveDDAtomOrdering(*cr) ? cr->dd->globalAtomIndices.data() : nullptr);
-    g_gamd_dih_ratio = savedGaMDDihRatio;
-
     if (gpuShadowEnabled)
     {
         static bool                   shadowCompared = false;
@@ -2100,9 +2087,8 @@ void do_force(FILE*                         fplog,
 
     const StepWorkload& stepWork = runScheduleWork.stepWork;
 
-    const bool useGpuGaMDShortRangeVirial =
-            simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuResident
-            && stepWork.computeVirial && stepWork.useGpuFBufferOps;
+    const bool useGpuGaMDShortRangeVirial = simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuResident
+                                            && stepWork.computeVirial && stepWork.useGpuFBufferOps;
     static const bool gaMDGpuWorkloadDiagnosticsEnabled =
             (std::getenv("GMX_GAMD_GPU_DIAGNOSTICS") != nullptr);
     static bool printedGaMDGpuWorkloadDiagnostics = false;
@@ -2584,7 +2570,7 @@ void do_force(FILE*                         fplog,
     }
 
     /* Reset energies */
-    reset_enerdata(enerd, step);
+    reset_enerdata(enerd, step, runScheduleWork.gaMDModule);
 
     if (haveDDAtomOrdering(*cr) && simulationWork.haveSeparatePmeRank)
     {
@@ -3181,7 +3167,10 @@ void do_force(FILE*                         fplog,
         pme_gpu_stage_gamd_reciprocal_energy(fr->pmedata,
                                              fr->listedForcesGpu->gamdPmeEnergyStagingBuffer(),
                                              fr->listedForcesGpu->gamdPmeEnergyReadyEvent());
-        const GaMDGpuProductionParameters gamdParameters = gamdGpuProductionParameters();
+        GMX_RELEASE_ASSERT(runScheduleWork.gaMDModule != nullptr,
+                           "GPU-resident GaMD requires the built-in GaMD module");
+        const GaMDGpuProductionParameters gamdParameters =
+                runScheduleWork.gaMDModule->gpuProductionParameters();
         fr->listedForcesGpu->launchGamdEnergyShadowReduction(gamdParameters.igamd,
                                                              gamdParameters.stage,
                                                              gamdParameters.thresholdP,
@@ -3276,7 +3265,12 @@ void do_force(FILE*                         fplog,
     if (stepWork.computeEnergy && stepWork.stageGpuEnergyAndVirialToHost)
     {
         /* Compute the final potential energy terms */
-        accumulatePotentialEnergies(enerd, lambda, inputrec.fepvals.get());
+        double gaMDBoostEnergy = 0.0;
+        if (runScheduleWork.gaMDModule != nullptr)
+        {
+            gaMDBoostEnergy = runScheduleWork.gaMDModule->stepResult().totalBoost();
+        }
+        accumulatePotentialEnergies(enerd, lambda, inputrec.fepvals.get(), gaMDBoostEnergy);
 
         if (!EI_TPI(inputrec.eI))
         {

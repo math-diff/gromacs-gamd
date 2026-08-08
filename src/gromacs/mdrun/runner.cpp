@@ -196,7 +196,7 @@
 #include "gromacs/utility/programcontext.h"
 #include "gromacs/utility/smalloc.h"
 #include "gromacs/utility/stringutil.h"
-#include "gromacs/applied_forces/gamd/gamdforceprovider.h"
+
 #include "isimulator.h"
 #include "membedholder.h"
 #include "replicaexchange.h"
@@ -1907,14 +1907,14 @@ int Mdrunner::mdrunner()
             GMX_RELEASE_ASSERT(deviceStreamManager != nullptr,
                                "GPU device stream manager should be valid in order to use GPU "
                                "version of bonded forces.");
-            fr->listedForcesGpu =
-                    std::make_unique<ListedForcesGpu>(mtop.ffparams,
-                                                      fr->ic->epsfac * fr->fudgeQQ,
-                                                      inputrec->opts.ngener - inputrec->nwall,
-                                                      runScheduleWork.simulationWork.useGpuResidentGaMD(),
-                                                      deviceStreamManager->context(),
-                                                      deviceStreamManager->bondedStream(),
-                                                      wcycle.get());
+            fr->listedForcesGpu = std::make_unique<ListedForcesGpu>(
+                    mtop.ffparams,
+                    fr->ic->epsfac * fr->fudgeQQ,
+                    inputrec->opts.ngener - inputrec->nwall,
+                    runScheduleWork.simulationWork.useGpuResidentGaMD(),
+                    deviceStreamManager->context(),
+                    deviceStreamManager->bondedStream(),
+                    wcycle.get());
         }
         fr->longRangeNonbondeds = std::make_unique<CpuPpLongRangeNonbondeds>(fr->n_tpi,
                                                                              fr->ic->ewaldcoeff_q,
@@ -2338,7 +2338,8 @@ int Mdrunner::mdrunner()
                     static_cast<int>(filenames.size()), filenames.data(), inputrec.get(), fr.get()));
             simulatorBuilder.add(ReplicaExchangeParameters(replExParams));
             simulatorBuilder.add(InteractiveMD(imdSession.get()));
-            simulatorBuilder.add(SimulatorModules(mdModules_->outputProvider(), mdModules_->notifiers()));
+            simulatorBuilder.add(SimulatorModules(
+                    mdModules_->outputProvider(), mdModules_->notifiers(), mdModules_->gaMDModule()));
             simulatorBuilder.add(CenterOfMassPulling(pull_work));
             // Todo move to an MDModule
             simulatorBuilder.add(IonSwapping(swap));

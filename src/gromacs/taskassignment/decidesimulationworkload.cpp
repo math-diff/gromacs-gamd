@@ -51,7 +51,7 @@
 #include <memory>
 #include <vector>
 
-#include "gromacs/applied_forces/gamd/gamdforceprovider.h"
+#include "gromacs/applied_forces/gamd/gamdexecution.h"
 #include "gromacs/essentialdynamics/edsam.h"
 #include "gromacs/ewald/pme.h"
 #include "gromacs/listed_forces/listed_forces.h"
@@ -129,21 +129,20 @@ SimulationWorkload createSimulationWorkload(const gmx::MDLogger& mdlog,
     simulationWorkload.useGpuPmeDecomposition       = useGpuPmeDecomposition;
     simulationWorkload.haveEwaldSurfaceContribution = haveEwaldSurfaceContribution(inputrec);
     simulationWorkload.useMts                       = inputrec.useMts;
-    const bool useCurrentStepGaMD = inputrec.bDoGaMD || getenv("GMX_USE_GAMD") != nullptr;
-    simulationWorkload.gamdExecutionMode =
-            selectGaMDExecutionMode(useCurrentStepGaMD,
-                                    useGpuForNonbonded,
-                                    simulationWorkload.useGpuPme,
-                                    useGpuForBonded,
-                                    useGpuForUpdate,
-                                    havePpDomainDecomposition,
-                                    haveSeparatePmeRank,
-                                    inputrec.useMts,
-                                    inputrec.pressureCouplingOptions.epc,
-                                    inputrec.pressureCouplingOptions.epct,
-                                    inputrec.nstfout);
+    const bool useCurrentStepGaMD        = inputrec.bDoGaMD || getenv("GMX_USE_GAMD") != nullptr;
+    simulationWorkload.gamdExecutionMode = selectGaMDExecutionMode(useCurrentStepGaMD,
+                                                                   useGpuForNonbonded,
+                                                                   simulationWorkload.useGpuPme,
+                                                                   useGpuForBonded,
+                                                                   useGpuForUpdate,
+                                                                   havePpDomainDecomposition,
+                                                                   haveSeparatePmeRank,
+                                                                   inputrec.useMts,
+                                                                   inputrec.pressureCouplingOptions.epc,
+                                                                   inputrec.pressureCouplingOptions.epct,
+                                                                   inputrec.nstfout);
     const bool useGpuGaMDForceCorrection = simulationWorkload.useGpuResidentGaMD();
-    const bool useResidentGpuGaMD = useGpuGaMDForceCorrection;
+    const bool useResidentGpuGaMD        = useGpuGaMDForceCorrection;
     simulationWorkload.requireCpuForceBufferForPostProcessing =
             useCurrentStepGaMD && useGpuForUpdate && !useGpuGaMDForceCorrection;
     if (useCurrentStepGaMD)
@@ -192,8 +191,7 @@ SimulationWorkload createSimulationWorkload(const gmx::MDLogger& mdlog,
     const bool enableMdGpuGraph =
             devFlags.enableCudaGraphs || (useResidentGpuGaMD && GMX_HAVE_GPU_GRAPH_SUPPORT);
     simulationWorkload.useMdGpuGraph =
-            enableMdGpuGraph && useGpuForUpdate
-            && !simulationWorkload.requireCpuForceBufferForPostProcessing
+            enableMdGpuGraph && useGpuForUpdate && !simulationWorkload.requireCpuForceBufferForPostProcessing
             && (!useCurrentStepGaMD || useResidentGpuGaMD)
             && (simulationWorkload.haveSeparatePmeRank ? simulationWorkload.useGpuPmePpCommunication : true)
             && (havePpDomainDecomposition ? simulationWorkload.useGpuHaloExchange : true)

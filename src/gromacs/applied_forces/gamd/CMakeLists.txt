@@ -9,13 +9,10 @@
 # of the License, or (at your option) any later version.
 #
 
-# GaMD module (currently header-only, will add .cpp later)
-gmx_add_libgromacs_sources(
-    # no .cpp files yet
-)
-
 # Link to mdtypes (for GaMDParams)
 target_link_libraries(applied_forces INTERFACE mdtypes)
 gmx_add_libgromacs_sources(
-    gamdforceprovider.cpp
+    gamdmdmodule.cpp
+    gamdcontroller.cpp
+    gamdexecution.cpp
 )

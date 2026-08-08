@@ -1,7 +1,3 @@
-#include "gamdforceprovider.h"
-
-#include "config.h"
-
 #include <cerrno>
 #include <cinttypes>
 #include <cmath>
@@ -26,113 +22,10 @@
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/gmxassert.h"
 
-// ============================================================================
-// Globals shared with other translation units
-// ============================================================================
-
-// 导出给 bonded.cpp 的二面角补偿系数
-double g_gamd_dih_ratio = 1.0;
-
-// 导出给 md.cpp 的全局力缩放系数
-double g_gamd_scale_P = 1.0;
-
-int g_gamd_debug = 0;
-
-// Cache the total boost added to F_EPOT for bookkeeping/debug
-double g_gamd_last_total_boost = 0.0;
-
-// 可由 md.cpp 更新的当前 step 调试变量
-long g_gamd_debug_current_step = -1;
-
-// ============================================================================
-// File-local runtime state
-// ============================================================================
-
-static double g_gamd_boostP_current  = 0.0;
-static double g_gamd_boostD_current  = 0.0;
-static double g_gamd_scale_D_current = 1.0;
-static double g_gamd_VP_used         = 0.0;
-static double g_gamd_VD_used         = 0.0;
-
-static long g_gamd_lastPreparedStep  = -1;
-static long g_gamd_lastAccountedStep = -1;
-
-// 仅当当前 step 可用于 reweight 输出时为 true
-static bool g_gamd_step_ready_for_output = false;
-static int  g_gamd_currentStage          = 0; // 1..5
-
-// restart load control
-static bool g_gamd_restart_load_attempted   = false;
-static bool g_gamd_force_production_restart = false;
-
-// 当前 rank id，供写 restart 时使用
-static int g_gamd_current_nodeid = 0;
-
-// Mirror the .cpt decision from md.cpp so GaMD restart state is written on the
-// same steps as checkpointing.
-static bool g_gamd_checkpointing_this_step = false;
-static bool g_gamd_buffered_production_output_enabled = false;
-
-static long g_gamd_suppressTextOutputStep = -1;
-
-static bool g_gamd_warnedScalePFloor = false;
-static bool g_gamd_warnedScaleDFloor = false;
-
-static FILE* g_gamd_reweight_fp = nullptr;
-static FILE* g_gamd_para_fp     = nullptr;
+#include "gamdruntime.h"
 
 namespace gmx
 {
-
-struct GaMDRealParams
-{
-    int    igamd        = 0;
-    int    irest_gamd   = 0;
-    int    iE           = 1;
-    int    iEP          = 1;
-    int    iED          = 1;
-    long   ntcmdprep    = 200000;
-    long   ntcmd        = 1000000;
-    long   ntebprep     = 200000;
-    long   nteb         = 1000000;
-    long   ntave        = 50000;
-    long   reweight_nst = 1;
-    long   para_nst     = 0;
-    double sigma0P      = 6.0 * 4.184; // kcal/mol -> kJ/mol
-    double sigma0D      = 6.0 * 4.184;
-};
-
-struct GaMDStats
-{
-    double Vmax   = -1e99;
-    double Vmin   = 1e99;
-    double Vavg   = 0.0;
-    double sigmaV = 0.001;
-    double M2     = 0.0;
-    long   count  = 0;
-    double E      = 0.0;
-    double k0     = 0.0;
-    double k      = 0.0;
-};
-
-struct GaMDWindowStats
-{
-    long   count = 0;
-    double mean  = 0.0;
-    double M2    = 0.0;
-};
-
-// 全局参数
-static GaMDRealParams g_params;
-static bool           g_params_loaded = false;
-
-// 为了 restart/continue 可恢复，这里不要用 thread_local
-static GaMDStats       g_statP;
-static GaMDStats       g_statD;
-static GaMDWindowStats g_windowStatP;
-static GaMDWindowStats g_windowStatD;
-
-static int determineGaMDStage(long step);
 
 // ============================================================================
 // Restart helpers
@@ -314,46 +207,46 @@ static void reconcileGaMDTextFile(const char* filename, int expectedColumns, lon
     }
 }
 
-static void writeStatsLine(FILE* fp, const char* name, const GaMDStats& s)
+static void writeStatsLine(FILE* fp, const char* name, const GaMDEnergyStatistics& s)
 {
     std::fprintf(fp,
                  "%s %.17g %.17g %.17g %.17g %.17g %ld %.17g %.17g %.17g\n",
                  name,
-                 s.Vmax,
-                 s.Vmin,
-                 s.Vavg,
-                 s.sigmaV,
-                 s.M2,
+                 s.maximum,
+                 s.minimum,
+                 s.average,
+                 s.deviation,
+                 s.m2,
                  s.count,
-                 s.E,
+                 s.threshold,
                  s.k0,
-                 s.k);
+                 s.forceConstant);
 }
 
-static bool readStatsLine(std::istringstream& iss, GaMDStats* s)
+static bool readStatsLine(std::istringstream& iss, GaMDEnergyStatistics* s)
 {
-    return static_cast<bool>(iss >> s->Vmax >> s->Vmin >> s->Vavg >> s->sigmaV >> s->M2 >> s->count
-                             >> s->E >> s->k0 >> s->k);
+    return static_cast<bool>(iss >> s->maximum >> s->minimum >> s->average >> s->deviation >> s->m2
+                             >> s->count >> s->threshold >> s->k0 >> s->forceConstant);
 }
 
-static void writeWindowStatsLine(FILE* fp, const char* name, const GaMDWindowStats& s)
+static void writeWindowStatsLine(FILE* fp, const char* name, const GaMDWindowStatistics& s)
 {
-    std::fprintf(fp, "%s %ld %.17g %.17g\n", name, s.count, s.mean, s.M2);
+    std::fprintf(fp, "%s %ld %.17g %.17g\n", name, s.count, s.mean, s.m2);
 }
 
-static bool readWindowStatsLine(std::istringstream& iss, GaMDWindowStats* s)
+static bool readWindowStatsLine(std::istringstream& iss, GaMDWindowStatistics* s)
 {
-    return static_cast<bool>(iss >> s->count >> s->mean >> s->M2);
+    return static_cast<bool>(iss >> s->count >> s->mean >> s->m2);
 }
 
-static void saveGaMDRestartState(long step, int nodeid)
+void GaMDRuntime::saveRestartState(int64_t step, int nodeid)
 {
     if (nodeid != 0)
     {
         return;
     }
 
-    if (!g_params_loaded || g_params.igamd == 0)
+    if (!parametersLoaded_ || parameters_.boostType == 0)
     {
         return;
     }
@@ -363,13 +256,13 @@ static void saveGaMDRestartState(long step, int nodeid)
         return;
     }
 
-    const int  currentStage            = determineGaMDStage(step);
-    const bool saveAtCmdStatBoundary   = (step == g_params.ntcmd);
-    const bool saveAtBoostStatBoundary = (step == g_params.ntcmd + g_params.nteb);
-    const bool inBoostStatPhase        = (currentStage == 4);
-    const bool inProductionPhase       = (currentStage == 5);
-    const bool saveDuringBoostStat     = (inBoostStatPhase && g_gamd_checkpointing_this_step);
-    const bool saveDuringProduction    = (inProductionPhase && g_gamd_checkpointing_this_step);
+    const int  currentStage          = determineStage(step);
+    const bool saveAtCmdStatBoundary = (step == parameters_.conventionalEnd);
+    const bool saveAtBoostStatBoundary = (step == parameters_.conventionalEnd + parameters_.boostLength);
+    const bool inBoostStatPhase     = (currentStage == 4);
+    const bool inProductionPhase    = (currentStage == 5);
+    const bool saveDuringBoostStat  = (inBoostStatPhase && checkpointingThisStep_);
+    const bool saveDuringProduction = (inProductionPhase && checkpointingThisStep_);
 
     if (!saveAtCmdStatBoundary && !saveAtBoostStatBoundary && !saveDuringBoostStat && !saveDuringProduction)
     {
@@ -385,7 +278,7 @@ static void saveGaMDRestartState(long step, int nodeid)
      * and force one final save at step == ntcmd + nteb when the adaptive
      * parameter updates finish.
      */
-    if (step <= g_params.ntcmdprep && !inProductionPhase)
+    if (step <= parameters_.conventionalPrepEnd && !inProductionPhase)
     {
         return;
     }
@@ -396,8 +289,8 @@ static void saveGaMDRestartState(long step, int nodeid)
 
     // Rows already emitted before this checkpoint must reach durable storage
     // before the restart state is used as their commit record.
-    flushAndSyncFileOrFatal(g_gamd_reweight_fp, "gamd-reweight.dat");
-    flushAndSyncFileOrFatal(g_gamd_para_fp, "gamd-para.dat");
+    flushAndSyncFileOrFatal(reweightFile_, "gamd-reweight.dat");
+    flushAndSyncFileOrFatal(parameterFile_, "gamd-para.dat");
 
     FILE* fp = std::fopen(tmpName, "w");
     if (fp == nullptr)
@@ -408,28 +301,28 @@ static void saveGaMDRestartState(long step, int nodeid)
     std::fprintf(fp, "# GaMD restart state\n");
     std::fprintf(fp, "version 3\n");
     std::fprintf(fp, "saved_step %ld\n", step);
-    std::fprintf(fp, "production_restart %d\n", g_gamd_force_production_restart ? 1 : 0);
+    std::fprintf(fp, "production_restart %d\n", forceProductionRestart_ ? 1 : 0);
 
     // 参数也写出，续跑时做一致性检查
     std::fprintf(fp,
                  "params %d %d %d %d %ld %ld %ld %ld %ld %ld %.17g %.17g\n",
-                 g_params.igamd,
-                 g_params.iE,
-                 g_params.iEP,
-                 g_params.iED,
-                 g_params.ntcmdprep,
-                 g_params.ntcmd,
-                 g_params.ntebprep,
-                 g_params.nteb,
-                 g_params.ntave,
-                 g_params.reweight_nst,
-                 g_params.sigma0P,
-                 g_params.sigma0D);
+                 parameters_.boostType,
+                 parameters_.thresholdMode,
+                 parameters_.potentialMode,
+                 parameters_.dihedralMode,
+                 parameters_.conventionalPrepEnd,
+                 parameters_.conventionalEnd,
+                 parameters_.boostPrepLength,
+                 parameters_.boostLength,
+                 parameters_.averagingWindow,
+                 parameters_.reweightInterval,
+                 parameters_.potentialSigmaLimit,
+                 parameters_.dihedralSigmaLimit);
 
-    writeWindowStatsLine(fp, "windowP", g_windowStatP);
-    writeWindowStatsLine(fp, "windowD", g_windowStatD);
-    writeStatsLine(fp, "statP", g_statP);
-    writeStatsLine(fp, "statD", g_statD);
+    writeWindowStatsLine(fp, "windowP", potentialWindowStatistics_);
+    writeWindowStatsLine(fp, "windowD", dihedralWindowStatistics_);
+    writeStatsLine(fp, "statP", potentialStatistics_);
+    writeStatsLine(fp, "statD", dihedralStatistics_);
 
     flushAndSyncFileOrFatal(fp, tmpName);
     if (std::fclose(fp) != 0)
@@ -454,20 +347,20 @@ static void saveGaMDRestartState(long step, int nodeid)
     }
 }
 
-static void loadGaMDRestartStateIfNeeded(long step, int nodeid)
+void GaMDRuntime::loadRestartStateIfNeeded(int64_t step, int nodeid)
 {
-    if (g_gamd_restart_load_attempted)
+    if (restartLoadAttempted_)
     {
         return;
     }
 
-    const bool explicitProductionRestart = (g_params.irest_gamd != 0);
+    const bool explicitProductionRestart = (parameters_.restartMode != 0);
 
     // 只尝试一次：
     // - fresh run 若从 step 0 开始，不要后面误加载旧文件
     // - continue run 第一调用通常就是 step > 0，会在这里加载
     // - irest_gamd 模式允许从新模拟的首步直接加载
-    g_gamd_restart_load_attempted = true;
+    restartLoadAttempted_ = true;
 
     if (step <= 0 && !explicitProductionRestart)
     {
@@ -566,10 +459,10 @@ static void loadGaMDRestartStateIfNeeded(long step, int nodeid)
     double file_sigma0P      = 0.0;
     double file_sigma0D      = 0.0;
 
-    GaMDStats       statP;
-    GaMDStats       statD;
-    GaMDWindowStats windowStatP;
-    GaMDWindowStats windowStatD;
+    GaMDEnergyStatistics statP;
+    GaMDEnergyStatistics statD;
+    GaMDWindowStatistics windowStatP;
+    GaMDWindowStatistics windowStatD;
 
     bool foundVersion           = false;
     bool foundSavedStep         = false;
@@ -660,16 +553,17 @@ static void loadGaMDRestartStateIfNeeded(long step, int nodeid)
         gmx_fatal(FARGS, "GaMD restart '%s' is missing window statistics.", restartFilename);
     }
 
-    auto validStats = [](const GaMDStats& stat)
+    auto validStats = [](const GaMDEnergyStatistics& stat)
     {
-        return std::isfinite(stat.Vmax) && std::isfinite(stat.Vmin) && std::isfinite(stat.Vavg)
-               && std::isfinite(stat.sigmaV) && std::isfinite(stat.M2) && std::isfinite(stat.E)
-               && std::isfinite(stat.k0) && std::isfinite(stat.k) && stat.count >= 0
-               && stat.sigmaV >= 0.0 && stat.M2 >= 0.0 && stat.k0 >= 0.0 && stat.k0 <= 1.0
-               && stat.k >= 0.0 && (stat.count == 0 || stat.Vmax >= stat.Vmin);
+        return std::isfinite(stat.maximum) && std::isfinite(stat.minimum)
+               && std::isfinite(stat.average) && std::isfinite(stat.deviation)
+               && std::isfinite(stat.m2) && std::isfinite(stat.threshold) && std::isfinite(stat.k0)
+               && std::isfinite(stat.forceConstant) && stat.count >= 0 && stat.deviation >= 0.0
+               && stat.m2 >= 0.0 && stat.k0 >= 0.0 && stat.k0 <= 1.0 && stat.forceConstant >= 0.0
+               && (stat.count == 0 || stat.maximum >= stat.minimum);
     };
-    auto validWindowStats = [](const GaMDWindowStats& stat) {
-        return stat.count >= 0 && std::isfinite(stat.mean) && std::isfinite(stat.M2) && stat.M2 >= 0.0;
+    auto validWindowStats = [](const GaMDWindowStatistics& stat) {
+        return stat.count >= 0 && std::isfinite(stat.mean) && std::isfinite(stat.m2) && stat.m2 >= 0.0;
     };
     if (savedStep < 0 || !validStats(statP) || !validStats(statD)
         || (version >= 2 && (!validWindowStats(windowStatP) || !validWindowStats(windowStatD))))
@@ -691,12 +585,14 @@ static void loadGaMDRestartStateIfNeeded(long step, int nodeid)
     }
 
     const bool physicsParamsMismatch =
-            (file_igamd != g_params.igamd || file_iE != g_params.iE || file_iEP != g_params.iEP
-             || file_iED != g_params.iED || std::abs(file_sigma0P - g_params.sigma0P) > 1e-9
-             || std::abs(file_sigma0D - g_params.sigma0D) > 1e-9);
-    const bool stageParamsMismatch = (file_ntcmdprep != g_params.ntcmdprep
-                                      || file_ntcmd != g_params.ntcmd || file_ntebprep != g_params.ntebprep
-                                      || file_nteb != g_params.nteb || file_ntave != g_params.ntave);
+            (file_igamd != parameters_.boostType || file_iE != parameters_.thresholdMode
+             || file_iEP != parameters_.potentialMode || file_iED != parameters_.dihedralMode
+             || std::abs(file_sigma0P - parameters_.potentialSigmaLimit) > 1e-9
+             || std::abs(file_sigma0D - parameters_.dihedralSigmaLimit) > 1e-9);
+    const bool stageParamsMismatch =
+            (file_ntcmdprep != parameters_.conventionalPrepEnd
+             || file_ntcmd != parameters_.conventionalEnd || file_ntebprep != parameters_.boostPrepLength
+             || file_nteb != parameters_.boostLength || file_ntave != parameters_.averagingWindow);
 
     // 只检查会影响物理轨迹/boost 的参数。
     // reweight_nst 只影响输出格式，不影响动力学，因此不作为拒绝条件。
@@ -708,20 +604,20 @@ static void loadGaMDRestartStateIfNeeded(long step, int nodeid)
                   "Current gamd.in does not match GaMD restart '%s'; refusing an "
                   "inconsistent continuation (irest_gamd=%d).",
                   restartFilename,
-                  g_params.irest_gamd);
+                  parameters_.restartMode);
     }
 
-    g_statP = statP;
-    g_statD = statD;
+    potentialStatistics_ = statP;
+    dihedralStatistics_  = statD;
     if (version >= 2)
     {
-        g_windowStatP = windowStatP;
-        g_windowStatD = windowStatD;
+        potentialWindowStatistics_ = windowStatP;
+        dihedralWindowStatistics_  = windowStatD;
     }
     else
     {
-        g_windowStatP = {};
-        g_windowStatD = {};
+        potentialWindowStatistics_ = {};
+        dihedralWindowStatistics_  = {};
     }
 
     if (explicitProductionRestart)
@@ -736,20 +632,20 @@ static void loadGaMDRestartStateIfNeeded(long step, int nodeid)
             gmx_fatal(FARGS,
                       "irest_gamd = %d requires GaMD parameters that were already initialized, "
                       "but gamd-restart.dat was saved at step %ld before ntcmd = %ld.",
-                      g_params.irest_gamd,
+                      parameters_.restartMode,
                       savedStep,
                       restartNtcmd);
         }
 
         // In irest_gamd mode the stage-control counters can be omitted from
         // gamd.in. Keep the values from the restart file for provenance/output.
-        g_params.ntcmdprep = file_ntcmdprep;
-        g_params.ntcmd     = file_ntcmd;
-        g_params.ntebprep  = file_ntebprep;
-        g_params.nteb      = file_nteb;
-        g_params.ntave     = std::max<long>(1, file_ntave);
+        parameters_.conventionalPrepEnd = file_ntcmdprep;
+        parameters_.conventionalEnd     = file_ntcmd;
+        parameters_.boostPrepLength     = file_ntebprep;
+        parameters_.boostLength         = file_nteb;
+        parameters_.averagingWindow     = std::max<long>(1, file_ntave);
 
-        g_gamd_force_production_restart = true;
+        forceProductionRestart_ = true;
 
         if (checkpointContinuation)
         {
@@ -757,7 +653,7 @@ static void loadGaMDRestartStateIfNeeded(long step, int nodeid)
             reconcileGaMDTextFile("gamd-para.dat", 17, savedStep, nodeid);
             if (savedStep == step)
             {
-                g_gamd_suppressTextOutputStep = savedStep;
+                suppressTextOutputStep_ = savedStep;
             }
         }
 
@@ -777,7 +673,7 @@ static void loadGaMDRestartStateIfNeeded(long step, int nodeid)
             std::fprintf(stderr,
                          "[GaMD INFO] irest_gamd=%d ignores ntcmdprep/ntcmd/ntebprep/nteb "
                          "from gamd.in and uses the values stored in gamd-restart.dat.\n",
-                         g_params.irest_gamd);
+                         parameters_.restartMode);
 
             if (!checkpointContinuation && savedStep < restartNtcmd + restartNteb)
             {
@@ -786,7 +682,7 @@ static void loadGaMDRestartStateIfNeeded(long step, int nodeid)
                              "adaptive boost-stat stage ended at step=%ld. "
                              "The new simulation will enter production immediately using the "
                              "latest saved GaMD parameters.\n",
-                             g_params.irest_gamd,
+                             parameters_.restartMode,
                              savedStep,
                              restartNtcmd + restartNteb);
             }
@@ -808,7 +704,7 @@ static void loadGaMDRestartStateIfNeeded(long step, int nodeid)
                              "new simulation with irest_gamd=%d; forcing GaMD production stage "
                              "from step=%ld.\n",
                              savedStep,
-                             g_params.irest_gamd,
+                             parameters_.restartMode,
                              step);
             }
         }
@@ -820,7 +716,7 @@ static void loadGaMDRestartStateIfNeeded(long step, int nodeid)
 
         if (savedStep == step)
         {
-            g_gamd_suppressTextOutputStep = savedStep;
+            suppressTextOutputStep_ = savedStep;
         }
 
         if (nodeid == 0)
@@ -835,161 +731,48 @@ static void loadGaMDRestartStateIfNeeded(long step, int nodeid)
     }
 }
 
-void gamdSetCheckpointingThisStep(bool checkpointingThisStep)
+void GaMDRuntime::setCheckpointingThisStep(bool checkpointingThisStep)
 {
-    g_gamd_checkpointing_this_step = checkpointingThisStep;
+    checkpointingThisStep_  = checkpointingThisStep;
+    stepPlan_.checkpointing = checkpointingThisStep;
+    if (checkpointingThisStep && stepPlan_.enabled)
+    {
+        stepPlan_.requiresHostEnergy = true;
+        stepPlan_.gpuGraphEligible   = false;
+    }
 }
 
-// 提供给 enerdata_utils.cpp：在 reset 前写出当前 GaMD restart 状态
-void gamdWriteRestartState(long step)
+void GaMDRuntime::writeRestartState(int64_t step)
 {
-    saveGaMDRestartState(step, g_gamd_current_nodeid);
+    saveRestartState(step, currentRank_);
 }
 
-void gamdResetStateForTesting()
+GaMDRuntime::~GaMDRuntime()
 {
-    if (g_gamd_reweight_fp != nullptr)
-    {
-        std::fclose(g_gamd_reweight_fp);
-        g_gamd_reweight_fp = nullptr;
-    }
-    if (g_gamd_para_fp != nullptr)
-    {
-        std::fclose(g_gamd_para_fp);
-        g_gamd_para_fp = nullptr;
-    }
-
-    g_gamd_dih_ratio          = 1.0;
-    g_gamd_scale_P            = 1.0;
-    g_gamd_debug              = 0;
-    g_gamd_last_total_boost   = 0.0;
-    g_gamd_debug_current_step = -1;
-
-    g_gamd_boostP_current  = 0.0;
-    g_gamd_boostD_current  = 0.0;
-    g_gamd_scale_D_current = 1.0;
-    g_gamd_VP_used         = 0.0;
-    g_gamd_VD_used         = 0.0;
-
-    g_gamd_lastPreparedStep  = -1;
-    g_gamd_lastAccountedStep = -1;
-
-    g_gamd_step_ready_for_output = false;
-    g_gamd_currentStage          = 0;
-
-    g_gamd_restart_load_attempted   = false;
-    g_gamd_force_production_restart = false;
-    g_gamd_current_nodeid           = 0;
-    g_gamd_checkpointing_this_step  = false;
-    g_gamd_buffered_production_output_enabled = false;
-    g_gamd_suppressTextOutputStep   = -1;
-    g_gamd_warnedScalePFloor        = false;
-    g_gamd_warnedScaleDFloor        = false;
-
-    g_params        = {};
-    g_params_loaded = false;
-    g_statP         = {};
-    g_statD         = {};
-    g_windowStatP   = {};
-    g_windowStatD   = {};
+    closeOutputFiles();
 }
 
-const char* currentStepGaMDGpuIncompatibilityReason(bool /*useGpuUpdate*/, bool /*haveGpuBondedWork*/)
+void GaMDRuntime::closeOutputFiles()
 {
-    return nullptr;
-}
-
-const char* gaMDExecutionModeName(GaMDExecutionMode mode)
-{
-    switch (mode)
+    if (reweightFile_ != nullptr)
     {
-        case GaMDExecutionMode::CpuReference: return "CPU reference";
-        case GaMDExecutionMode::GpuResident: return "GPU resident";
+        std::fclose(reweightFile_);
+        reweightFile_ = nullptr;
     }
-    return "unknown";
-}
-
-GaMDExecutionMode selectGaMDExecutionMode(bool useGaMD,
-                                          bool useGpuNonbonded,
-                                          bool useGpuPme,
-                                          bool useGpuBonded,
-                                          bool useGpuUpdate,
-                                          bool havePpDomainDecomposition,
-                                          bool haveSeparatePmeRank,
-                                          bool useMts,
-                                          PressureCoupling pressureCoupling,
-                                          PressureCouplingType pressureCouplingType,
-                                          int  nstfout)
-{
-    if (!useGaMD)
+    if (parameterFile_ != nullptr)
     {
-        return GaMDExecutionMode::CpuReference;
+        std::fclose(parameterFile_);
+        parameterFile_ = nullptr;
     }
-
-    // CPU update is the explicit GaMD reference path. GPU update requests the
-    // complete resident path; there are no independently selected partial modes.
-    if (!useGpuUpdate)
-    {
-        return GaMDExecutionMode::CpuReference;
-    }
-
-    if (!GMX_GPU_CUDA)
-    {
-        gmx_fatal(FARGS, "GPU-update GaMD currently requires a CUDA build.");
-    }
-    if (!useGpuNonbonded)
-    {
-        gmx_fatal(FARGS, "GPU-update GaMD requires -nb gpu.");
-    }
-    if (!useGpuPme)
-    {
-        gmx_fatal(FARGS, "GPU-update GaMD requires -pme gpu for the current production target.");
-    }
-    if (!useGpuBonded)
-    {
-        gmx_fatal(FARGS, "GPU-update GaMD requires -bonded gpu.");
-    }
-    if (havePpDomainDecomposition || haveSeparatePmeRank)
-    {
-        gmx_fatal(FARGS,
-                  "GPU-update GaMD currently supports one PP rank without domain decomposition "
-                  "or a separate PME rank.");
-    }
-    if (useMts)
-    {
-        gmx_fatal(FARGS, "GPU-update GaMD does not support MTS.");
-    }
-    if (pressureCoupling != PressureCoupling::No && pressureCoupling != PressureCoupling::CRescale)
-    {
-        gmx_fatal(FARGS,
-                  "GPU-update GaMD supports only no pressure coupling or C-rescale pressure "
-                  "coupling.");
-    }
-    if (pressureCoupling == PressureCoupling::CRescale
-        && pressureCouplingType != PressureCouplingType::Isotropic
-        && pressureCouplingType != PressureCouplingType::SemiIsotropic)
-    {
-        gmx_fatal(FARGS,
-                  "GPU-update GaMD with C-rescale supports only isotropic or semiisotropic "
-                  "pressure coupling.");
-    }
-    if (nstfout != 0)
-    {
-        gmx_fatal(FARGS,
-                  "GPU-update GaMD currently requires nstfout=0 because corrected-force output "
-                  "staging is not implemented.");
-    }
-
-    return GaMDExecutionMode::GpuResident;
 }
 
 // ============================================================================
 // Parameter loading
 // ============================================================================
 
-void loadGaMDParams(int nodeid)
+void GaMDRuntime::loadParameters(int nodeid)
 {
-    if (g_params_loaded)
+    if (parametersLoaded_)
     {
         return;
     }
@@ -1045,67 +828,67 @@ void loadGaMDParams(int nodeid)
 
         if (key == "igamd")
         {
-            readValue(&g_params.igamd);
+            readValue(&parameters_.boostType);
         }
         else if (key == "irest_gamd")
         {
-            readValue(&g_params.irest_gamd);
+            readValue(&parameters_.restartMode);
         }
         else if (key == "iE")
         {
-            readValue(&g_params.iE);
+            readValue(&parameters_.thresholdMode);
         }
         else if (key == "iEP")
         {
-            readValue(&g_params.iEP);
+            readValue(&parameters_.potentialMode);
         }
         else if (key == "iED")
         {
-            readValue(&g_params.iED);
+            readValue(&parameters_.dihedralMode);
         }
         else if (key == "ntcmdprep")
         {
-            readValue(&g_params.ntcmdprep);
+            readValue(&parameters_.conventionalPrepEnd);
         }
         else if (key == "ntcmd")
         {
-            readValue(&g_params.ntcmd);
+            readValue(&parameters_.conventionalEnd);
         }
         else if (key == "ntebprep")
         {
-            readValue(&g_params.ntebprep);
+            readValue(&parameters_.boostPrepLength);
         }
         else if (key == "nteb")
         {
-            readValue(&g_params.nteb);
+            readValue(&parameters_.boostLength);
         }
         else if (key == "ntave")
         {
-            readValue(&g_params.ntave);
+            readValue(&parameters_.averagingWindow);
         }
         else if (key == "reweight_nst")
         {
-            readValue(&g_params.reweight_nst);
+            readValue(&parameters_.reweightInterval);
         }
         else if (key == "para_nst")
         {
-            readValue(&g_params.para_nst);
+            readValue(&parameters_.parameterInterval);
         }
         else if (key == "sigma0P")
         {
             double sigmaKcal = 0.0;
             readValue(&sigmaKcal);
-            g_params.sigma0P = sigmaKcal * 4.184;
+            parameters_.potentialSigmaLimit = sigmaKcal * 4.184;
         }
         else if (key == "sigma0D")
         {
             double sigmaKcal = 0.0;
             readValue(&sigmaKcal);
-            g_params.sigma0D = sigmaKcal * 4.184;
+            parameters_.dihedralSigmaLimit = sigmaKcal * 4.184;
         }
         else if (key == "debug")
         {
-            readValue(&g_gamd_debug);
+            readValue(&debug_);
         }
         else
         {
@@ -1129,39 +912,39 @@ void loadGaMDParams(int nodeid)
     requireKey("iE");
     requireKey("reweight_nst");
 
-    if (g_params.igamd < 1 || g_params.igamd > 3)
+    if (parameters_.boostType < 1 || parameters_.boostType > 3)
     {
-        gmx_fatal(FARGS, "GaMD parameter igamd must be 1, 2, or 3; got %d.", g_params.igamd);
+        gmx_fatal(FARGS, "GaMD parameter igamd must be 1, 2, or 3; got %d.", parameters_.boostType);
     }
-    if (g_params.irest_gamd != 0 && g_params.irest_gamd != 1)
+    if (parameters_.restartMode != 0 && parameters_.restartMode != 1)
     {
-        gmx_fatal(FARGS, "GaMD parameter irest_gamd must be 0 or 1; got %d.", g_params.irest_gamd);
+        gmx_fatal(FARGS, "GaMD parameter irest_gamd must be 0 or 1; got %d.", parameters_.restartMode);
     }
-    if (g_params.iE < 1 || g_params.iE > 2 || g_params.iEP < 1 || g_params.iEP > 2
-        || g_params.iED < 1 || g_params.iED > 2)
+    if (parameters_.thresholdMode < 1 || parameters_.thresholdMode > 2 || parameters_.potentialMode < 1
+        || parameters_.potentialMode > 2 || parameters_.dihedralMode < 1 || parameters_.dihedralMode > 2)
     {
         gmx_fatal(FARGS, "GaMD parameters iE, iEP, and iED must each be 1 or 2.");
     }
-    if (g_params.reweight_nst <= 0)
+    if (parameters_.reweightInterval <= 0)
     {
-        gmx_fatal(FARGS, "GaMD parameter reweight_nst must be positive; got %ld.", g_params.reweight_nst);
+        gmx_fatal(FARGS, "GaMD parameter reweight_nst must be positive; got %ld.", parameters_.reweightInterval);
     }
-    if (g_params.para_nst < 0)
+    if (parameters_.parameterInterval < 0)
     {
-        gmx_fatal(FARGS, "GaMD parameter para_nst must be non-negative; got %ld.", g_params.para_nst);
+        gmx_fatal(FARGS, "GaMD parameter para_nst must be non-negative; got %ld.", parameters_.parameterInterval);
     }
-    if (g_gamd_debug != 0 && g_gamd_debug != 1)
+    if (debug_ != 0 && debug_ != 1)
     {
-        gmx_fatal(FARGS, "GaMD parameter debug must be 0 or 1; got %d.", g_gamd_debug);
+        gmx_fatal(FARGS, "GaMD parameter debug must be 0 or 1; got %d.", debug_);
     }
 
-    const bool usesPotentialBoost = (g_params.igamd == 1 || g_params.igamd == 3);
-    const bool usesDihedralBoost  = (g_params.igamd == 2 || g_params.igamd == 3);
+    const bool usesPotentialBoost = (parameters_.boostType == 1 || parameters_.boostType == 3);
+    const bool usesDihedralBoost  = (parameters_.boostType == 2 || parameters_.boostType == 3);
     if (usesPotentialBoost)
     {
         requireKey("iEP");
         requireKey("sigma0P");
-        if (!std::isfinite(g_params.sigma0P) || g_params.sigma0P <= 0.0)
+        if (!std::isfinite(parameters_.potentialSigmaLimit) || parameters_.potentialSigmaLimit <= 0.0)
         {
             gmx_fatal(FARGS, "GaMD parameter sigma0P must be finite and positive.");
         }
@@ -1170,13 +953,13 @@ void loadGaMDParams(int nodeid)
     {
         requireKey("iED");
         requireKey("sigma0D");
-        if (!std::isfinite(g_params.sigma0D) || g_params.sigma0D <= 0.0)
+        if (!std::isfinite(parameters_.dihedralSigmaLimit) || parameters_.dihedralSigmaLimit <= 0.0)
         {
             gmx_fatal(FARGS, "GaMD parameter sigma0D must be finite and positive.");
         }
     }
 
-    if (g_params.irest_gamd == 0)
+    if (parameters_.restartMode == 0)
     {
         requireKey("ntcmdprep");
         requireKey("ntcmd");
@@ -1184,53 +967,56 @@ void loadGaMDParams(int nodeid)
         requireKey("nteb");
         requireKey("ntave");
 
-        if (g_params.ntave <= 0 || g_params.ntcmdprep < 0 || g_params.ntcmd <= g_params.ntcmdprep
-            || g_params.ntebprep < 0 || g_params.nteb <= g_params.ntebprep)
+        if (parameters_.averagingWindow <= 0 || parameters_.conventionalPrepEnd < 0
+            || parameters_.conventionalEnd <= parameters_.conventionalPrepEnd
+            || parameters_.boostPrepLength < 0 || parameters_.boostLength <= parameters_.boostPrepLength)
         {
             gmx_fatal(FARGS,
                       "Invalid GaMD stage parameters: require ntave>0, 0<=ntcmdprep<ntcmd, "
                       "and 0<=ntebprep<nteb; got %ld, %ld, %ld, %ld, %ld.",
-                      g_params.ntave,
-                      g_params.ntcmdprep,
-                      g_params.ntcmd,
-                      g_params.ntebprep,
-                      g_params.nteb);
+                      parameters_.averagingWindow,
+                      parameters_.conventionalPrepEnd,
+                      parameters_.conventionalEnd,
+                      parameters_.boostPrepLength,
+                      parameters_.boostLength);
         }
 
-        if (g_params.ntcmdprep % g_params.ntave != 0 || g_params.ntcmd % g_params.ntave != 0
-            || g_params.ntebprep % g_params.ntave != 0 || g_params.nteb % g_params.ntave != 0)
+        if (parameters_.conventionalPrepEnd % parameters_.averagingWindow != 0
+            || parameters_.conventionalEnd % parameters_.averagingWindow != 0
+            || parameters_.boostPrepLength % parameters_.averagingWindow != 0
+            || parameters_.boostLength % parameters_.averagingWindow != 0)
         {
             gmx_fatal(FARGS,
                       "GaMD requires ntcmdprep (%ld), ntcmd (%ld), ntebprep (%ld), and nteb "
                       "(%ld) to be multiples of ntave (%ld) for aligned statistics windows.",
-                      g_params.ntcmdprep,
-                      g_params.ntcmd,
-                      g_params.ntebprep,
-                      g_params.nteb,
-                      g_params.ntave);
+                      parameters_.conventionalPrepEnd,
+                      parameters_.conventionalEnd,
+                      parameters_.boostPrepLength,
+                      parameters_.boostLength,
+                      parameters_.averagingWindow);
         }
     }
 
-    g_params_loaded = true;
+    parametersLoaded_ = true;
 
     if (nodeid == 0)
     {
         std::fprintf(stderr, "\n=== GaMD Parameters Loaded from gamd.in ===\n");
-        std::fprintf(stderr, "igamd        = %d\n", g_params.igamd);
-        std::fprintf(stderr, "irest_gamd   = %d\n", g_params.irest_gamd);
-        std::fprintf(stderr, "iE           = %d\n", g_params.iE);
-        std::fprintf(stderr, "iEP          = %d\n", g_params.iEP);
-        std::fprintf(stderr, "iED          = %d\n", g_params.iED);
-        std::fprintf(stderr, "ntcmdprep    = %ld\n", g_params.ntcmdprep);
-        std::fprintf(stderr, "ntcmd        = %ld\n", g_params.ntcmd);
-        std::fprintf(stderr, "ntebprep     = %ld\n", g_params.ntebprep);
-        std::fprintf(stderr, "nteb         = %ld\n", g_params.nteb);
-        std::fprintf(stderr, "ntave        = %ld\n", g_params.ntave);
-        std::fprintf(stderr, "reweight_nst = %ld\n", g_params.reweight_nst);
-        std::fprintf(stderr, "para_nst     = %ld\n", g_params.para_nst);
-        std::fprintf(stderr, "sigma0P      = %.4f kJ/mol\n", g_params.sigma0P);
-        std::fprintf(stderr, "sigma0D      = %.4f kJ/mol\n", g_params.sigma0D);
-        std::fprintf(stderr, "DEBUG MODE   = %d\n", g_gamd_debug);
+        std::fprintf(stderr, "igamd        = %d\n", parameters_.boostType);
+        std::fprintf(stderr, "irest_gamd   = %d\n", parameters_.restartMode);
+        std::fprintf(stderr, "iE           = %d\n", parameters_.thresholdMode);
+        std::fprintf(stderr, "iEP          = %d\n", parameters_.potentialMode);
+        std::fprintf(stderr, "iED          = %d\n", parameters_.dihedralMode);
+        std::fprintf(stderr, "ntcmdprep    = %ld\n", parameters_.conventionalPrepEnd);
+        std::fprintf(stderr, "ntcmd        = %ld\n", parameters_.conventionalEnd);
+        std::fprintf(stderr, "ntebprep     = %ld\n", parameters_.boostPrepLength);
+        std::fprintf(stderr, "nteb         = %ld\n", parameters_.boostLength);
+        std::fprintf(stderr, "ntave        = %ld\n", parameters_.averagingWindow);
+        std::fprintf(stderr, "reweight_nst = %ld\n", parameters_.reweightInterval);
+        std::fprintf(stderr, "para_nst     = %ld\n", parameters_.parameterInterval);
+        std::fprintf(stderr, "sigma0P      = %.4f kJ/mol\n", parameters_.potentialSigmaLimit);
+        std::fprintf(stderr, "sigma0D      = %.4f kJ/mol\n", parameters_.dihedralSigmaLimit);
+        std::fprintf(stderr, "DEBUG MODE   = %d\n", debug_);
         std::fprintf(stderr, "===========================================\n\n");
     }
 }
@@ -1239,16 +1025,16 @@ void loadGaMDParams(int nodeid)
 // Reweight file helpers
 // ============================================================================
 
-static FILE* getGaMDReweightFile(int nodeid)
+FILE* GaMDRuntime::reweightFile(int nodeid)
 {
     if (nodeid != 0)
     {
         return nullptr;
     }
 
-    if (g_gamd_reweight_fp != nullptr)
+    if (reweightFile_ != nullptr)
     {
-        return g_gamd_reweight_fp;
+        return reweightFile_;
     }
 
     bool fileExists = false;
@@ -1257,37 +1043,37 @@ static FILE* getGaMDReweightFile(int nodeid)
         fileExists = test.good();
     }
 
-    g_gamd_reweight_fp = std::fopen("gamd-reweight.dat", "a");
-    if (g_gamd_reweight_fp == nullptr)
+    reweightFile_ = std::fopen("gamd-reweight.dat", "a");
+    if (reweightFile_ == nullptr)
     {
         gmx_fatal(FARGS, "Failed to open gamd-reweight.dat for writing.");
     }
 
     if (!fileExists)
     {
-        std::fprintf(g_gamd_reweight_fp, "# GaMD reweighting file\n");
-        std::fprintf(g_gamd_reweight_fp, "# All energy terms stored in units of kcal/mol\n");
-        std::fprintf(g_gamd_reweight_fp,
+        std::fprintf(reweightFile_, "# GaMD reweighting file\n");
+        std::fprintf(reweightFile_, "# All energy terms stored in units of kcal/mol\n");
+        std::fprintf(reweightFile_,
                      "# reweight_nst,total_nstep,Unboosted-Potential-Energy,"
                      "Unboosted-Dihedral-Energy,Total-Force-Weight,Dihedral-Force-Weight,"
                      "Effective-Dihedral-Force-Weight,Boost-Energy-Potential,"
                      "Boost-Energy-Dihedral\n");
-        flushAndSyncFileOrFatal(g_gamd_reweight_fp, "gamd-reweight.dat");
+        flushAndSyncFileOrFatal(reweightFile_, "gamd-reweight.dat");
     }
 
-    return g_gamd_reweight_fp;
+    return reweightFile_;
 }
 
-static FILE* getGaMDParaFile(int nodeid)
+FILE* GaMDRuntime::parameterFile(int nodeid)
 {
     if (nodeid != 0)
     {
         return nullptr;
     }
 
-    if (g_gamd_para_fp != nullptr)
+    if (parameterFile_ != nullptr)
     {
-        return g_gamd_para_fp;
+        return parameterFile_;
     }
 
     bool fileExists = false;
@@ -1296,117 +1082,107 @@ static FILE* getGaMDParaFile(int nodeid)
         fileExists = test.good();
     }
 
-    g_gamd_para_fp = std::fopen("gamd-para.dat", "a");
-    if (g_gamd_para_fp == nullptr)
+    parameterFile_ = std::fopen("gamd-para.dat", "a");
+    if (parameterFile_ == nullptr)
     {
         gmx_fatal(FARGS, "Failed to open gamd-para.dat for writing.");
     }
 
     if (!fileExists)
     {
-        std::fprintf(g_gamd_para_fp, "# GaMD parameter history\n");
-        std::fprintf(g_gamd_para_fp,
+        std::fprintf(parameterFile_, "# GaMD parameter history\n");
+        std::fprintf(parameterFile_,
                      "# Energies are in kJ/mol; k0 is dimensionless; k is in (kJ/mol)^-1\n");
-        std::fprintf(g_gamd_para_fp,
+        std::fprintf(parameterFile_,
                      "# para_nst,total_nstep,stage,"
                      "VmaxP,VminP,VavgP,SigmaVP,EP,k0P,kP,"
                      "VmaxD,VminD,VavgD,SigmaVD,ED,k0D,kD\n");
-        flushAndSyncFileOrFatal(g_gamd_para_fp, "gamd-para.dat");
+        flushAndSyncFileOrFatal(parameterFile_, "gamd-para.dat");
     }
 
-    return g_gamd_para_fp;
+    return parameterFile_;
 }
 
-static bool suppressGaMDTextOutputForStep(long step)
+bool GaMDRuntime::suppressTextOutputForStep(int64_t step) const
 {
-    return (g_gamd_suppressTextOutputStep == step);
+    return (suppressTextOutputStep_ == step);
 }
 
-static void writeGaMDStatsColumns(FILE* fp, bool enabled, const GaMDStats& stat)
+static void writeGaMDEnergyStatisticsColumns(FILE* fp, bool enabled, const GaMDEnergyStatistics& stat)
 {
     const double nanValue = std::numeric_limits<double>::quiet_NaN();
-    const double Vmax     = enabled ? stat.Vmax : nanValue;
-    const double Vmin     = enabled ? stat.Vmin : nanValue;
-    const double Vavg     = enabled ? stat.Vavg : nanValue;
-    const double sigmaV   = enabled ? stat.sigmaV : nanValue;
-    const double E        = enabled ? stat.E : nanValue;
+    const double Vmax     = enabled ? stat.maximum : nanValue;
+    const double Vmin     = enabled ? stat.minimum : nanValue;
+    const double Vavg     = enabled ? stat.average : nanValue;
+    const double sigmaV   = enabled ? stat.deviation : nanValue;
+    const double E        = enabled ? stat.threshold : nanValue;
     const double k0       = enabled ? stat.k0 : nanValue;
-    const double k        = enabled ? stat.k : nanValue;
+    const double k        = enabled ? stat.forceConstant : nanValue;
 
     std::fprintf(fp, " %18.9g %18.9g %18.9g %18.9g %18.9g %18.9g %18.9g", Vmax, Vmin, Vavg, sigmaV, E, k0, k);
 }
 
-struct GaMDProductionOutputRecord
-{
-    double potentialEnergy = 0;
-    double dihedralEnergy  = 0;
-    double scaleP          = 1;
-    double scaleD          = 1;
-    double boostP          = 0;
-    double boostD          = 0;
-};
-
-static void writeGaMDParaLine(long step, int nodeid, bool flushOutput)
+void GaMDRuntime::writeParameterLine(int64_t step, int nodeid, bool flushOutput)
 {
     if (nodeid != 0)
     {
         return;
     }
 
-    if (g_params.igamd == 0 || g_params.para_nst <= 0)
+    if (parameters_.boostType == 0 || parameters_.parameterInterval <= 0)
     {
         return;
     }
 
-    if (g_gamd_currentStage < 2 || step == 0)
+    if (stepPlan_.stage < 2 || step == 0)
     {
         return;
     }
 
-    if (step % g_params.para_nst != 0)
+    if (step % parameters_.parameterInterval != 0)
     {
         return;
     }
 
-    if (suppressGaMDTextOutputForStep(step))
+    if (suppressTextOutputForStep(step))
     {
         return;
     }
 
-    FILE* fp = getGaMDParaFile(nodeid);
+    FILE* fp = parameterFile(nodeid);
     if (fp == nullptr)
     {
         return;
     }
 
-    const bool hasP = (g_params.igamd == 1 || g_params.igamd == 3);
-    const bool hasD = (g_params.igamd == 2 || g_params.igamd == 3);
+    const bool hasP = (parameters_.boostType == 1 || parameters_.boostType == 3);
+    const bool hasD = (parameters_.boostType == 2 || parameters_.boostType == 3);
 
-    if (std::fprintf(fp, "%10ld %12ld %6d", g_params.para_nst, step, g_gamd_currentStage) < 0)
+    if (std::fprintf(fp, "%10ld %12ld %6d", parameters_.parameterInterval, step, stepPlan_.stage) < 0)
     {
         gmx_fatal(FARGS, "Failed to write gamd-para.dat at step %ld.", step);
     }
-    writeGaMDStatsColumns(fp, hasP, g_statP);
-    writeGaMDStatsColumns(fp, hasD, g_statD);
+    writeGaMDEnergyStatisticsColumns(fp, hasP, potentialStatistics_);
+    writeGaMDEnergyStatisticsColumns(fp, hasD, dihedralStatistics_);
     if (std::fputc('\n', fp) == EOF || (flushOutput && std::fflush(fp) != 0))
     {
         gmx_fatal(FARGS, "Failed to flush gamd-para.dat at step %ld.", step);
     }
 }
 
-static void writeGaMDReweightRecord(long step, int nodeid, const GaMDProductionOutputRecord& record, bool flushOutput)
+void GaMDRuntime::writeReweightRecord(int64_t step, int nodeid, const GaMDProductionOutputRecord& record, bool flushOutput)
 {
     if (nodeid != 0)
     {
         return;
     }
 
-    if (g_params.igamd == 0)
+    if (parameters_.boostType == 0)
     {
         return;
     }
 
-    if (!g_gamd_step_ready_for_output || g_gamd_currentStage < 3)
+    if (!stepReadyForOutput_ || stepPlan_.stage < 3)
     {
         return;
     }
@@ -1416,22 +1192,22 @@ static void writeGaMDReweightRecord(long step, int nodeid, const GaMDProductionO
         return;
     }
 
-    if (g_params.reweight_nst <= 0)
+    if (parameters_.reweightInterval <= 0)
     {
         return;
     }
 
-    if (step % g_params.reweight_nst != 0)
+    if (step % parameters_.reweightInterval != 0)
     {
         return;
     }
 
-    if (suppressGaMDTextOutputForStep(step))
+    if (suppressTextOutputForStep(step))
     {
         return;
     }
 
-    FILE* fp = getGaMDReweightFile(nodeid);
+    FILE* fp = reweightFile(nodeid);
     if (fp == nullptr)
     {
         return;
@@ -1447,7 +1223,7 @@ static void writeGaMDReweightRecord(long step, int nodeid, const GaMDProductionO
 
     if (std::fprintf(fp,
                      "%10ld %12ld %20.9f %20.9f %14.9f %14.9f %14.9f %20.9f %20.9f\n",
-                     g_params.reweight_nst,
+                     parameters_.reweightInterval,
                      step,
                      VP_kcal,
                      VD_kcal,
@@ -1463,111 +1239,122 @@ static void writeGaMDReweightRecord(long step, int nodeid, const GaMDProductionO
     }
 }
 
-static void writeGaMDReweightLine(long step, int nodeid, bool flushOutput)
+void GaMDRuntime::writeReweightLine(int64_t step, int nodeid, bool flushOutput)
 {
-    writeGaMDReweightRecord(
-            step,
-            nodeid,
-            { g_gamd_VP_used, g_gamd_VD_used, g_gamd_scale_P, g_gamd_scale_D_current, g_gamd_boostP_current, g_gamd_boostD_current },
-            flushOutput);
+    writeReweightRecord(step,
+                        nodeid,
+                        { stepResult_.potentialEnergy,
+                          stepResult_.dihedralEnergy,
+                          stepResult_.scaleP,
+                          stepResult_.scaleD,
+                          stepResult_.boostP,
+                          stepResult_.boostD },
+                        flushOutput);
 }
 
 // ============================================================================
 // Core math helpers
 // ============================================================================
 
-void calc_E_k0(int iE, double sigma0, GaMDStats& stat)
+static void calculateThresholdAndForceConstant(int iE, double sigma0, GaMDEnergyStatistics& stat)
 {
-    if (stat.Vmax <= stat.Vmin || stat.sigmaV < 1e-6 || stat.Vmax == stat.Vavg)
+    if (stat.maximum <= stat.minimum || stat.deviation < 1e-6 || stat.maximum == stat.average)
     {
         return;
     }
 
     if (iE == 1)
     {
-        stat.E = stat.Vmax;
-        const double k0_prime =
-                (sigma0 / stat.sigmaV) * (stat.Vmax - stat.Vmin) / (stat.Vmax - stat.Vavg);
+        stat.threshold        = stat.maximum;
+        const double k0_prime = (sigma0 / stat.deviation) * (stat.maximum - stat.minimum)
+                                / (stat.maximum - stat.average);
         stat.k0 = std::min(1.0, k0_prime);
     }
     else if (iE == 2)
     {
-        const double k0_dprime = (1.0 - sigma0 / stat.sigmaV) * (stat.Vmax - stat.Vmin)
-                                 / std::max(1e-6, (stat.Vavg - stat.Vmin));
+        const double k0_dprime = (1.0 - sigma0 / stat.deviation) * (stat.maximum - stat.minimum)
+                                 / std::max(1e-6, (stat.average - stat.minimum));
 
         if (k0_dprime > 0.0 && k0_dprime <= 1.0)
         {
-            stat.k0 = k0_dprime;
-            stat.E  = stat.Vmin + (stat.Vmax - stat.Vmin) / stat.k0;
+            stat.k0        = k0_dprime;
+            stat.threshold = stat.minimum + (stat.maximum - stat.minimum) / stat.k0;
         }
         else
         {
-            stat.E = stat.Vmax;
-            const double k0_prime =
-                    (sigma0 / stat.sigmaV) * (stat.Vmax - stat.Vmin) / (stat.Vmax - stat.Vavg);
+            stat.threshold        = stat.maximum;
+            const double k0_prime = (sigma0 / stat.deviation) * (stat.maximum - stat.minimum)
+                                    / (stat.maximum - stat.average);
             stat.k0 = std::min(1.0, k0_prime);
         }
     }
 
-    stat.k = stat.k0 / std::max(1e-6, (stat.Vmax - stat.Vmin));
+    stat.forceConstant = stat.k0 / std::max(1e-6, (stat.maximum - stat.minimum));
 }
 
-void update_stats_minmax(double V, GaMDStats& stat)
+static void updateStatisticsMinMax(double energy, GaMDEnergyStatistics& statistics)
 {
-    if (V > stat.Vmax)
+    if (energy > statistics.maximum)
     {
-        stat.Vmax = V;
+        statistics.maximum = energy;
     }
-    if (V < stat.Vmin)
+    if (energy < statistics.minimum)
     {
-        stat.Vmin = V;
+        statistics.minimum = energy;
     }
 
-    stat.count++;
+    statistics.count++;
 }
 
-void update_stats_window(double V, GaMDWindowStats& stat)
+static void updateWindowStatistics(double energy, GaMDWindowStatistics& statistics)
 {
-    stat.count++;
-    const double delta = V - stat.mean;
-    stat.mean += delta / stat.count;
-    const double delta2 = V - stat.mean;
-    stat.M2 += delta * delta2;
+    statistics.count++;
+    const double delta = energy - statistics.mean;
+    statistics.mean += delta / statistics.count;
+    const double delta2 = energy - statistics.mean;
+    statistics.m2 += delta * delta2;
 }
 
-void finalize_window_stats(GaMDWindowStats& windowStat, GaMDStats& stat)
+static void finalizeWindowStatistics(GaMDWindowStatistics& windowStatistics, GaMDEnergyStatistics& statistics)
 {
-    if (windowStat.count <= 0)
+    if (windowStatistics.count <= 0)
     {
         return;
     }
 
-    stat.Vavg   = windowStat.mean;
-    stat.sigmaV = (windowStat.count > 1 ? std::sqrt(windowStat.M2 / windowStat.count) : 0.0);
+    statistics.average = windowStatistics.mean;
+    if (windowStatistics.count > 1)
+    {
+        statistics.deviation = std::sqrt(windowStatistics.m2 / windowStatistics.count);
+    }
+    else
+    {
+        statistics.deviation = 0.0;
+    }
 
-    windowStat = {};
+    windowStatistics = {};
 }
 
-static int determineGaMDStage(const long step)
+int GaMDRuntime::determineStage(int64_t step) const
 {
-    if (g_gamd_force_production_restart)
+    if (forceProductionRestart_)
     {
         return 5;
     }
 
-    if (step <= g_params.ntcmdprep)
+    if (step <= parameters_.conventionalPrepEnd)
     {
         return 1;
     }
-    if (step <= g_params.ntcmd)
+    if (step <= parameters_.conventionalEnd)
     {
         return 2;
     }
-    if (step <= g_params.ntcmd + g_params.ntebprep)
+    if (step <= parameters_.conventionalEnd + parameters_.boostPrepLength)
     {
         return 3;
     }
-    if (step <= g_params.ntcmd + g_params.nteb)
+    if (step <= parameters_.conventionalEnd + parameters_.boostLength)
     {
         return 4;
     }
@@ -1585,103 +1372,95 @@ static bool stageUpdatesStats(const int stage)
     return (stage == 2 || stage == 4);
 }
 
-// ============================================================================
-// Provider implementation
-// ============================================================================
-
-GaMDForceProvider::GaMDForceProvider(const GaMDParams& params, const t_inputrec& ir, const gmx_mtop_t& mtop) :
-    params_(params)
+const GaMDStepPlan& GaMDRuntime::prepareStep(int64_t step, int nodeid, bool pressureCouplingThisStep)
 {
-    (void)ir;
-    (void)mtop;
-}
-
-void gamdPrepareStep(long step, int nodeid)
-{
-    if (g_gamd_lastPreparedStep == step)
+    if (lastPreparedStep_ == step)
     {
-        return;
+        return stepPlan_;
     }
-    g_gamd_lastPreparedStep = step;
+    lastPreparedStep_ = step;
 
-    g_gamd_current_nodeid = nodeid;
+    currentRank_ = nodeid;
 
-    loadGaMDParams(nodeid);
-    loadGaMDRestartStateIfNeeded(step, nodeid);
+    loadParameters(nodeid);
+    loadRestartStateIfNeeded(step, nodeid);
 
     // Default to a neutral state. Current-step GaMD applies the final force
     // correction later in do_force(), after raw energies and raw listed forces
     // for the current coordinates are available.
-    g_gamd_scale_P               = 1.0;
-    g_gamd_scale_D_current       = 1.0;
-    g_gamd_dih_ratio             = 1.0;
-    g_gamd_boostP_current        = 0.0;
-    g_gamd_boostD_current        = 0.0;
-    g_gamd_last_total_boost      = 0.0;
-    g_gamd_VP_used               = 0.0;
-    g_gamd_VD_used               = 0.0;
-    g_gamd_step_ready_for_output = false;
-    g_gamd_currentStage          = 0;
+    stepResult_         = {};
+    stepReadyForOutput_ = false;
+    stepPlan_           = {};
+    stepPlan_.step      = step;
+    stepPlan_.boostType = parameters_.boostType;
+    stepPlan_.debug     = debug_;
 
-    if (g_params.igamd == 0)
+    if (parameters_.boostType == 0)
+    {
+        return stepPlan_;
+    }
+
+    stepPlan_.enabled       = true;
+    stepPlan_.stage         = determineStage(step);
+    stepPlan_.thresholdP    = potentialStatistics_.threshold;
+    stepPlan_.kP            = potentialStatistics_.forceConstant;
+    stepPlan_.thresholdD    = dihedralStatistics_.threshold;
+    stepPlan_.kD            = dihedralStatistics_.forceConstant;
+    stepPlan_.checkpointing = checkpointingThisStep_;
+    stepPlan_.writesParameters =
+            parameters_.parameterInterval > 0 && step % parameters_.parameterInterval == 0;
+    stepPlan_.writesReweight =
+            step > 0 && parameters_.reweightInterval > 0 && step % parameters_.reweightInterval == 0;
+    stepReadyForOutput_ = (stepPlan_.stage >= 3);
+
+    const bool forcedScale            = std::getenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP") != nullptr;
+    const bool writesUnbufferedOutput = (stepPlan_.writesParameters || stepPlan_.writesReweight)
+                                        && !bufferedProductionOutputEnabled_;
+    stepPlan_.requiresHostEnergy = stepPlan_.stage != 5 || checkpointingThisStep_
+                                   || pressureCouplingThisStep || forcedScale || writesUnbufferedOutput;
+    stepPlan_.gpuGraphEligible =
+            stepPlan_.stage == 5 && !checkpointingThisStep_ && !pressureCouplingThisStep;
+    return stepPlan_;
+}
+
+GaMDGpuProductionParameters GaMDRuntime::gpuProductionParameters() const
+{
+    return { stepPlan_.boostType, stepPlan_.stage,      stepPlan_.thresholdP,
+             stepPlan_.kP,        stepPlan_.thresholdD, stepPlan_.kD };
+}
+
+bool GaMDRuntime::requiresHostEnergyThisStep(int64_t step) const
+{
+    GMX_RELEASE_ASSERT(stepPlan_.step == step, "GaMD host-staging query must use the prepared step");
+    return stepPlan_.requiresHostEnergy;
+}
+
+bool GaMDRuntime::bufferedProductionOutputEnabled() const
+{
+    return bufferedProductionOutputEnabled_;
+}
+
+void GaMDRuntime::setBufferedProductionOutputEnabled(bool enabled)
+{
+    bufferedProductionOutputEnabled_ = enabled;
+}
+
+void GaMDRuntime::warnIfRunTooShort(int64_t initStep, int64_t nsteps, int nodeid)
+{
+    if (warnedAboutRunLength_)
     {
         return;
     }
-    g_gamd_currentStage          = determineGaMDStage(step);
-    g_gamd_step_ready_for_output = (g_gamd_currentStage >= 3);
-}
+    warnedAboutRunLength_ = true;
 
-GaMDGpuProductionParameters gamdGpuProductionParameters()
-{
-    return { g_params.igamd, g_gamd_currentStage, g_statP.E, g_statP.k, g_statD.E, g_statD.k };
-}
-
-bool gamdRequiresHostEnergyThisStep(long step)
-{
-    if (g_params.igamd == 0)
-    {
-        return false;
-    }
-    if (g_gamd_currentStage != 5 || g_gamd_checkpointing_this_step)
-    {
-        return true;
-    }
-    if (std::getenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP") != nullptr)
-    {
-        return true;
-    }
-    const bool writesParameters = g_params.para_nst > 0 && step % g_params.para_nst == 0;
-    const bool writesReweight = step > 0 && g_params.reweight_nst > 0 && step % g_params.reweight_nst == 0;
-    return (writesParameters || writesReweight) && !gamdBufferedProductionOutputEnabled();
-}
-
-bool gamdBufferedProductionOutputEnabled()
-{
-    return g_gamd_buffered_production_output_enabled;
-}
-
-void gamdSetBufferedProductionOutputEnabled(bool enabled)
-{
-    g_gamd_buffered_production_output_enabled = enabled;
-}
-
-void gamdWarnIfRunTooShort(int64_t initStep, int64_t nsteps, int nodeid)
-{
-    static bool warnedAboutRunLength = false;
-    if (warnedAboutRunLength)
-    {
-        return;
-    }
-    warnedAboutRunLength = true;
-
-    if (!g_params_loaded || g_params.igamd == 0 || nodeid != 0 || nsteps < 0
-        || g_params.irest_gamd != 0 || g_gamd_force_production_restart)
+    if (!parametersLoaded_ || parameters_.boostType == 0 || nodeid != 0 || nsteps < 0
+        || parameters_.restartMode != 0 || forceProductionRestart_)
     {
         return;
     }
 
-    const int64_t adaptivePhaseEnd =
-            static_cast<int64_t>(g_params.ntcmd) + static_cast<int64_t>(g_params.nteb);
+    const int64_t adaptivePhaseEnd = static_cast<int64_t>(parameters_.conventionalEnd)
+                                     + static_cast<int64_t>(parameters_.boostLength);
     const int64_t plannedFinalStep = initStep + nsteps;
     if (adaptivePhaseEnd >= plannedFinalStep)
     {
@@ -1696,16 +1475,16 @@ void gamdWarnIfRunTooShort(int64_t initStep, int64_t nsteps, int nodeid)
     }
 }
 
-static double validateAndClampGaMDScale(const char*      label,
-                                        double           rawScale,
-                                        double           energy,
-                                        const GaMDStats& stat,
-                                        long             step,
-                                        int              nodeid,
-                                        bool*            warnedAtFloor)
+double GaMDRuntime::validateAndClampScale(const char*                 label,
+                                          double                      rawScale,
+                                          double                      energy,
+                                          const GaMDEnergyStatistics& stat,
+                                          int64_t                     step,
+                                          int                         nodeid,
+                                          bool*                       warnedAtFloor)
 {
-    if (!std::isfinite(rawScale) || !std::isfinite(energy) || !std::isfinite(stat.E)
-        || !std::isfinite(stat.k))
+    if (!std::isfinite(rawScale) || !std::isfinite(energy) || !std::isfinite(stat.threshold)
+        || !std::isfinite(stat.forceConstant))
     {
         gmx_fatal(FARGS,
                   "Non-finite GaMD %s boost quantity at step %ld: raw_scale=%g energy=%g "
@@ -1714,8 +1493,8 @@ static double validateAndClampGaMDScale(const char*      label,
                   step,
                   rawScale,
                   energy,
-                  stat.E,
-                  stat.k);
+                  stat.threshold,
+                  stat.forceConstant);
     }
 
     constexpr double c_scaleFloor = 0.01;
@@ -1733,32 +1512,32 @@ static double validateAndClampGaMDScale(const char*      label,
                          step,
                          rawScale,
                          energy,
-                         stat.E,
-                         stat.k);
+                         stat.threshold,
+                         stat.forceConstant);
         }
         *warnedAtFloor = true;
     }
     return std::max(c_scaleFloor, rawScale);
 }
 
-void gamdFinalizeCurrentStep(long           step,
-                             int            nodeid,
-                             double         totalPotentialEnergy,
-                             double         dihedralEnergy,
-                             gmx_wallcycle* wcycle)
+void GaMDRuntime::finalizeCurrentStep(int64_t        step,
+                                      int            nodeid,
+                                      double         totalPotentialEnergy,
+                                      double         dihedralEnergy,
+                                      gmx_wallcycle* wcycle)
 {
-    if (g_params.igamd == 0 || g_gamd_lastAccountedStep == step)
+    if (parameters_.boostType == 0 || lastAccountedStep_ == step)
     {
         return;
     }
     wallcycle_start(wcycle, WallCycleCounter::GaMDFinalize);
-    g_gamd_lastAccountedStep = step;
+    lastAccountedStep_ = step;
 
-    g_gamd_current_nodeid        = nodeid;
-    g_gamd_currentStage          = determineGaMDStage(step);
-    g_gamd_step_ready_for_output = (g_gamd_currentStage >= 3);
-    g_gamd_VP_used               = totalPotentialEnergy;
-    g_gamd_VD_used               = dihedralEnergy;
+    currentRank_ = nodeid;
+    GMX_RELEASE_ASSERT(stepPlan_.step == step, "GaMD finalization must use the prepared step");
+    stepReadyForOutput_         = (stepPlan_.stage >= 3);
+    stepResult_.potentialEnergy = totalPotentialEnergy;
+    stepResult_.dihedralEnergy  = dihedralEnergy;
 
     if (const char* sp = std::getenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP"))
     {
@@ -1781,35 +1560,32 @@ void gamdFinalizeCurrentStep(long           step,
             boostD = std::atof(bd);
         }
 
-        const GaMDStats overrideStats{};
-        g_gamd_scale_P = validateAndClampGaMDScale(
-                "total-potential", scaleP, totalPotentialEnergy, overrideStats, step, nodeid, &g_gamd_warnedScalePFloor);
-        g_gamd_scale_D_current = validateAndClampGaMDScale(
-                "dihedral", scaleD, dihedralEnergy, overrideStats, step, nodeid, &g_gamd_warnedScaleDFloor);
+        const GaMDEnergyStatistics overrideStats{};
+        stepResult_.scaleP = validateAndClampScale(
+                "total-potential", scaleP, totalPotentialEnergy, overrideStats, step, nodeid, &warnedPotentialScaleFloor_);
+        stepResult_.scaleD = validateAndClampScale(
+                "dihedral", scaleD, dihedralEnergy, overrideStats, step, nodeid, &warnedDihedralScaleFloor_);
         if (!std::isfinite(boostP) || !std::isfinite(boostD))
         {
             gmx_fatal(FARGS, "Non-finite forced GaMD boost at step %ld: boostP=%g boostD=%g.", step, boostP, boostD);
         }
-        g_gamd_dih_ratio        = g_gamd_scale_D_current;
-        g_gamd_boostP_current   = boostP;
-        g_gamd_boostD_current   = boostD;
-        g_gamd_last_total_boost = boostP + boostD;
+        stepResult_.boostP = boostP;
+        stepResult_.boostD = boostD;
         wallcycle_stop(wcycle, WallCycleCounter::GaMDFinalize);
         wallcycle_start(wcycle, WallCycleCounter::GaMDOutput);
-        writeGaMDParaLine(step, nodeid, true);
-        writeGaMDReweightLine(step, nodeid, true);
+        writeParameterLine(step, nodeid, true);
+        writeReweightLine(step, nodeid, true);
         wallcycle_stop(wcycle, WallCycleCounter::GaMDOutput);
         return;
     }
 
-    const bool updateStat = stageUpdatesStats(g_gamd_currentStage);
-    const bool applyBoost = stageUsesBoost(g_gamd_currentStage);
+    const bool updateStat = stageUpdatesStats(stepPlan_.stage);
+    const bool applyBoost = stageUsesBoost(stepPlan_.stage);
 
-    g_gamd_scale_P         = 1.0;
-    g_gamd_scale_D_current = 1.0;
-    g_gamd_dih_ratio       = 1.0;
-    g_gamd_boostP_current  = 0.0;
-    g_gamd_boostD_current  = 0.0;
+    stepResult_.scaleP = 1.0;
+    stepResult_.scaleD = 1.0;
+    stepResult_.boostP = 0.0;
+    stepResult_.boostD = 0.0;
 
     if (applyBoost)
     {
@@ -1819,111 +1595,119 @@ void gamdFinalizeCurrentStep(long           step,
         double scaleD          = 1.0;
         double totalEnergyForP = totalPotentialEnergy;
 
-        if ((g_params.igamd == 2 || g_params.igamd == 3) && dihedralEnergy < g_statD.E)
+        if ((parameters_.boostType == 2 || parameters_.boostType == 3)
+            && dihedralEnergy < dihedralStatistics_.threshold)
         {
-            boostD = 0.5 * g_statD.k * (g_statD.E - dihedralEnergy) * (g_statD.E - dihedralEnergy);
-            scaleD = 1.0 - g_statD.k * (g_statD.E - dihedralEnergy);
+            boostD = 0.5 * dihedralStatistics_.forceConstant
+                     * (dihedralStatistics_.threshold - dihedralEnergy)
+                     * (dihedralStatistics_.threshold - dihedralEnergy);
+            scaleD = 1.0 - dihedralStatistics_.forceConstant * (dihedralStatistics_.threshold - dihedralEnergy);
         }
 
-        if (g_params.igamd == 3)
+        if (parameters_.boostType == 3)
         {
             totalEnergyForP += boostD;
         }
 
-        if ((g_params.igamd == 1 || g_params.igamd == 3) && totalEnergyForP < g_statP.E)
+        if ((parameters_.boostType == 1 || parameters_.boostType == 3)
+            && totalEnergyForP < potentialStatistics_.threshold)
         {
-            boostP = 0.5 * g_statP.k * (g_statP.E - totalEnergyForP) * (g_statP.E - totalEnergyForP);
-            scaleP = 1.0 - g_statP.k * (g_statP.E - totalEnergyForP);
+            boostP = 0.5 * potentialStatistics_.forceConstant
+                     * (potentialStatistics_.threshold - totalEnergyForP)
+                     * (potentialStatistics_.threshold - totalEnergyForP);
+            scaleP = 1.0 - potentialStatistics_.forceConstant * (potentialStatistics_.threshold - totalEnergyForP);
         }
 
         if (!std::isfinite(boostP) || !std::isfinite(boostD))
         {
             gmx_fatal(FARGS, "Non-finite GaMD boost energy at step %ld: boostP=%g boostD=%g.", step, boostP, boostD);
         }
-        g_gamd_scale_P = validateAndClampGaMDScale(
-                "total-potential", scaleP, totalEnergyForP, g_statP, step, nodeid, &g_gamd_warnedScalePFloor);
-        g_gamd_scale_D_current = validateAndClampGaMDScale(
-                "dihedral", scaleD, dihedralEnergy, g_statD, step, nodeid, &g_gamd_warnedScaleDFloor);
-        g_gamd_dih_ratio      = g_gamd_scale_D_current;
-        g_gamd_boostP_current = boostP;
-        g_gamd_boostD_current = boostD;
+        stepResult_.scaleP = validateAndClampScale(
+                "total-potential", scaleP, totalEnergyForP, potentialStatistics_, step, nodeid, &warnedPotentialScaleFloor_);
+        stepResult_.scaleD = validateAndClampScale(
+                "dihedral", scaleD, dihedralEnergy, dihedralStatistics_, step, nodeid, &warnedDihedralScaleFloor_);
+        stepResult_.boostP = boostP;
+        stepResult_.boostD = boostD;
     }
 
     if (updateStat)
     {
-        const bool   updateAverageWindow = (step % g_params.ntave == 0);
+        const bool   updateAverageWindow = (step % parameters_.averagingWindow == 0);
         const double totalPotentialForStats =
-                (g_gamd_currentStage == 4 ? totalPotentialEnergy + g_gamd_boostP_current + g_gamd_boostD_current
-                                          : totalPotentialEnergy);
+                (stepPlan_.stage == 4 ? totalPotentialEnergy + stepResult_.boostP + stepResult_.boostD
+                                      : totalPotentialEnergy);
 
-        if (g_params.igamd == 1 || g_params.igamd == 3)
+        if (parameters_.boostType == 1 || parameters_.boostType == 3)
         {
-            update_stats_minmax(totalPotentialForStats, g_statP);
-            update_stats_window(totalPotentialForStats, g_windowStatP);
+            updateStatisticsMinMax(totalPotentialForStats, potentialStatistics_);
+            updateWindowStatistics(totalPotentialForStats, potentialWindowStatistics_);
             if (updateAverageWindow)
             {
-                finalize_window_stats(g_windowStatP, g_statP);
+                finalizeWindowStatistics(potentialWindowStatistics_, potentialStatistics_);
             }
         }
 
-        if (g_params.igamd == 2 || g_params.igamd == 3)
+        if (parameters_.boostType == 2 || parameters_.boostType == 3)
         {
-            update_stats_minmax(dihedralEnergy, g_statD);
-            update_stats_window(dihedralEnergy, g_windowStatD);
+            updateStatisticsMinMax(dihedralEnergy, dihedralStatistics_);
+            updateWindowStatistics(dihedralEnergy, dihedralWindowStatistics_);
             if (updateAverageWindow)
             {
-                finalize_window_stats(g_windowStatD, g_statD);
+                finalizeWindowStatistics(dihedralWindowStatistics_, dihedralStatistics_);
             }
         }
 
-        if (g_gamd_currentStage == 2 && step == g_params.ntcmd)
+        if (stepPlan_.stage == 2 && step == parameters_.conventionalEnd)
         {
-            if (g_params.igamd == 1 || g_params.igamd == 3)
+            if (parameters_.boostType == 1 || parameters_.boostType == 3)
             {
-                calc_E_k0(g_params.iEP, g_params.sigma0P, g_statP);
+                calculateThresholdAndForceConstant(
+                        parameters_.potentialMode, parameters_.potentialSigmaLimit, potentialStatistics_);
             }
-            if (g_params.igamd == 2 || g_params.igamd == 3)
+            if (parameters_.boostType == 2 || parameters_.boostType == 3)
             {
-                calc_E_k0(g_params.iED, g_params.sigma0D, g_statD);
+                calculateThresholdAndForceConstant(
+                        parameters_.dihedralMode, parameters_.dihedralSigmaLimit, dihedralStatistics_);
             }
         }
-        else if (g_gamd_currentStage == 4)
+        else if (stepPlan_.stage == 4)
         {
-            if (g_params.igamd == 1 || g_params.igamd == 3)
+            if (parameters_.boostType == 1 || parameters_.boostType == 3)
             {
-                calc_E_k0(g_params.iEP, g_params.sigma0P, g_statP);
+                calculateThresholdAndForceConstant(
+                        parameters_.potentialMode, parameters_.potentialSigmaLimit, potentialStatistics_);
             }
-            if (g_params.igamd == 2 || g_params.igamd == 3)
+            if (parameters_.boostType == 2 || parameters_.boostType == 3)
             {
-                calc_E_k0(g_params.iED, g_params.sigma0D, g_statD);
+                calculateThresholdAndForceConstant(
+                        parameters_.dihedralMode, parameters_.dihedralSigmaLimit, dihedralStatistics_);
             }
         }
     }
 
-    g_gamd_last_total_boost = g_gamd_boostP_current + g_gamd_boostD_current;
     wallcycle_stop(wcycle, WallCycleCounter::GaMDFinalize);
     wallcycle_start(wcycle, WallCycleCounter::GaMDOutput);
-    if (!gamdBufferedProductionOutputEnabled() || g_gamd_currentStage != 5)
+    if (!bufferedProductionOutputEnabled() || stepPlan_.stage != 5)
     {
-        writeGaMDParaLine(step, nodeid, true);
-        writeGaMDReweightLine(step, nodeid, true);
+        writeParameterLine(step, nodeid, true);
+        writeReweightLine(step, nodeid, true);
     }
     wallcycle_stop(wcycle, WallCycleCounter::GaMDOutput);
 }
 
-void gamdWriteBufferedProductionOutput(ArrayRef<const int64_t> deferredSteps,
-                                       ArrayRef<const std::array<real, F_NRE>> deferredEnergySamples,
-                                       long           currentStep,
-                                       int            nodeid,
-                                       gmx_wallcycle* wcycle)
+void GaMDRuntime::writeBufferedProductionOutput(ArrayRef<const int64_t> deferredSteps,
+                                                ArrayRef<const std::array<real, F_NRE>> deferredEnergySamples,
+                                                int64_t        currentStep,
+                                                int            nodeid,
+                                                gmx_wallcycle* wcycle)
 {
-    if (!gamdBufferedProductionOutputEnabled())
+    if (!bufferedProductionOutputEnabled())
     {
         return;
     }
     GMX_RELEASE_ASSERT(deferredSteps.size() == deferredEnergySamples.size(),
                        "Buffered GaMD output steps and energy samples must match");
-    if (g_gamd_currentStage != 5)
+    if (stepPlan_.stage != 5)
     {
         GMX_RELEASE_ASSERT(deferredSteps.empty(),
                            "Buffered GaMD output may defer samples only in production stage 5");
@@ -1949,55 +1733,51 @@ void gamdWriteBufferedProductionOutput(ArrayRef<const int64_t> deferredSteps,
         record.potentialEnergy = potentialEnergy;
         record.dihedralEnergy  = dihedralEnergy;
         double totalEnergyForP = potentialEnergy;
-        if ((g_params.igamd == 2 || g_params.igamd == 3) && dihedralEnergy < g_statD.E)
+        if ((parameters_.boostType == 2 || parameters_.boostType == 3)
+            && dihedralEnergy < dihedralStatistics_.threshold)
         {
-            const double deltaD = g_statD.E - dihedralEnergy;
-            record.boostD       = 0.5 * g_statD.k * deltaD * deltaD;
-            record.scaleD       = 1.0 - g_statD.k * deltaD;
+            const double deltaD = dihedralStatistics_.threshold - dihedralEnergy;
+            record.boostD       = 0.5 * dihedralStatistics_.forceConstant * deltaD * deltaD;
+            record.scaleD       = 1.0 - dihedralStatistics_.forceConstant * deltaD;
         }
-        if (g_params.igamd == 3)
+        if (parameters_.boostType == 3)
         {
             totalEnergyForP += record.boostD;
         }
-        if ((g_params.igamd == 1 || g_params.igamd == 3) && totalEnergyForP < g_statP.E)
+        if ((parameters_.boostType == 1 || parameters_.boostType == 3)
+            && totalEnergyForP < potentialStatistics_.threshold)
         {
-            const double deltaP = g_statP.E - totalEnergyForP;
-            record.boostP       = 0.5 * g_statP.k * deltaP * deltaP;
-            record.scaleP       = 1.0 - g_statP.k * deltaP;
+            const double deltaP = potentialStatistics_.threshold - totalEnergyForP;
+            record.boostP       = 0.5 * potentialStatistics_.forceConstant * deltaP * deltaP;
+            record.scaleP       = 1.0 - potentialStatistics_.forceConstant * deltaP;
         }
-        record.scaleP = validateAndClampGaMDScale("total-potential",
-                                                  record.scaleP,
-                                                  totalEnergyForP,
-                                                  g_statP,
-                                                  deferredSteps[sampleIndex],
-                                                  nodeid,
-                                                  &g_gamd_warnedScalePFloor);
-        record.scaleD = validateAndClampGaMDScale(
-                "dihedral", record.scaleD, dihedralEnergy, g_statD, deferredSteps[sampleIndex], nodeid, &g_gamd_warnedScaleDFloor);
+        record.scaleP = validateAndClampScale("total-potential",
+                                              record.scaleP,
+                                              totalEnergyForP,
+                                              potentialStatistics_,
+                                              deferredSteps[sampleIndex],
+                                              nodeid,
+                                              &warnedPotentialScaleFloor_);
+        record.scaleD = validateAndClampScale("dihedral",
+                                              record.scaleD,
+                                              dihedralEnergy,
+                                              dihedralStatistics_,
+                                              deferredSteps[sampleIndex],
+                                              nodeid,
+                                              &warnedDihedralScaleFloor_);
 
-        writeGaMDParaLine(deferredSteps[sampleIndex], nodeid, false);
-        writeGaMDReweightRecord(deferredSteps[sampleIndex], nodeid, record, false);
+        writeParameterLine(deferredSteps[sampleIndex], nodeid, false);
+        writeReweightRecord(deferredSteps[sampleIndex], nodeid, record, false);
     }
 
-    writeGaMDParaLine(currentStep, nodeid, false);
-    writeGaMDReweightLine(currentStep, nodeid, false);
-    if ((g_gamd_para_fp != nullptr && std::fflush(g_gamd_para_fp) != 0)
-        || (g_gamd_reweight_fp != nullptr && std::fflush(g_gamd_reweight_fp) != 0))
+    writeParameterLine(currentStep, nodeid, false);
+    writeReweightLine(currentStep, nodeid, false);
+    if ((parameterFile_ != nullptr && std::fflush(parameterFile_) != 0)
+        || (reweightFile_ != nullptr && std::fflush(reweightFile_) != 0))
     {
         gmx_fatal(FARGS, "Failed to flush buffered GaMD output at step %ld.", currentStep);
     }
     wallcycle_stop(wcycle, WallCycleCounter::GaMDOutput);
-}
-
-void GaMDForceProvider::calculateForces(const ForceProviderInput& fpin, ForceProviderOutput* fpout)
-{
-    (void)fpout;
-
-    const int  nodeid = fpin.cr_.nodeid;
-    const long step   = fpin.step_;
-
-
-    gamdPrepareStep(step, nodeid);
 }
 
 } // namespace gmx

@@ -240,6 +240,10 @@ struct t_fcdata
     // TODO: Convert to C++ and unique_ptr (currently this data is not freed)
     t_disresdata*                 disres = nullptr;
     std::unique_ptr<t_oriresdata> orires;
+
+    // GaMD listed-force bridge. The regular force evaluation is raw (1.0);
+    // dedicated GaMD diagnostics can select another scale without global state.
+    double gaMDDihedralForceScale = 1.0;
 };
 
 #endif

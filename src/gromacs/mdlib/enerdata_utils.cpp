@@ -34,7 +34,7 @@
 #include "gmxpre.h"
 
 #include "enerdata_utils.h"
-#include "gromacs/applied_forces/gamd/gamdforceprovider.h"
+
 #include <cmath>
 #include <cstdio>
 
@@ -43,6 +43,7 @@
 #include <utility>
 #include <vector>
 
+#include "gromacs/applied_forces/gamd/gamdmdmodule.h"
 #include "gromacs/gmxlib/network.h"
 #include "gromacs/mdtypes/commrec.h"
 #include "gromacs/mdtypes/enerdata.h"
@@ -53,7 +54,6 @@
 #include "gromacs/utility/enumerationhelpers.h"
 #include "gromacs/utility/fatalerror.h"
 #include "gromacs/utility/gmxassert.h"
-extern double g_gamd_last_total_boost;
 ForeignLambdaTerms::ForeignLambdaTerms(
         const gmx::EnumerationArray<FreeEnergyPerturbationCouplingType, std::vector<double>>* allLambdas) :
     numLambdas_(allLambdas ? gmx::ssize((*allLambdas)[FreeEnergyPerturbationCouplingType::Fep]) : 0),
@@ -300,7 +300,10 @@ void ForeignLambdaTerms::finalizePotentialContributions(
     finalizedPotentialContributions_ = true;
 }
 
-void accumulatePotentialEnergies(gmx_enerdata_t* enerd, gmx::ArrayRef<const real> lambda, const t_lambda* fepvals)
+void accumulatePotentialEnergies(gmx_enerdata_t*           enerd,
+                                 gmx::ArrayRef<const real> lambda,
+                                 const t_lambda*           fepvals,
+                                 double                    gaMDBoostEnergy)
 {
     sum_epot(enerd->grpp, enerd->term.data());
 
@@ -309,7 +312,7 @@ void accumulatePotentialEnergies(gmx_enerdata_t* enerd, gmx::ArrayRef<const real
      * any previous value written by a force provider. Add the GaMD boost back here
      * so that log/edr Potential contains the boosted total potential energy.
      */
-    enerd->term[F_EPOT] += g_gamd_last_total_boost;
+    enerd->term[F_EPOT] += gaMDBoostEnergy;
 
     if (fepvals)
     {
@@ -410,11 +413,14 @@ void reset_dvdl_enerdata(gmx_enerdata_t* enerd)
     }
 }
 
-void reset_enerdata(gmx_enerdata_t* enerd, int64_t step)
+void reset_enerdata(gmx_enerdata_t* enerd, int64_t step, gmx::GaMDMDModule* gaMDModule)
 {
     int i, j;
 
-    gmx::gamdWriteRestartState(static_cast<long>(step));
+    if (gaMDModule != nullptr)
+    {
+        gaMDModule->writeRestartState(step);
+    }
 
     /* First reset all energy components. */
     for (i = 0; (i < static_cast<int>(NonBondedEnergyTerms::Count)); i++)

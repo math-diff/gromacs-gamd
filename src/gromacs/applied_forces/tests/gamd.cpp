@@ -50,7 +50,8 @@
 
 #include <gtest/gtest.h>
 
-#include "gromacs/applied_forces/gamd/gamdforceprovider.h"
+#include "gromacs/applied_forces/gamd/gamdexecution.h"
+#include "gromacs/applied_forces/gamd/gamdmdmodule.h"
 
 #include "testutils/setenv.h"
 #include "testutils/testasserts.h"
@@ -87,17 +88,8 @@ private:
 
 GaMDExecutionMode selectSupportedGaMDExecutionMode()
 {
-    return selectGaMDExecutionMode(true,
-                                   true,
-                                   true,
-                                   true,
-                                   true,
-                                   false,
-                                   false,
-                                   false,
-                                   PressureCoupling::No,
-                                   PressureCouplingType::Isotropic,
-                                   0);
+    return selectGaMDExecutionMode(
+            true, true, true, true, true, false, false, false, PressureCoupling::No, PressureCouplingType::Isotropic, 0);
 }
 
 std::vector<std::vector<double>> readNumericRows(const std::filesystem::path& path)
@@ -146,14 +138,20 @@ size_t countNumericRows(const std::filesystem::path& path)
     return readNumericRows(path).size();
 }
 
-TEST(GaMDTest, Stage4PotentialStatisticsUseBoostedTotalPotential)
+class GaMDTest : public ::testing::Test
+{
+protected:
+    GaMDMDModule gaMDModule_;
+};
+
+TEST_F(GaMDTest, Stage4PotentialStatisticsUseBoostedTotalPotential)
 {
     TestFileManager fileManager;
     const auto      workDir =
             fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
-    gamdResetStateForTesting();
+    gaMDModule_.resetStateForTesting();
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP");
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALED");
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_BOOSTP");
@@ -174,7 +172,7 @@ TEST(GaMDTest, Stage4PotentialStatisticsUseBoostedTotalPotential)
         output << "sigma0P 6.0\n";
     }
 
-    gamdSetCheckpointingThisStep(false);
+    gaMDModule_.setCheckpointingThisStep(false);
 
     constexpr double c_step1Potential = 0.0;
     constexpr double c_step2Potential = 10.0;
@@ -182,17 +180,17 @@ TEST(GaMDTest, Stage4PotentialStatisticsUseBoostedTotalPotential)
     constexpr double c_step4Potential = 0.0;
     constexpr double c_dihedralEnergy = 0.0;
 
-    gamdPrepareStep(1, 0);
-    gamdFinalizeCurrentStep(1, 0, c_step1Potential, c_dihedralEnergy);
+    gaMDModule_.prepareStep(1, 0);
+    gaMDModule_.finalizeCurrentStep(1, 0, c_step1Potential, c_dihedralEnergy);
 
-    gamdPrepareStep(2, 0);
-    gamdFinalizeCurrentStep(2, 0, c_step2Potential, c_dihedralEnergy);
+    gaMDModule_.prepareStep(2, 0);
+    gaMDModule_.finalizeCurrentStep(2, 0, c_step2Potential, c_dihedralEnergy);
 
-    gamdPrepareStep(3, 0);
-    gamdFinalizeCurrentStep(3, 0, c_step3Potential, c_dihedralEnergy);
+    gaMDModule_.prepareStep(3, 0);
+    gaMDModule_.finalizeCurrentStep(3, 0, c_step3Potential, c_dihedralEnergy);
 
-    gamdPrepareStep(4, 0);
-    gamdFinalizeCurrentStep(4, 0, c_step4Potential, c_dihedralEnergy);
+    gaMDModule_.prepareStep(4, 0);
+    gaMDModule_.finalizeCurrentStep(4, 0, c_step4Potential, c_dihedralEnergy);
 
     const auto columns = readLastNumericColumns("gamd-para.dat");
     ASSERT_GE(columns.size(), 10U);
@@ -204,14 +202,14 @@ TEST(GaMDTest, Stage4PotentialStatisticsUseBoostedTotalPotential)
     EXPECT_REAL_EQ_TOL(columns[5], 5.0, absoluteTolerance(1e-12));
 }
 
-TEST(GaMDTest, CheckpointReplayDoesNotDuplicateTextOutputForSavedStep)
+TEST_F(GaMDTest, CheckpointReplayDoesNotDuplicateTextOutputForSavedStep)
 {
     TestFileManager fileManager;
     const auto      workDir =
             fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
-    gamdResetStateForTesting();
+    gaMDModule_.resetStateForTesting();
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP");
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALED");
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_BOOSTP");
@@ -234,19 +232,19 @@ TEST(GaMDTest, CheckpointReplayDoesNotDuplicateTextOutputForSavedStep)
 
     constexpr double c_dihedralEnergy = 0.0;
 
-    gamdSetCheckpointingThisStep(false);
-    gamdPrepareStep(1, 0);
-    gamdFinalizeCurrentStep(1, 0, 0.0, c_dihedralEnergy);
-    gamdPrepareStep(2, 0);
-    gamdFinalizeCurrentStep(2, 0, 10.0, c_dihedralEnergy);
-    gamdPrepareStep(3, 0);
-    gamdFinalizeCurrentStep(3, 0, 0.0, c_dihedralEnergy);
+    gaMDModule_.setCheckpointingThisStep(false);
+    gaMDModule_.prepareStep(1, 0);
+    gaMDModule_.finalizeCurrentStep(1, 0, 0.0, c_dihedralEnergy);
+    gaMDModule_.prepareStep(2, 0);
+    gaMDModule_.finalizeCurrentStep(2, 0, 10.0, c_dihedralEnergy);
+    gaMDModule_.prepareStep(3, 0);
+    gaMDModule_.finalizeCurrentStep(3, 0, 0.0, c_dihedralEnergy);
 
-    gamdPrepareStep(4, 0);
-    gamdSetCheckpointingThisStep(true);
-    gamdWriteRestartState(4);
-    gamdFinalizeCurrentStep(4, 0, 0.0, c_dihedralEnergy);
-    gamdSetCheckpointingThisStep(false);
+    gaMDModule_.prepareStep(4, 0);
+    gaMDModule_.setCheckpointingThisStep(true);
+    gaMDModule_.writeRestartState(4);
+    gaMDModule_.finalizeCurrentStep(4, 0, 0.0, c_dihedralEnergy);
+    gaMDModule_.setCheckpointingThisStep(false);
 
     const size_t paraRowsAfterCheckpoint     = countNumericRows("gamd-para.dat");
     const size_t reweightRowsAfterCheckpoint = countNumericRows("gamd-reweight.dat");
@@ -263,17 +261,17 @@ TEST(GaMDTest, CheckpointReplayDoesNotDuplicateTextOutputForSavedStep)
 
     // Simulate an abrupt stop after text output advanced beyond the last
     // committed checkpoint, including a torn final record.
-    gamdPrepareStep(5, 0);
-    gamdFinalizeCurrentStep(5, 0, 0.0, c_dihedralEnergy);
-    gamdPrepareStep(6, 0);
-    gamdFinalizeCurrentStep(6, 0, 0.0, c_dihedralEnergy);
+    gaMDModule_.prepareStep(5, 0);
+    gaMDModule_.finalizeCurrentStep(5, 0, 0.0, c_dihedralEnergy);
+    gaMDModule_.prepareStep(6, 0);
+    gaMDModule_.finalizeCurrentStep(6, 0, 0.0, c_dihedralEnergy);
 
     // Simulate interruption after GaMD committed a newer restart but before
     // GROMACS replaced the older .cpt. The rotated previous restart must keep
     // the older checkpoint recoverable.
-    gamdSetCheckpointingThisStep(true);
-    gamdWriteRestartState(6);
-    gamdSetCheckpointingThisStep(false);
+    gaMDModule_.setCheckpointingThisStep(true);
+    gaMDModule_.writeRestartState(6);
+    gaMDModule_.setCheckpointingThisStep(false);
     ASSERT_TRUE(std::filesystem::exists("gamd-restart-prev.dat"));
     {
         std::ofstream paraOutput("gamd-para.dat", std::ios::app);
@@ -284,15 +282,15 @@ TEST(GaMDTest, CheckpointReplayDoesNotDuplicateTextOutputForSavedStep)
     EXPECT_GT(countNumericRows("gamd-para.dat"), paraRowsAfterCheckpoint);
     EXPECT_GT(countNumericRows("gamd-reweight.dat"), reweightRowsAfterCheckpoint);
 
-    gamdResetStateForTesting();
-    gamdPrepareStep(4, 0);
-    gamdFinalizeCurrentStep(4, 0, 0.0, c_dihedralEnergy);
+    gaMDModule_.resetStateForTesting();
+    gaMDModule_.prepareStep(4, 0);
+    gaMDModule_.finalizeCurrentStep(4, 0, 0.0, c_dihedralEnergy);
 
     EXPECT_EQ(countNumericRows("gamd-para.dat"), paraRowsAfterCheckpoint);
     EXPECT_EQ(countNumericRows("gamd-reweight.dat"), reweightRowsAfterCheckpoint);
 
-    gamdPrepareStep(5, 0);
-    gamdFinalizeCurrentStep(5, 0, 0.0, c_dihedralEnergy);
+    gaMDModule_.prepareStep(5, 0);
+    gaMDModule_.finalizeCurrentStep(5, 0, 0.0, c_dihedralEnergy);
 
     EXPECT_EQ(countNumericRows("gamd-para.dat"), paraRowsAfterCheckpoint + 1);
     EXPECT_EQ(countNumericRows("gamd-reweight.dat"), reweightRowsAfterCheckpoint + 1);
@@ -306,24 +304,46 @@ TEST(GaMDTest, CheckpointReplayDoesNotDuplicateTextOutputForSavedStep)
     EXPECT_EQ(reweightColumns[1], 5.0);
 }
 
-TEST(GaMDTest, CurrentStepGpuCompatibilityAllowsGpuBondedAndGpuUpdate)
-{
-    gamdResetStateForTesting();
-
-    EXPECT_EQ(nullptr, gmx::currentStepGaMDGpuIncompatibilityReason(false, false));
-    EXPECT_EQ(nullptr, gmx::currentStepGaMDGpuIncompatibilityReason(false, true));
-    EXPECT_EQ(nullptr, gmx::currentStepGaMDGpuIncompatibilityReason(true, false));
-    EXPECT_EQ(nullptr, gmx::currentStepGaMDGpuIncompatibilityReason(true, true));
-}
-
-TEST(GaMDTest, ResidentProductionEnergyStagesOnlyForHostConsumers)
+TEST_F(GaMDTest, IndependentModuleInstancesDoNotShareStepResults)
 {
     TestFileManager fileManager;
-    const auto                          workDir =
+    const auto      workDir =
             fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
-    gamdResetStateForTesting();
+    {
+        std::ofstream output("gamd.in");
+        output << "igamd 1\n";
+        output << "iE 1\n";
+        output << "iEP 1\n";
+        output << "ntcmdprep 0\n";
+        output << "ntcmd 2\n";
+        output << "ntebprep 0\n";
+        output << "nteb 2\n";
+        output << "ntave 2\n";
+        output << "para_nst 0\n";
+        output << "reweight_nst 1\n";
+        output << "sigma0P 6.0\n";
+    }
+
+    GaMDMDModule secondModule;
+    gaMDModule_.prepareStep(1, 0);
+    gaMDModule_.finalizeCurrentStep(1, 0, 12.0, 3.0);
+    secondModule.prepareStep(1, 0);
+
+    EXPECT_DOUBLE_EQ(12.0, gaMDModule_.stepResult().potentialEnergy);
+    EXPECT_DOUBLE_EQ(0.0, secondModule.stepResult().potentialEnergy);
+    EXPECT_DOUBLE_EQ(1.0, secondModule.stepResult().scaleP);
+}
+
+TEST_F(GaMDTest, ResidentProductionEnergyStagesOnlyForHostConsumers)
+{
+    TestFileManager fileManager;
+    const auto      workDir =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    ScopedWorkingDirectory scopedWorkingDirectory(workDir);
+
+    gaMDModule_.resetStateForTesting();
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP");
     {
         std::ofstream output("gamd.in");
@@ -340,30 +360,30 @@ TEST(GaMDTest, ResidentProductionEnergyStagesOnlyForHostConsumers)
         output << "sigma0P 6.0\n";
     }
 
-    gamdSetCheckpointingThisStep(false);
-    gamdPrepareStep(2, 0);
-    EXPECT_TRUE(gamdRequiresHostEnergyThisStep(2));
+    gaMDModule_.setCheckpointingThisStep(false);
+    gaMDModule_.prepareStep(2, 0);
+    EXPECT_TRUE(gaMDModule_.requiresHostEnergyThisStep(2));
 
-    gamdPrepareStep(49, 0);
-    EXPECT_FALSE(gamdRequiresHostEnergyThisStep(49));
+    gaMDModule_.prepareStep(49, 0);
+    EXPECT_FALSE(gaMDModule_.requiresHostEnergyThisStep(49));
 
-    gamdPrepareStep(50, 0);
-    EXPECT_TRUE(gamdRequiresHostEnergyThisStep(50));
+    gaMDModule_.prepareStep(50, 0);
+    EXPECT_TRUE(gaMDModule_.requiresHostEnergyThisStep(50));
 
-    gamdPrepareStep(51, 0);
-    gamdSetCheckpointingThisStep(true);
-    EXPECT_TRUE(gamdRequiresHostEnergyThisStep(51));
-    gamdSetCheckpointingThisStep(false);
+    gaMDModule_.prepareStep(51, 0);
+    gaMDModule_.setCheckpointingThisStep(true);
+    EXPECT_TRUE(gaMDModule_.requiresHostEnergyThisStep(51));
+    gaMDModule_.setCheckpointingThisStep(false);
 }
 
-TEST(GaMDTest, BufferedProductionOutputDefersTextCadenceButNotCheckpointing)
+TEST_F(GaMDTest, BufferedProductionOutputDefersTextCadenceButNotCheckpointing)
 {
     TestFileManager fileManager;
-    const auto                          workDir =
+    const auto      workDir =
             fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
-    gamdResetStateForTesting();
+    gaMDModule_.resetStateForTesting();
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP");
     {
         std::ofstream output("gamd.in");
@@ -380,24 +400,25 @@ TEST(GaMDTest, BufferedProductionOutputDefersTextCadenceButNotCheckpointing)
         output << "sigma0P 6.0\n";
     }
 
-    gamdSetCheckpointingThisStep(false);
-    gamdSetBufferedProductionOutputEnabled(true);
-    gamdPrepareStep(50, 0);
-    EXPECT_TRUE(gamdBufferedProductionOutputEnabled());
-    EXPECT_FALSE(gamdRequiresHostEnergyThisStep(50));
+    gaMDModule_.setCheckpointingThisStep(false);
+    gaMDModule_.setBufferedProductionOutputEnabled(true);
+    gaMDModule_.prepareStep(50, 0);
+    EXPECT_TRUE(gaMDModule_.bufferedProductionOutputEnabled());
+    EXPECT_FALSE(gaMDModule_.requiresHostEnergyThisStep(50));
 
-    gamdSetCheckpointingThisStep(true);
-    EXPECT_TRUE(gamdRequiresHostEnergyThisStep(51));
-    gamdSetCheckpointingThisStep(false);
-    gamdSetBufferedProductionOutputEnabled(false);
+    gaMDModule_.setCheckpointingThisStep(true);
+    gaMDModule_.prepareStep(51, 0);
+    EXPECT_TRUE(gaMDModule_.requiresHostEnergyThisStep(51));
+    gaMDModule_.setCheckpointingThisStep(false);
+    gaMDModule_.setBufferedProductionOutputEnabled(false);
 }
 
-TEST(GaMDTest, GaMDGpuExecutionModeSelectsResidentPathAutomatically)
+TEST_F(GaMDTest, GaMDGpuExecutionModeSelectsResidentPathAutomatically)
 {
     EXPECT_EQ(GaMDExecutionMode::GpuResident, selectSupportedGaMDExecutionMode());
 }
 
-TEST(GaMDTest, GaMDCpuUpdateSelectsCpuReference)
+TEST_F(GaMDTest, GaMDCpuUpdateSelectsCpuReference)
 {
     EXPECT_EQ(GaMDExecutionMode::CpuReference,
               selectGaMDExecutionMode(true,
@@ -413,7 +434,7 @@ TEST(GaMDTest, GaMDCpuUpdateSelectsCpuReference)
                                       1));
 }
 
-TEST(GaMDTest, NonGaMDGpuUpdateRetainsNormalExecutionMode)
+TEST_F(GaMDTest, NonGaMDGpuUpdateRetainsNormalExecutionMode)
 {
     EXPECT_EQ(GaMDExecutionMode::CpuReference,
               selectGaMDExecutionMode(false,
@@ -430,75 +451,80 @@ TEST(GaMDTest, NonGaMDGpuUpdateRetainsNormalExecutionMode)
 }
 
 #if GMX_GPU_CUDA
-TEST(GaMDTest, GaMDGpuExecutionModeSelectsResidentCudaPath)
+TEST_F(GaMDTest, GaMDGpuExecutionModeSelectsResidentCudaPath)
 {
     EXPECT_EQ(GaMDExecutionMode::GpuResident, selectSupportedGaMDExecutionMode());
     EXPECT_STREQ("GPU resident", gaMDExecutionModeName(GaMDExecutionMode::GpuResident));
 }
 
-TEST(GaMDTest, GaMDGpuExecutionModeRejectsUnsupportedWorkloads)
+TEST_F(GaMDTest, GaMDGpuExecutionModeRejectsUnsupportedWorkloads)
 {
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(true, false, true, true, true, false, false, false,
-                                    PressureCoupling::No, PressureCouplingType::Isotropic, 0),
+            selectGaMDExecutionMode(
+                    true, false, true, true, true, false, false, false, PressureCoupling::No, PressureCouplingType::Isotropic, 0),
             "requires -nb gpu");
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(true, true, false, true, true, false, false, false,
-                                    PressureCoupling::No, PressureCouplingType::Isotropic, 0),
+            selectGaMDExecutionMode(
+                    true, true, false, true, true, false, false, false, PressureCoupling::No, PressureCouplingType::Isotropic, 0),
             "requires -pme gpu");
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(true, true, true, false, true, false, false, false,
-                                    PressureCoupling::No, PressureCouplingType::Isotropic, 0),
+            selectGaMDExecutionMode(
+                    true, true, true, false, true, false, false, false, PressureCoupling::No, PressureCouplingType::Isotropic, 0),
             "requires -bonded gpu");
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(true, true, true, true, true, true, false, false,
-                                    PressureCoupling::No, PressureCouplingType::Isotropic, 0),
+            selectGaMDExecutionMode(
+                    true, true, true, true, true, true, false, false, PressureCoupling::No, PressureCouplingType::Isotropic, 0),
             "without domain decomposition");
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(true, true, true, true, true, false, false, true,
-                                    PressureCoupling::No, PressureCouplingType::Isotropic, 0),
+            selectGaMDExecutionMode(
+                    true, true, true, true, true, false, false, true, PressureCoupling::No, PressureCouplingType::Isotropic, 0),
             "does not support MTS");
+    GMX_EXPECT_DEATH_IF_SUPPORTED(selectGaMDExecutionMode(true,
+                                                          true,
+                                                          true,
+                                                          true,
+                                                          true,
+                                                          false,
+                                                          false,
+                                                          false,
+                                                          PressureCoupling::ParrinelloRahman,
+                                                          PressureCouplingType::Isotropic,
+                                                          0),
+                                  "supports only no pressure coupling or C-rescale");
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(true, true, true, true, true, false, false, false,
-                                    PressureCoupling::ParrinelloRahman,
-                                    PressureCouplingType::Isotropic, 0),
-            "supports only no pressure coupling or C-rescale");
-    GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(true, true, true, true, true, false, false, false,
-                                    PressureCoupling::CRescale,
-                                    PressureCouplingType::Anisotropic, 0),
+            selectGaMDExecutionMode(
+                    true, true, true, true, true, false, false, false, PressureCoupling::CRescale, PressureCouplingType::Anisotropic, 0),
             "supports only isotropic or semiisotropic");
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            selectGaMDExecutionMode(true, true, true, true, true, false, false, false,
-                                    PressureCoupling::No, PressureCouplingType::Isotropic, 10),
+            selectGaMDExecutionMode(
+                    true, true, true, true, true, false, false, false, PressureCoupling::No, PressureCouplingType::Isotropic, 10),
             "requires nstfout=0");
 }
 
-TEST(GaMDTest, GaMDGpuExecutionModeAcceptsSupportedCRescaleTypes)
+TEST_F(GaMDTest, GaMDGpuExecutionModeAcceptsSupportedCRescaleTypes)
 {
-    for (const auto type : { PressureCouplingType::Isotropic,
-                             PressureCouplingType::SemiIsotropic })
+    for (const auto type : { PressureCouplingType::Isotropic, PressureCouplingType::SemiIsotropic })
     {
         EXPECT_EQ(GaMDExecutionMode::GpuResident,
-                  selectGaMDExecutionMode(true, true, true, true, true, false, false, false,
-                                          PressureCoupling::CRescale, type, 0));
+                  selectGaMDExecutionMode(
+                          true, true, true, true, true, false, false, false, PressureCoupling::CRescale, type, 0));
     }
 }
 #else
-TEST(GaMDTest, GaMDGpuExecutionModeRejectsNonCudaBuild)
+TEST_F(GaMDTest, GaMDGpuExecutionModeRejectsNonCudaBuild)
 {
     GMX_EXPECT_DEATH_IF_SUPPORTED(selectSupportedGaMDExecutionMode(), "requires a CUDA build");
 }
 #endif
 
-TEST(GaMDTest, IrestProductionCheckpointCanContinueWithoutDuplicateRows)
+TEST_F(GaMDTest, IrestProductionCheckpointCanContinueWithoutDuplicateRows)
 {
     TestFileManager fileManager;
     const auto      workDir =
             fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
-    gamdResetStateForTesting();
+    gaMDModule_.resetStateForTesting();
     {
         std::ofstream output("gamd.in");
         output << "igamd 1\n";
@@ -516,14 +542,14 @@ TEST(GaMDTest, IrestProductionCheckpointCanContinueWithoutDuplicateRows)
 
     for (long step = 1; step <= 4; step++)
     {
-        gamdPrepareStep(step, 0);
-        gamdFinalizeCurrentStep(step, 0, (step == 2 ? 10.0 : 0.0), 0.0);
+        gaMDModule_.prepareStep(step, 0);
+        gaMDModule_.finalizeCurrentStep(step, 0, (step == 2 ? 10.0 : 0.0), 0.0);
     }
-    gamdSetCheckpointingThisStep(true);
-    gamdWriteRestartState(4);
-    gamdSetCheckpointingThisStep(false);
+    gaMDModule_.setCheckpointingThisStep(true);
+    gaMDModule_.writeRestartState(4);
+    gaMDModule_.setCheckpointingThisStep(false);
 
-    gamdResetStateForTesting();
+    gaMDModule_.resetStateForTesting();
     std::filesystem::remove("gamd-para.dat");
     std::filesystem::remove("gamd-reweight.dat");
     {
@@ -537,35 +563,35 @@ TEST(GaMDTest, IrestProductionCheckpointCanContinueWithoutDuplicateRows)
         output << "sigma0P 6.0\n";
     }
 
-    gamdPrepareStep(0, 0);
-    gamdFinalizeCurrentStep(0, 0, 0.0, 0.0);
-    gamdPrepareStep(1, 0);
-    gamdSetCheckpointingThisStep(true);
-    gamdWriteRestartState(1);
-    gamdFinalizeCurrentStep(1, 0, 0.0, 0.0);
-    gamdSetCheckpointingThisStep(false);
+    gaMDModule_.prepareStep(0, 0);
+    gaMDModule_.finalizeCurrentStep(0, 0, 0.0, 0.0);
+    gaMDModule_.prepareStep(1, 0);
+    gaMDModule_.setCheckpointingThisStep(true);
+    gaMDModule_.writeRestartState(1);
+    gaMDModule_.finalizeCurrentStep(1, 0, 0.0, 0.0);
+    gaMDModule_.setCheckpointingThisStep(false);
 
     const size_t paraRowsAtCheckpoint     = countNumericRows("gamd-para.dat");
     const size_t reweightRowsAtCheckpoint = countNumericRows("gamd-reweight.dat");
     ASSERT_EQ(paraRowsAtCheckpoint, 1U);
     ASSERT_EQ(reweightRowsAtCheckpoint, 1U);
 
-    gamdResetStateForTesting();
-    gamdPrepareStep(1, 0);
-    gamdFinalizeCurrentStep(1, 0, 0.0, 0.0);
+    gaMDModule_.resetStateForTesting();
+    gaMDModule_.prepareStep(1, 0);
+    gaMDModule_.finalizeCurrentStep(1, 0, 0.0, 0.0);
 
     EXPECT_EQ(countNumericRows("gamd-para.dat"), paraRowsAtCheckpoint);
     EXPECT_EQ(countNumericRows("gamd-reweight.dat"), reweightRowsAtCheckpoint);
 }
 
-TEST(GaMDTest, StrictInputRejectsUnknownParameter)
+TEST_F(GaMDTest, StrictInputRejectsUnknownParameter)
 {
     TestFileManager fileManager;
     const auto      workDir =
             fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
-    gamdResetStateForTesting();
+    gaMDModule_.resetStateForTesting();
     {
         std::ofstream output("gamd.in");
         output << "igamd 1\n";
@@ -581,34 +607,34 @@ TEST(GaMDTest, StrictInputRejectsUnknownParameter)
         output << "misspelled_parameter 7\n";
     }
 
-    GMX_EXPECT_DEATH_IF_SUPPORTED(gamdPrepareStep(0, 0), "Unknown GaMD parameter");
+    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0), "Unknown GaMD parameter");
 }
 
-TEST(GaMDTest, StrictInputRejectsDuplicateParameter)
+TEST_F(GaMDTest, StrictInputRejectsDuplicateParameter)
 {
     TestFileManager fileManager;
     const auto      workDir =
             fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
-    gamdResetStateForTesting();
+    gaMDModule_.resetStateForTesting();
     {
         std::ofstream output("gamd.in");
         output << "igamd 1\n";
         output << "igamd 3\n";
     }
 
-    GMX_EXPECT_DEATH_IF_SUPPORTED(gamdPrepareStep(0, 0), "Duplicate GaMD parameter");
+    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0), "Duplicate GaMD parameter");
 }
 
-TEST(GaMDTest, StrictInputRejectsInvalidRange)
+TEST_F(GaMDTest, StrictInputRejectsInvalidRange)
 {
     TestFileManager fileManager;
     const auto      workDir =
             fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
-    gamdResetStateForTesting();
+    gaMDModule_.resetStateForTesting();
     {
         std::ofstream output("gamd.in");
         output << "igamd 1\n";
@@ -623,7 +649,7 @@ TEST(GaMDTest, StrictInputRejectsInvalidRange)
         output << "sigma0P 6.0\n";
     }
 
-    GMX_EXPECT_DEATH_IF_SUPPORTED(gamdPrepareStep(0, 0), "reweight_nst must be positive");
+    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0), "reweight_nst must be positive");
 }
 
 } // namespace

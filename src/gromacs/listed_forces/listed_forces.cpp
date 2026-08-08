@@ -762,6 +762,11 @@ void calculateGaMDDihedralListedForces(const InteractionDefinitions&            
 {
     const rvec* x = as_rvec_array(coordinates.paddedArrayRef().data());
 
+    GMX_RELEASE_ASSERT(fcdata != nullptr,
+                       "GaMD dihedral force calculation requires force calculation data");
+    const double savedDihedralForceScale = fcdata->gaMDDihedralForceScale;
+    fcdata->gaMDDihedralForceScale       = 1.0;
+
     std::fill(forces.begin(), forces.end(), gmx::RVec(0.0_real, 0.0_real, 0.0_real));
     std::fill(shiftForces.begin(), shiftForces.end(), gmx::RVec(0.0_real, 0.0_real, 0.0_real));
 
@@ -769,11 +774,11 @@ void calculateGaMDDihedralListedForces(const InteractionDefinitions&            
     scratchForceBuffer.resize(forces.size() * sizeof(rvec4) / sizeof(real));
     std::fill(scratchForceBuffer.begin(), scratchForceBuffer.end(), 0.0_real);
 
-    rvec4*      scratchForces = reinterpret_cast<rvec4*>(scratchForceBuffer.data());
-    rvec*       scratchShift  = as_rvec_array(shiftForces.data());
-    real        dvdl          = 0.0_real;
-    const real  lambdaBonded  = lambda[static_cast<int>(FreeEnergyPerturbationCouplingType::Bonded)];
-    const t_pbc* pbcOrNull    = (fr->bMolPBC ? pbc : nullptr);
+    rvec4*     scratchForces = reinterpret_cast<rvec4*>(scratchForceBuffer.data());
+    rvec*      scratchShift  = as_rvec_array(shiftForces.data());
+    real       dvdl          = 0.0_real;
+    const real lambdaBonded  = lambda[static_cast<int>(FreeEnergyPerturbationCouplingType::Bonded)];
+    const t_pbc* pbcOrNull   = (fr->bMolPBC ? pbc : nullptr);
 
     const std::array<int, 4> gamdDihedralForceTypes = { F_PDIHS, F_RBDIHS, F_FOURDIHS, F_CMAP };
 
@@ -823,9 +828,7 @@ void calculateGaMDDihedralListedForces(const InteractionDefinitions&            
                                 BondedKernelFlavor::ForcesNoSimd);
         }
 
-        inc_nrnb(nrnb,
-                 nrnbIndex(ftype),
-                 ilist.size() / (interaction_function[ftype].nratoms + 1));
+        inc_nrnb(nrnb, nrnbIndex(ftype), ilist.size() / (interaction_function[ftype].nratoms + 1));
     }
 
     for (gmx::Index i = 0; i < forces.ssize(); ++i)
@@ -834,6 +837,7 @@ void calculateGaMDDihedralListedForces(const InteractionDefinitions&            
         forces[i][YY] = scratchForces[i][YY];
         forces[i][ZZ] = scratchForces[i][ZZ];
     }
+    fcdata->gaMDDihedralForceScale = savedDihedralForceScale;
 }
 
 void ListedForces::calculate(struct gmx_wallcycle*                     wcycle,

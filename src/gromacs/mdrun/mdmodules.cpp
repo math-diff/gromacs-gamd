@@ -44,6 +44,7 @@
 #include "gromacs/applied_forces/colvars/colvarsMDModule.h"
 #include "gromacs/applied_forces/densityfitting/densityfitting.h"
 #include "gromacs/applied_forces/electricfield.h"
+#include "gromacs/applied_forces/gamd/gamdmdmodule.h"
 #include "gromacs/applied_forces/nnpot/nnpot.h"
 #include "gromacs/applied_forces/plumed/plumedMDModule.h"
 #include "gromacs/applied_forces/qmmm/qmmm.h"
@@ -75,6 +76,7 @@ public:
     Impl() :
         densityFitting_(DensityFittingModuleInfo::create()),
         field_(createElectricFieldModule()),
+        gamd_(createGaMDModule()),
         imd_(createInteractiveMolecularDynamicsModule()),
         qmmm_(QMMMModuleInfo::create()),
         swapCoordinates_(createSwapCoordinatesModule()),
@@ -117,6 +119,7 @@ public:
 
     std::unique_ptr<IMDModule>      densityFitting_;
     std::unique_ptr<IMDModule>      field_;
+    std::unique_ptr<GaMDMDModule>   gamd_;
     std::unique_ptr<ForceProviders> forceProviders_;
     std::unique_ptr<IMDModule>      imd_;
     std::unique_ptr<IMDModule>      qmmm_;
@@ -193,6 +196,7 @@ ForceProviders* MDModules::initForceProviders(gmx_wallcycle* wallCycle)
                        "Force providers initialized multiple times");
     impl_->forceProviders_ = std::make_unique<ForceProviders>(wallCycle);
     impl_->field_->initForceProviders(impl_->forceProviders_.get());
+    impl_->gamd_->initForceProviders(impl_->forceProviders_.get());
     impl_->densityFitting_->initForceProviders(impl_->forceProviders_.get());
     impl_->qmmm_->initForceProviders(impl_->forceProviders_.get());
     impl_->colvars_->initForceProviders(impl_->forceProviders_.get());
@@ -205,8 +209,14 @@ ForceProviders* MDModules::initForceProviders(gmx_wallcycle* wallCycle)
     return impl_->forceProviders_.get();
 }
 
+GaMDMDModule* MDModules::gaMDModule()
+{
+    return impl_->gamd_.get();
+}
+
 void MDModules::subscribeToPreProcessingNotifications()
 {
+    impl_->gamd_->subscribeToPreProcessingNotifications(&impl_->notifiers_);
     impl_->densityFitting_->subscribeToPreProcessingNotifications(&impl_->notifiers_);
     impl_->qmmm_->subscribeToPreProcessingNotifications(&impl_->notifiers_);
     impl_->colvars_->subscribeToPreProcessingNotifications(&impl_->notifiers_);
@@ -215,6 +225,7 @@ void MDModules::subscribeToPreProcessingNotifications()
 
 void MDModules::subscribeToSimulationSetupNotifications()
 {
+    impl_->gamd_->subscribeToSimulationSetupNotifications(&impl_->notifiers_);
     impl_->densityFitting_->subscribeToSimulationSetupNotifications(&impl_->notifiers_);
     impl_->qmmm_->subscribeToSimulationSetupNotifications(&impl_->notifiers_);
     impl_->colvars_->subscribeToSimulationSetupNotifications(&impl_->notifiers_);

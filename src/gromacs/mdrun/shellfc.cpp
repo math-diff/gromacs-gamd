@@ -47,6 +47,7 @@
 #include <utility>
 #include <vector>
 
+#include "gromacs/applied_forces/gamd/gamdmdmodule.h"
 #include "gromacs/domdec/dlbtiming.h"
 #include "gromacs/domdec/domdec.h"
 #include "gromacs/domdec/domdec_struct.h"
@@ -1124,7 +1125,12 @@ void relax_shell_flexcon(FILE*                             fplog,
             sf_dir += massT[i] * norm2(shfc->acc_dir[i]);
         }
     }
-    accumulatePotentialEnergies(enerd, lambda, inputrec->fepvals.get());
+    double gaMDBoostEnergy = 0.0;
+    if (runScheduleWork.gaMDModule != nullptr)
+    {
+        gaMDBoostEnergy = runScheduleWork.gaMDModule->stepResult().totalBoost();
+    }
+    accumulatePotentialEnergies(enerd, lambda, inputrec->fepvals.get(), gaMDBoostEnergy);
     Epot[Min] = enerd->term[F_EPOT];
 
     df[Min] = rms_force(cr, forceWithPadding[Min].paddedArrayRef(), shells, nflexcon, &sf_dir, &Epot[Min]);
@@ -1248,7 +1254,12 @@ void relax_shell_flexcon(FILE*                             fplog,
                  nullptr,
                  longRangeNonbondeds,
                  ddBalanceRegionHandler);
-        accumulatePotentialEnergies(enerd, lambda, inputrec->fepvals.get());
+        gaMDBoostEnergy = 0.0;
+        if (runScheduleWorkWithoutNS.gaMDModule != nullptr)
+        {
+            gaMDBoostEnergy = runScheduleWorkWithoutNS.gaMDModule->stepResult().totalBoost();
+        }
+        accumulatePotentialEnergies(enerd, lambda, inputrec->fepvals.get(), gaMDBoostEnergy);
         if (gmx_debug_at)
         {
             pr_rvecs(debug, 0, "RELAX: force[Min]", as_rvec_array(force[Min].data()), homenr);
