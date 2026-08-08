@@ -9,8 +9,6 @@
 # of the License, or (at your option) any later version.
 #
 
-# Link to mdtypes (for GaMDParams)
-target_link_libraries(applied_forces INTERFACE mdtypes)
 gmx_add_libgromacs_sources(
     gamdmdmodule.cpp
     gamdcontroller.cpp

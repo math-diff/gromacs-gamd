@@ -1854,22 +1854,10 @@ static void do_inputrec(gmx::ISerializer* serializer, t_inputrec* ir, int file_v
     if (file_version >= tpxv_GaMDInputrecFlag)
     {
         serializer->doBool(&ir->bDoGaMD);
-        if (serializer->reading())
-        {
-            if (ir->bDoGaMD && !ir->gamdParams)
-            {
-                ir->gamdParams = std::make_unique<gmx::GaMDParams>();
-            }
-            else if (!ir->bDoGaMD)
-            {
-                ir->gamdParams.reset();
-            }
-        }
     }
     else
     {
         ir->bDoGaMD = false;
-        ir->gamdParams.reset();
     }
 
     if (file_version >= tpxv_GenericParamsForElectricField)
