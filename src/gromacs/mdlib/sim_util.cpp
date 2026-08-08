@@ -3166,15 +3166,20 @@ void do_force(FILE*                         fplog,
         stateGpu->setFReadyOnDeviceEventExpectedConsumptionCount(AtomLocality::Local, 1);
     }
 
-    if (stepWork.computeEnergy && fr->listedForcesGpu != nullptr
-        && runScheduleWork.gaMDModule->gpuExecutor()->energyEnabled())
+    if (stepWork.computeEnergy && simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuResident
+        && fr->listedForcesGpu != nullptr)
     {
+        GMX_RELEASE_ASSERT(runScheduleWork.gaMDModule != nullptr
+                                   && runScheduleWork.gaMDModule->gpuExecutor() != nullptr,
+                           "GPU-resident GaMD requires the built-in GaMD module and GPU executor");
+        if (!runScheduleWork.gaMDModule->gpuExecutor()->energyEnabled())
+        {
+            gmx_fatal(FARGS, "GPU-resident GaMD requires GPU energy reduction.");
+        }
         pme_gpu_stage_gamd_reciprocal_energy(
                 fr->pmedata,
                 runScheduleWork.gaMDModule->gpuExecutor()->pmeEnergyStagingBuffer(),
                 runScheduleWork.gaMDModule->gpuExecutor()->pmeEnergyReadyEvent());
-        GMX_RELEASE_ASSERT(runScheduleWork.gaMDModule != nullptr,
-                           "GPU-resident GaMD requires the built-in GaMD module");
         const GaMDGpuProductionParameters gamdParameters =
                 runScheduleWork.gaMDModule->gpuProductionParameters();
         runScheduleWork.gaMDModule->gpuExecutor()->launchEnergyReduction(
