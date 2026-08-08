@@ -61,6 +61,20 @@ public:
     void                                     recordGamdForceVirialSample();
     std::vector<std::array<real, DIM * DIM>> takeGamdForceVirialHistory(int numSamples);
 
+    void initializeUpdateHistory(int numTemperatureGroups, const DeviceStream& updateStream);
+    void bindUpdateBuffers(DeviceBuffer<Float3>           velocities,
+                           ArrayRef<const real>           masses,
+                           ArrayRef<const unsigned short> temperatureGroups);
+    void recordUpdateConstraintVirial(DeviceBuffer<float> lincsVirial,
+                                      bool                haveLincs,
+                                      DeviceBuffer<float> settleVirial,
+                                      bool                haveSettles,
+                                      real                scaleFactor);
+    void recordUpdateKineticEnergy(bool recordSample);
+    std::vector<std::array<real, DIM * DIM>> takeUpdateConstraintVirialHistory();
+    GaMDKineticEnergyHistory                 takeUpdateKineticEnergyHistory();
+    std::vector<std::array<real, DIM * DIM>> takePreviousHalfStepKineticEnergy();
+
     void copyGamdDihedralShadowForces(ArrayRef<RVec> forces);
     void copyGamdDihedralVirial(std::array<real, DIM * DIM>* virial);
     void launchGamdShortRangeVirialReduction();
@@ -87,10 +101,11 @@ public:
                                          GpuEventSynchronizer* rawForcesReady);
 
 private:
-    static constexpr int c_gamdEnergyHistoryCapacity_ = 4096;
+    static constexpr int c_historyCapacity_ = 4096;
 
     const DeviceContext& deviceContext_;
     const DeviceStream&  deviceStream_;
+    const DeviceStream*  updateStream_      = nullptr;
     gmx_wallcycle*       wallCycleCounters_ = nullptr;
 
     PbcAiuc pbcAiuc_;
@@ -140,6 +155,40 @@ private:
     HostVector<int>   h_gamdEnergyHistoryCount_ = { {},
                                                     gmx::HostAllocationPolicy(
                                                           gmx::PinningPolicy::PinnedIfSupported) };
+
+    int                          updateNumTemperatureGroups_           = 0;
+    int                          updateNumAtoms_                       = 0;
+    int                          updateMassCount_                      = -1;
+    int                          updateMassCapacity_                   = -1;
+    int                          updateTemperatureGroupCount_          = -1;
+    int                          updateTemperatureGroupCapacity_       = -1;
+    DeviceBuffer<Float3>         updateVelocities_                     = nullptr;
+    DeviceBuffer<real>           d_updateMasses_                       = nullptr;
+    DeviceBuffer<unsigned short> d_updateTemperatureGroups_            = nullptr;
+    DeviceBuffer<float>          d_updateConstraintVirialHistory_      = nullptr;
+    DeviceBuffer<int>            d_updateConstraintVirialHistoryCount_ = nullptr;
+    DeviceBuffer<float>          d_updateCurrentHalfKinetic_           = nullptr;
+    DeviceBuffer<float>          d_updatePreviousHalfKinetic_          = nullptr;
+    DeviceBuffer<float>          d_updateGroupHalfKineticTensor_       = nullptr;
+    DeviceBuffer<float>          d_updateKineticHistory_               = nullptr;
+    DeviceBuffer<int>            d_updateKineticHistoryCount_          = nullptr;
+    HostVector<float>            h_updateConstraintVirialHistory_      = {
+        {},
+        gmx::HostAllocationPolicy(gmx::PinningPolicy::PinnedIfSupported)
+    };
+    HostVector<int> h_updateConstraintVirialHistoryCount_ = {
+        {},
+        gmx::HostAllocationPolicy(gmx::PinningPolicy::PinnedIfSupported)
+    };
+    HostVector<float> h_updateKineticHistory_      = { {},
+                                                       gmx::HostAllocationPolicy(
+                                                          gmx::PinningPolicy::PinnedIfSupported) };
+    HostVector<float> h_updatePreviousHalfKinetic_ = { {},
+                                                       gmx::HostAllocationPolicy(
+                                                               gmx::PinningPolicy::PinnedIfSupported) };
+    HostVector<int>   h_updateKineticHistoryCount_ = { {},
+                                                       gmx::HostAllocationPolicy(
+                                                             gmx::PinningPolicy::PinnedIfSupported) };
 
     std::unique_ptr<GpuEventSynchronizer> gamdPmeEnergyReadyEvent_;
     std::unique_ptr<GpuEventSynchronizer> gamdForcesReadyEvent_;

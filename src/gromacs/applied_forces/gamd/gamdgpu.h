@@ -40,6 +40,15 @@ struct GaMDBondedDeviceBuffers
     DeviceBuffer<Float3> shiftForces    = nullptr;
 };
 
+struct GaMDKineticEnergyHistory
+{
+    int                                      numGroups = 0;
+    std::vector<std::array<real, DIM * DIM>> totalTensors;
+    std::vector<real>                        groupKineticEnergies;
+
+    int numSamples() const { return static_cast<int>(totalTensors.size()); }
+};
+
 class GaMDGpuExecutor final
 {
 public:
@@ -86,6 +95,24 @@ public:
 
     void                                     recordForceVirialSample();
     std::vector<std::array<real, DIM * DIM>> takeForceVirialHistory(int numSamples);
+
+    /*! \brief Bind the update stream and allocate GaMD-owned deferred global histories. */
+    void initializeUpdateHistory(int numTemperatureGroups, const DeviceStream& updateStream);
+    /*! \brief Bind device velocity data and copy immutable mass/group metadata. */
+    void bindUpdateBuffers(DeviceBuffer<Float3>           velocities,
+                           ArrayRef<const real>           masses,
+                           ArrayRef<const unsigned short> temperatureGroups);
+    /*! \brief Record one constraint-virial sample on the bound update stream. */
+    void recordConstraintVirial(DeviceBuffer<float> lincsVirial,
+                                bool                haveLincs,
+                                DeviceBuffer<float> settleVirial,
+                                bool                haveSettles,
+                                real                scaleFactor);
+    /*! \brief Advance half-step kinetic state and optionally record a full-step sample. */
+    void                                     recordKineticEnergy(bool recordSample);
+    std::vector<std::array<real, DIM * DIM>> takeConstraintVirialHistory();
+    GaMDKineticEnergyHistory                 takeKineticEnergyHistory();
+    std::vector<std::array<real, DIM * DIM>> previousHalfStepKineticEnergy();
 
     void copyDihedralShadowForces(ArrayRef<RVec> forces);
     void copyDihedralVirial(std::array<real, DIM * DIM>* virial);

@@ -53,6 +53,7 @@
 #include <vector>
 
 #include "gromacs/applied_forces/awh/awh.h"
+#include "gromacs/applied_forces/gamd/gamddiagnostics.h"
 #include "gromacs/applied_forces/gamd/gamdgpu.h"
 #include "gromacs/applied_forces/gamd/gamdmdmodule.h"
 #include "gromacs/domdec/dlbtiming.h"
@@ -526,6 +527,7 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
 
     GaMDMDModule* gaMDModule = runScheduleWork.gaMDModule;
     GMX_RELEASE_ASSERT(gaMDModule != nullptr, "Current-step GaMD requires the built-in GaMD module");
+    GaMDHostWorkspace& gaMDHostWorkspace = gaMDModule->diagnostics().hostWorkspace();
 
     const auto& simulationWork = runScheduleWork.simulationWork;
     const auto& domainWork     = runScheduleWork.domainWork;
@@ -639,10 +641,11 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
 
         const bool validateLiveGpuCorrection =
                 runScheduleWork.gaMDModule->gpuExecutor()->dihedralShadowEnabled();
-        static std::vector<gmx::RVec> gamdGpuModeDihedralForces;
-        static std::vector<gmx::RVec> gamdGpuModeDihedralShiftForces;
-        static std::vector<gmx::RVec> gpuShadowDihedralForces;
-        std::array<real, DIM * DIM>   gpuDihedralVirial = {};
+        std::vector<gmx::RVec>& gamdGpuModeDihedralForces = gaMDHostWorkspace.gpuModeDihedralForces;
+        std::vector<gmx::RVec>& gamdGpuModeDihedralShiftForces =
+                gaMDHostWorkspace.gpuModeDihedralShiftForces;
+        std::vector<gmx::RVec>& gpuShadowDihedralForces = gaMDHostWorkspace.gpuShadowDihedralForces;
+        std::array<real, DIM * DIM> gpuDihedralVirial   = {};
 
         if (stepWork.stageGpuEnergyAndVirialToHost && totalScale != 1.0)
         {
@@ -746,9 +749,9 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
             }
         }
 
-        static std::vector<gmx::RVec> referenceCorrectedForces;
-        static std::vector<gmx::RVec> liveGpuCorrectedForces;
-        static std::vector<gmx::RVec> rawReducedForcesForShadow;
+        std::vector<gmx::RVec>& referenceCorrectedForces = gaMDHostWorkspace.referenceCorrectedForces;
+        std::vector<gmx::RVec>& liveGpuCorrectedForces = gaMDHostWorkspace.liveGpuCorrectedForces;
+        std::vector<gmx::RVec>& rawReducedForcesForShadow = gaMDHostWorkspace.rawReducedForcesForShadow;
 
         GpuEventSynchronizer* rawForcesReady = nullptr;
         if (stepWork.useGpuFBufferOps)
@@ -816,9 +819,9 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
                   "GMX_GAMD_GPU_DIH_SHADOW does not yet apply virtual-site force spreading on "
                   "the device.");
     }
-    static bool                   correctionShadowCompared = false;
-    static std::vector<gmx::RVec> rawForcesForGpuShadow;
-    static std::vector<gmx::RVec> correctedGpuShadowForces;
+    bool&                   correctionShadowCompared = gaMDHostWorkspace.correctionShadowCompared;
+    std::vector<gmx::RVec>& rawForcesForGpuShadow = gaMDHostWorkspace.rawForcesForCorrectionShadow;
+    std::vector<gmx::RVec>& correctedGpuShadowForces = gaMDHostWorkspace.correctedForcesForShadow;
     if (gpuShadowEnabled && !correctionShadowCompared)
     {
         rawForcesForGpuShadow.assign(force.begin(), force.end());
@@ -872,8 +875,8 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
 
     wallcycle_start(wcycle, WallCycleCounter::GaMDDihedral);
 
-    static std::vector<gmx::RVec> gamdDihedralForces;
-    static std::vector<gmx::RVec> gamdDihedralShiftForces;
+    std::vector<gmx::RVec>& gamdDihedralForces      = gaMDHostWorkspace.cpuDihedralForces;
+    std::vector<gmx::RVec>& gamdDihedralShiftForces = gaMDHostWorkspace.cpuDihedralShiftForces;
     gamdDihedralForces.resize(force.ssize(), gmx::RVec(0.0_real, 0.0_real, 0.0_real));
     gamdDihedralShiftForces.resize(gmx::c_numShiftVectors, gmx::RVec(0.0_real, 0.0_real, 0.0_real));
 
@@ -897,8 +900,8 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
                                       haveDDAtomOrdering(*cr) ? cr->dd->globalAtomIndices.data() : nullptr);
     if (gpuShadowEnabled)
     {
-        static bool                   shadowCompared = false;
-        static std::vector<gmx::RVec> gpuShadowForces;
+        bool&                   shadowCompared  = gaMDHostWorkspace.dihedralShadowCompared;
+        std::vector<gmx::RVec>& gpuShadowForces = gaMDHostWorkspace.gpuDihedralForcesForShadow;
         if (!shadowCompared)
         {
             gpuShadowForces.resize(gamdDihedralForces.size());
@@ -2094,11 +2097,8 @@ void do_force(FILE*                         fplog,
 
     const bool useGpuGaMDShortRangeVirial = simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuResident
                                             && stepWork.computeVirial && stepWork.useGpuFBufferOps;
-    static const bool gaMDGpuWorkloadDiagnosticsEnabled =
-            (std::getenv("GMX_GAMD_GPU_DIAGNOSTICS") != nullptr);
-    static bool printedGaMDGpuWorkloadDiagnostics = false;
-    if (!printedGaMDGpuWorkloadDiagnostics && gaMDGpuWorkloadDiagnosticsEnabled
-        && simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuResident)
+    if (simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuResident
+        && runScheduleWork.gaMDModule->diagnostics().shouldPrintGpuWorkloadDiagnostics())
     {
         std::fprintf(stderr,
                      "[GaMD GPU diagnostics] cpuLocal=%d cpuListed=%d cpuBonded=%d special=%d "
@@ -2111,7 +2111,6 @@ void do_force(FILE*                         fplog,
                      stepWork.useGpuFBufferOps,
                      stepWork.computeVirial,
                      useGpuGaMDShortRangeVirial);
-        printedGaMDGpuWorkloadDiagnostics = true;
     }
     if (useGpuGaMDShortRangeVirial && fr->wholeMoleculeTransform != nullptr)
     {

@@ -106,6 +106,35 @@ std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::takeForceVirialHistory
     return {};
 }
 
+void GaMDGpuExecutor::initializeUpdateHistory(int, const DeviceStream&) {}
+
+void GaMDGpuExecutor::bindUpdateBuffers(DeviceBuffer<Float3>,
+                                        ArrayRef<const real>,
+                                        ArrayRef<const unsigned short>)
+{
+}
+
+void GaMDGpuExecutor::recordConstraintVirial(DeviceBuffer<float>, bool, DeviceBuffer<float>, bool, real)
+{
+}
+
+void GaMDGpuExecutor::recordKineticEnergy(bool) {}
+
+std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::takeConstraintVirialHistory()
+{
+    return {};
+}
+
+GaMDKineticEnergyHistory GaMDGpuExecutor::takeKineticEnergyHistory()
+{
+    return {};
+}
+
+std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::previousHalfStepKineticEnergy()
+{
+    return {};
+}
+
 void GaMDGpuExecutor::copyDihedralShadowForces(ArrayRef<RVec>) {}
 
 void GaMDGpuExecutor::copyDihedralVirial(std::array<real, DIM * DIM>*) {}

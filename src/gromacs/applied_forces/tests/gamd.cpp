@@ -50,6 +50,7 @@
 
 #include <gtest/gtest.h>
 
+#include "gromacs/applied_forces/gamd/gamddiagnostics.h"
 #include "gromacs/applied_forces/gamd/gamdexecution.h"
 #include "gromacs/applied_forces/gamd/gamdmdmodule.h"
 
@@ -143,6 +144,19 @@ class GaMDTest : public ::testing::Test
 protected:
     GaMDMDModule gaMDModule_;
 };
+
+TEST(GaMDModuleOwnershipTest, DiagnosticsAndHostWorkspaceAreInstanceOwned)
+{
+    GaMDMDModule firstModule;
+    GaMDMDModule secondModule;
+
+    EXPECT_TRUE(firstModule.diagnostics().shouldPrintNstcalcenergyMessage());
+    EXPECT_FALSE(firstModule.diagnostics().shouldPrintNstcalcenergyMessage());
+    EXPECT_TRUE(secondModule.diagnostics().shouldPrintNstcalcenergyMessage());
+
+    firstModule.diagnostics().hostWorkspace().cpuDihedralForces.resize(1);
+    EXPECT_TRUE(secondModule.diagnostics().hostWorkspace().cpuDihedralForces.empty());
+}
 
 TEST_F(GaMDTest, Stage4PotentialStatisticsUseBoostedTotalPotential)
 {

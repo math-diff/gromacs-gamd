@@ -31,6 +31,7 @@ namespace gmx
 {
 
 class GaMDGpuExecutor;
+class GaMDDiagnostics;
 class GaMDRuntime;
 
 /*! \internal
@@ -69,6 +70,9 @@ public:
     //! Returns the module-owned device executor, or nullptr when unavailable.
     GaMDGpuExecutor*       gpuExecutor();
     const GaMDGpuExecutor* gpuExecutor() const;
+    //! Returns diagnostics and host scratch state owned by this simulation module.
+    GaMDDiagnostics&       diagnostics();
+    const GaMDDiagnostics& diagnostics() const;
     //! Updates host statistics and the host step result from current raw energies.
     void finalizeCurrentStep(int64_t        step,
                              int            rank,
@@ -98,6 +102,7 @@ public:
 
 private:
     std::unique_ptr<GaMDRuntime>     runtime_;
+    std::unique_ptr<GaMDDiagnostics> diagnostics_;
     std::unique_ptr<GaMDGpuExecutor> gpuExecutor_;
 };
 

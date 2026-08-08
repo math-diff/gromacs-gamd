@@ -14,6 +14,7 @@ target_link_libraries(applied_forces INTERFACE mdtypes)
 gmx_add_libgromacs_sources(
     gamdmdmodule.cpp
     gamdcontroller.cpp
+    gamddiagnostics.cpp
     gamdexecution.cpp
 )
 

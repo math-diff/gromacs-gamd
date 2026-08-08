@@ -58,6 +58,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "gromacs/applied_forces/gamd/gamddiagnostics.h"
 #include "gromacs/gmxlib/nrnb.h"
 #include "gromacs/listed_forces/disre.h"
 #include "gromacs/listed_forces/orires.h"
@@ -137,235 +138,30 @@ int pbc_rvec_sub(const t_pbc* pbc, const rvec xi, const rvec xj, rvec dx)
     }
 }
 
-struct GaMDDihForceDebugState
+bool getForcedGaMDRatio(const t_fcdata* forceCalculationData, double* ratio)
 {
-    bool  initialized = false;
-    long  step        = -1;
-    int   begin       = 0;
-    int   count       = -1;
-    FILE* fp          = nullptr;
+    return forceCalculationData != nullptr && forceCalculationData->gaMDDiagnostics != nullptr
+           && forceCalculationData->gaMDDiagnostics->forcedDihedralRatio(ratio);
+}
 
-    long    preparedStep = -1;
-    long    flushedStep  = -1;
-    int64_t currentStep  = -1;
-
-
-    std::vector<gmx::RVec> buffer;
-};
-struct GaMDDihRawDebugState
+void addGaMDDihedralDebugForces(const t_fcdata* forceCalculationData,
+                                int             atomIndexI,
+                                const rvec      forceI,
+                                int             atomIndexJ,
+                                const rvec      forceJ,
+                                int             atomIndexK,
+                                const rvec      forceK,
+                                int             atomIndexL,
+                                const rvec      forceL)
 {
-    bool    initialized = false;
-    FILE*   fp          = nullptr;
-    int64_t currentStep = -1;
-};
-
-static GaMDDihRawDebugState g_gamdDihRawDebug;
-
-static void initGaMDDihRawDebug()
-{
-    if (g_gamdDihRawDebug.initialized)
+    if (forceCalculationData == nullptr || forceCalculationData->gaMDDiagnostics == nullptr)
     {
         return;
     }
-    g_gamdDihRawDebug.initialized = true;
-
-    if (const char* s = std::getenv("GMX_GAMD_DIH_RAW_DEBUG_FILE"))
-    {
-        g_gamdDihRawDebug.fp = std::fopen(s, "w");
-        if (g_gamdDihRawDebug.fp != nullptr)
-        {
-            std::fprintf(
-                    g_gamdDihRawDebug.fp,
-                    "# step atom fx fy fz   (raw applied dihedral-like force contributions)\n");
-            std::fflush(g_gamdDihRawDebug.fp);
-        }
-    }
-}
-
-static inline bool gamdDihRawDebugActive()
-{
-    initGaMDDihRawDebug();
-    return (g_gamdDihRawDebug.fp != nullptr);
-}
-
-static void gamdDihRawDebugAddOne(int atom, const rvec fAtom)
-{
-    if (!gamdDihRawDebugActive())
-    {
-        return;
-    }
-
-    std::fprintf(g_gamdDihRawDebug.fp,
-                 "%ld %d %.9e %.9e %.9e\n",
-                 static_cast<long>(g_gamdDihRawDebug.currentStep),
-                 atom,
-                 static_cast<double>(fAtom[0]),
-                 static_cast<double>(fAtom[1]),
-                 static_cast<double>(fAtom[2]));
-}
-
-static void
-gamdDihRawDebugAddFour(int ai, const rvec f_i, int aj, const rvec f_j, int ak, const rvec f_k, int al, const rvec f_l)
-{
-    gamdDihRawDebugAddOne(ai, f_i);
-    gamdDihRawDebugAddOne(aj, f_j);
-    gamdDihRawDebugAddOne(ak, f_k);
-    gamdDihRawDebugAddOne(al, f_l);
-}
-
-
-static bool getForcedGaMDRatio(double* ratioOut)
-{
-    static bool   initialized = false;
-    static bool   active      = false;
-    static double ratio       = 1.0;
-
-    if (!initialized)
-    {
-        initialized = true;
-
-        if (const char* sp = std::getenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP"))
-        {
-            double scaleD = std::atof(sp);
-
-            if (const char* sd = std::getenv("GMX_GAMD_FORCE_OVERRIDE_SCALED"))
-            {
-                scaleD = std::atof(sd);
-            }
-
-            scaleD = std::max(0.01, scaleD);
-
-            // In the Amber-compatible dual-boost path, the current-step GaMD
-            // correction later combines raw total forces with raw dihedral
-            // forces so the final dihedral weight becomes scaleP * scaleD.
-            ratio  = scaleD;
-            active = true;
-        }
-    }
-
-    if (active && ratioOut != nullptr)
-    {
-        *ratioOut = ratio;
-    }
-    return active;
-}
-
-
-static GaMDDihForceDebugState g_gamdDihForceDebug;
-
-static void initGaMDDihForceDebug()
-{
-    if (g_gamdDihForceDebug.initialized)
-    {
-        return;
-    }
-    g_gamdDihForceDebug.initialized = true;
-
-    if (const char* s = std::getenv("GMX_GAMD_DIH_FORCE_DEBUG_STEP"))
-    {
-        g_gamdDihForceDebug.step = std::atol(s);
-    }
-    if (const char* s = std::getenv("GMX_GAMD_DIH_FORCE_DEBUG_BEGIN"))
-    {
-        g_gamdDihForceDebug.begin = std::atoi(s);
-    }
-    if (const char* s = std::getenv("GMX_GAMD_DIH_FORCE_DEBUG_COUNT"))
-    {
-        g_gamdDihForceDebug.count = std::atoi(s);
-    }
-    if (const char* s = std::getenv("GMX_GAMD_DIH_FORCE_DEBUG_FILE"))
-    {
-        g_gamdDihForceDebug.fp = std::fopen(s, "w");
-        if (g_gamdDihForceDebug.fp != nullptr)
-        {
-            std::fprintf(g_gamdDihForceDebug.fp,
-                         "# step atom fx fy fz |f|   (boosted dihedral-like force only)\n");
-            std::fflush(g_gamdDihForceDebug.fp);
-        }
-    }
-}
-
-static bool gamdDihForceDebugActiveForCurrentStep()
-{
-    initGaMDDihForceDebug();
-    return (g_gamdDihForceDebug.fp != nullptr && g_gamdDihForceDebug.step >= 0
-            && g_gamdDihForceDebug.currentStep == g_gamdDihForceDebug.step
-            && g_gamdDihForceDebug.count != 0);
-}
-
-static void gamdDihForceDebugZeroBuffer()
-{
-    for (auto& v : g_gamdDihForceDebug.buffer)
-    {
-        clear_rvec(v);
-    }
-}
-
-static void gamdDihForceDebugEnsurePrepared(int nAtoms)
-{
-    initGaMDDihForceDebug();
-
-    if (g_gamdDihForceDebug.fp == nullptr)
-    {
-        return;
-    }
-
-    /* Always leave a trace so empty files are diagnosable */
-
-
-    if (g_gamdDihForceDebug.step < 0)
-    {
-        return;
-    }
-    if (g_gamdDihForceDebug.currentStep != g_gamdDihForceDebug.step)
-    {
-        return;
-    }
-
-    int begin = std::max(0, std::min(g_gamdDihForceDebug.begin, nAtoms));
-    int count = g_gamdDihForceDebug.count;
-    if (count < 0)
-    {
-        count = nAtoms - begin;
-    }
-    count = std::max(0, std::min(count, nAtoms - begin));
-
-    g_gamdDihForceDebug.begin = begin;
-
-    if (g_gamdDihForceDebug.preparedStep != g_gamdDihForceDebug.currentStep
-        || static_cast<int>(g_gamdDihForceDebug.buffer.size()) != count)
-    {
-        g_gamdDihForceDebug.buffer.resize(count);
-        gamdDihForceDebugZeroBuffer();
-        g_gamdDihForceDebug.preparedStep = g_gamdDihForceDebug.currentStep;
-    }
-}
-
-static void gamdDihForceDebugAddOne(int atom, const rvec fAtom)
-{
-    if (!gamdDihForceDebugActiveForCurrentStep())
-    {
-        return;
-    }
-
-    const int begin = g_gamdDihForceDebug.begin;
-    const int end   = begin + static_cast<int>(g_gamdDihForceDebug.buffer.size());
-
-    if (atom < begin || atom >= end)
-    {
-        return;
-    }
-
-    rvec_inc(g_gamdDihForceDebug.buffer[atom - begin], fAtom);
-}
-
-static void
-gamdDihForceDebugAddFour(int ai, const rvec f_i, int aj, const rvec f_j, int ak, const rvec f_k, int al, const rvec f_l)
-{
-    gamdDihForceDebugAddOne(ai, f_i);
-    gamdDihForceDebugAddOne(aj, f_j);
-    gamdDihForceDebugAddOne(ak, f_k);
-    gamdDihForceDebugAddOne(al, f_l);
+    forceCalculationData->gaMDDiagnostics->addBoostedDihedralForces(
+            atomIndexI, forceI, atomIndexJ, forceJ, atomIndexK, forceK, atomIndexL, forceL);
+    forceCalculationData->gaMDDiagnostics->addRawDihedralForces(
+            atomIndexI, forceI, atomIndexJ, forceJ, atomIndexK, forceK, atomIndexL, forceL);
 }
 
 } // namespace
@@ -2018,7 +1814,8 @@ void do_dih_fup(int          i,
                 const rvec   x[],
                 int          t1,
                 int          t2,
-                int          t3)
+                int          t3,
+                t_fcdata*    forceCalculationData = nullptr)
 {
     /* 143 FLOPS */
     rvec f_i, f_j, f_k, f_l;
@@ -2058,8 +1855,8 @@ void do_dih_fup(int          i,
             rvec f_j_applied, f_k_applied;
             svmul(-1.0, f_j, f_j_applied);
             svmul(-1.0, f_k, f_k_applied);
-            gamdDihForceDebugAddFour(i, f_i, j, f_j_applied, k, f_k_applied, l, f_l);
-            gamdDihRawDebugAddFour(i, f_i, j, f_j_applied, k, f_k_applied, l, f_l);
+            addGaMDDihedralDebugForces(
+                    forceCalculationData, i, f_i, j, f_j_applied, k, f_k_applied, l, f_l);
         }
 
         if (computeVirial(flavor))
@@ -2228,7 +2025,7 @@ pdihs(int             nbonds,
         {
             double gamdRatioLocal = gaMDDihedralRatio(fcd);
             double forcedRatio    = 1.0;
-            if (getForcedGaMDRatio(&forcedRatio))
+            if (getForcedGaMDRatio(fcd, &forcedRatio))
             {
                 gamdRatioLocal = forcedRatio;
             }
@@ -2238,7 +2035,7 @@ pdihs(int             nbonds,
         }
 
         do_dih_fup<flavor, applyGaMDRatio>(
-                ai, aj, ak, al, ddphi_tot, r_ij, r_kj, r_kl, m, n, f, fshift, pbc, x, t1, t2, t3);
+                ai, aj, ak, al, ddphi_tot, r_ij, r_kj, r_kl, m, n, f, fshift, pbc, x, t1, t2, t3, fcd);
 
 
     } /* 223 TOTAL  */
@@ -3266,7 +3063,7 @@ rbdihs(int             nbonds,
         {
             double gamdRatioLocal = gaMDDihedralRatio(fcd);
             double forcedRatio    = 1.0;
-            if (getForcedGaMDRatio(&forcedRatio))
+            if (getForcedGaMDRatio(fcd, &forcedRatio))
             {
                 gamdRatioLocal = forcedRatio;
             }
@@ -3275,8 +3072,8 @@ rbdihs(int             nbonds,
             ddphi *= gamdRatioLocal;
         }
         do_dih_fup<flavor, true>(
-                ai, aj, ak, al, ddphi, r_ij, r_kj, r_kl, m, n, f, fshift, pbc, x, t1, t2, t3); /* 112
-                                                                                                */
+                ai, aj, ak, al, ddphi, r_ij, r_kj, r_kl, m, n, f, fshift, pbc, x, t1, t2, t3, fcd); /* 112
+                                                                                                     */
 
         vtot += v;
     }
@@ -3375,7 +3172,8 @@ void accumulateCmapForces(const rvec      x[],
                           const int       al,
                           const real      df,
                           const int       t1,
-                          const int       t2)
+                          const int       t2,
+                          t_fcdata*       forceCalculationData)
 {
     const real fg  = iprod(r_ij, r_kj);
     const real hg  = iprod(r_kl, r_kj);
@@ -3398,8 +3196,7 @@ void accumulateCmapForces(const rvec      x[],
     rvec_inc(f[aj], f_j);
     rvec_inc(f[ak], f_k);
     rvec_inc(f[al], f_l);
-    gamdDihForceDebugAddFour(ai, f_i, aj, f_j, ak, f_k, al, f_l);
-    gamdDihRawDebugAddFour(ai, f_i, aj, f_j, ak, f_k, al, f_l);
+    addGaMDDihedralDebugForces(forceCalculationData, ai, f_i, aj, f_j, ak, f_k, al, f_l);
 
     /* Shift forces */
     if (fshift != nullptr)
@@ -3675,7 +3472,7 @@ real cmap_dihs(int                 nbonds,
         /* GaMD: include CMAP in dihedral-force scaling */
         double gamdRatioLocal = gaMDDihedralRatio(fcd);
         double forcedRatio    = 1.0;
-        if (getForcedGaMDRatio(&forcedRatio))
+        if (getForcedGaMDRatio(fcd, &forcedRatio))
         {
             gamdRatioLocal = forcedRatio;
         }
@@ -3690,11 +3487,11 @@ real cmap_dihs(int                 nbonds,
 
         /* Do forces - first torsion */
         accumulateCmapForces(
-                x, f, fshift, pbc, r1_ij, r1_kj, r1_kl, a1, b1, h1, ra2r1, rb2r1, rgr1, rg1, a1i, a1j, a1k, a1l, df1, t11, t21);
+                x, f, fshift, pbc, r1_ij, r1_kj, r1_kl, a1, b1, h1, ra2r1, rb2r1, rgr1, rg1, a1i, a1j, a1k, a1l, df1, t11, t21, fcd);
 
         /* Do forces - second torsion */
         accumulateCmapForces(
-                x, f, fshift, pbc, r2_ij, r2_kj, r2_kl, a2, b2, h2, ra2r2, rb2r2, rgr2, rg2, a2i, a2j, a2k, a2l, df2, t12, t22);
+                x, f, fshift, pbc, r2_ij, r2_kj, r2_kl, a2, b2, h2, ra2r2, rb2r2, rgr2, rg2, a2i, a2j, a2k, a2l, df2, t12, t22, fcd);
     }
     return vtot;
 }
@@ -4382,55 +4179,6 @@ constexpr gmx::EnumerationArray<BondedKernelFlavor, std::array<BondedInteraction
 //! \endcond
 
 } // namespace
-void gmx_gamd_dih_force_debug_prepare_step(int64_t step, int nAtoms)
-{
-    g_gamdDihForceDebug.currentStep = step;
-    g_gamdDihRawDebug.currentStep   = step;
-    gamdDihForceDebugEnsurePrepared(nAtoms);
-}
-
-void gmx_gamd_dih_force_debug_flush(long step)
-{
-    initGaMDDihForceDebug();
-
-    if (g_gamdDihForceDebug.fp == nullptr)
-    {
-        return;
-    }
-
-
-    if (step != g_gamdDihForceDebug.step)
-    {
-        return;
-    }
-    if (g_gamdDihForceDebug.flushedStep == step)
-    {
-        return;
-    }
-    if (g_gamdDihForceDebug.preparedStep != step)
-    {
-        return;
-    }
-
-    const int begin = g_gamdDihForceDebug.begin;
-    const int count = static_cast<int>(g_gamdDihForceDebug.buffer.size());
-    const int end   = begin + count;
-
-
-    for (int i = 0; i < count; ++i)
-    {
-        const int    atom = begin + i;
-        const double fx   = g_gamdDihForceDebug.buffer[i][0];
-        const double fy   = g_gamdDihForceDebug.buffer[i][1];
-        const double fz   = g_gamdDihForceDebug.buffer[i][2];
-        const double fn   = std::sqrt(fx * fx + fy * fy + fz * fz);
-
-        std::fprintf(g_gamdDihForceDebug.fp, "%ld %d %.9e %.9e %.9e %.9e\n", step, atom, fx, fy, fz, fn);
-    }
-    std::fflush(g_gamdDihForceDebug.fp);
-
-    g_gamdDihForceDebug.flushedStep = step;
-}
 real calculateSimpleBond(const int                 ftype,
                          const int                 numForceatoms,
                          const t_iatom             forceatoms[],

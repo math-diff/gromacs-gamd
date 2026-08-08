@@ -15,11 +15,13 @@
 
 #include <algorithm>
 
+#include "gromacs/gpu_utils/device_stream.h"
 #include "gromacs/gpu_utils/devicebuffer.h"
 #include "gromacs/gpu_utils/gpueventsynchronizer.h"
 #include "gromacs/mdtypes/fcdata.h"
 #include "gromacs/timing/wallcycle.h"
 #include "gromacs/topology/ifunc.h"
+#include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/fatalerror.h"
 #include "gromacs/utility/gmxassert.h"
 
@@ -88,13 +90,12 @@ GaMDGpuExecutor::Impl::Impl(const bool           useGpuResidentGaMD,
         allocateDeviceBuffer(&d_gamdEnergyShadow_, 6, deviceContext_);
         if (gamdEnergyHistoryEnabled_)
         {
-            allocateDeviceBuffer(&d_gamdEnergyHistory_, c_gamdEnergyHistoryCapacity_ * F_NRE, deviceContext_);
-            allocateDeviceBuffer(
-                    &d_gamdForceVirialHistory_, c_gamdEnergyHistoryCapacity_ * DIM * DIM, deviceContext_);
+            allocateDeviceBuffer(&d_gamdEnergyHistory_, c_historyCapacity_ * F_NRE, deviceContext_);
+            allocateDeviceBuffer(&d_gamdForceVirialHistory_, c_historyCapacity_ * DIM * DIM, deviceContext_);
             allocateDeviceBuffer(&d_gamdEnergyHistoryCount_, 1, deviceContext_);
             clearDeviceBufferAsync(&d_gamdEnergyHistoryCount_, 0, 1, deviceStream_);
-            h_gamdEnergyHistory_.resize(c_gamdEnergyHistoryCapacity_ * F_NRE);
-            h_gamdForceVirialHistory_.resize(c_gamdEnergyHistoryCapacity_ * DIM * DIM);
+            h_gamdEnergyHistory_.resize(c_historyCapacity_ * F_NRE);
+            h_gamdForceVirialHistory_.resize(c_historyCapacity_ * DIM * DIM);
             h_gamdEnergyHistoryCount_.resize(1);
         }
         if (gamdEnergyShadowDiagnosticsEnabled_)
@@ -108,6 +109,11 @@ GaMDGpuExecutor::Impl::Impl(const bool           useGpuResidentGaMD,
 GaMDGpuExecutor::Impl::~Impl()
 {
     deviceStream_.synchronize();
+    if (updateStream_ != nullptr && updateStream_ != &deviceStream_)
+    {
+        // 两条流都可能仍在使用模块缓冲，释放前必须分别完成排队工作。
+        updateStream_->synchronize();
+    }
 
     if (d_gamdDihedralForcesNbnxn_ != nullptr)
     {
@@ -157,6 +163,209 @@ GaMDGpuExecutor::Impl::~Impl()
     {
         freeDeviceBuffer(&d_gamdEnergyHistoryCount_);
     }
+    if (d_updateMasses_ != nullptr)
+    {
+        freeDeviceBuffer(&d_updateMasses_);
+    }
+    if (d_updateTemperatureGroups_ != nullptr)
+    {
+        freeDeviceBuffer(&d_updateTemperatureGroups_);
+    }
+    if (d_updateConstraintVirialHistory_ != nullptr)
+    {
+        freeDeviceBuffer(&d_updateConstraintVirialHistory_);
+    }
+    if (d_updateConstraintVirialHistoryCount_ != nullptr)
+    {
+        freeDeviceBuffer(&d_updateConstraintVirialHistoryCount_);
+    }
+    if (d_updateCurrentHalfKinetic_ != nullptr)
+    {
+        freeDeviceBuffer(&d_updateCurrentHalfKinetic_);
+    }
+    if (d_updatePreviousHalfKinetic_ != nullptr)
+    {
+        freeDeviceBuffer(&d_updatePreviousHalfKinetic_);
+    }
+    if (d_updateGroupHalfKineticTensor_ != nullptr)
+    {
+        freeDeviceBuffer(&d_updateGroupHalfKineticTensor_);
+    }
+    if (d_updateKineticHistory_ != nullptr)
+    {
+        freeDeviceBuffer(&d_updateKineticHistory_);
+    }
+    if (d_updateKineticHistoryCount_ != nullptr)
+    {
+        freeDeviceBuffer(&d_updateKineticHistoryCount_);
+    }
+}
+
+void GaMDGpuExecutor::Impl::initializeUpdateHistory(const int           numTemperatureGroups,
+                                                    const DeviceStream& updateStream)
+{
+    GMX_RELEASE_ASSERT(gamdForceCorrectionEnabled_,
+                       "GaMD update history requires the GPU-resident execution mode");
+    GMX_RELEASE_ASSERT(updateStream_ == nullptr,
+                       "GaMD update history must be initialized exactly once");
+    GMX_RELEASE_ASSERT(updateStream.isValid(), "GaMD update history requires a valid update stream");
+    GMX_RELEASE_ASSERT(numTemperatureGroups > 0,
+                       "GaMD deferred kinetic history requires temperature groups");
+    GMX_RELEASE_ASSERT(
+            numTemperatureGroups <= 2,
+            "GaMD deferred kinetic history currently supports at most two temperature groups");
+
+    updateStream_               = &updateStream;
+    updateNumTemperatureGroups_ = numTemperatureGroups;
+
+    // 固定容量覆盖两次 host staging 之间的生产步，避免普通步重新分配和同步。
+    allocateDeviceBuffer(&d_updateConstraintVirialHistory_, c_historyCapacity_ * DIM * DIM, deviceContext_);
+    allocateDeviceBuffer(&d_updateConstraintVirialHistoryCount_, 1, deviceContext_);
+    allocateDeviceBuffer(&d_updateCurrentHalfKinetic_, 6 + updateNumTemperatureGroups_, deviceContext_);
+    allocateDeviceBuffer(&d_updatePreviousHalfKinetic_, 6 + updateNumTemperatureGroups_, deviceContext_);
+    allocateDeviceBuffer(
+            &d_updateGroupHalfKineticTensor_, updateNumTemperatureGroups_ * DIM * DIM, deviceContext_);
+    allocateDeviceBuffer(&d_updateKineticHistory_,
+                         c_historyCapacity_ * (DIM * DIM + updateNumTemperatureGroups_),
+                         deviceContext_);
+    allocateDeviceBuffer(&d_updateKineticHistoryCount_, 1, deviceContext_);
+
+    clearDeviceBufferAsync(&d_updateConstraintVirialHistoryCount_, 0, 1, *updateStream_);
+    clearDeviceBufferAsync(&d_updatePreviousHalfKinetic_, 0, 6 + updateNumTemperatureGroups_, *updateStream_);
+    clearDeviceBufferAsync(&d_updateKineticHistoryCount_, 0, 1, *updateStream_);
+
+    h_updateConstraintVirialHistory_.resize(c_historyCapacity_ * DIM * DIM);
+    h_updateConstraintVirialHistoryCount_.resize(1);
+    h_updateKineticHistory_.resize(c_historyCapacity_ * (DIM * DIM + updateNumTemperatureGroups_));
+    h_updatePreviousHalfKinetic_.resize(updateNumTemperatureGroups_ * DIM * DIM);
+    h_updateKineticHistoryCount_.resize(1);
+}
+
+void GaMDGpuExecutor::Impl::bindUpdateBuffers(DeviceBuffer<Float3>           velocities,
+                                              ArrayRef<const real>           masses,
+                                              ArrayRef<const unsigned short> temperatureGroups)
+{
+    GMX_RELEASE_ASSERT(updateStream_ != nullptr,
+                       "GaMD update history must be initialized before binding update buffers");
+    GMX_RELEASE_ASSERT(velocities != nullptr && !masses.empty(),
+                       "GaMD update history requires velocity and mass buffers");
+    GMX_RELEASE_ASSERT(temperatureGroups.empty() || temperatureGroups.size() == masses.size(),
+                       "GaMD temperature-group data must match the local atom count");
+
+    updateVelocities_ = velocities;
+    updateNumAtoms_   = masses.ssize();
+    // 质量和温度组由模块保存设备副本，update 层只保留通用积分数据。
+    reallocateDeviceBuffer(
+            &d_updateMasses_, updateNumAtoms_, &updateMassCount_, &updateMassCapacity_, deviceContext_);
+    reallocateDeviceBuffer(&d_updateTemperatureGroups_,
+                           updateNumAtoms_,
+                           &updateTemperatureGroupCount_,
+                           &updateTemperatureGroupCapacity_,
+                           deviceContext_);
+    copyToDeviceBuffer(
+            &d_updateMasses_, masses.data(), 0, updateNumAtoms_, *updateStream_, GpuApiCallBehavior::Sync, nullptr);
+
+    if (temperatureGroups.empty())
+    {
+        std::vector<unsigned short> defaultTemperatureGroups(updateNumAtoms_, 0);
+        copyToDeviceBuffer(&d_updateTemperatureGroups_,
+                           defaultTemperatureGroups.data(),
+                           0,
+                           updateNumAtoms_,
+                           *updateStream_,
+                           GpuApiCallBehavior::Sync,
+                           nullptr);
+    }
+    else
+    {
+        copyToDeviceBuffer(&d_updateTemperatureGroups_,
+                           temperatureGroups.data(),
+                           0,
+                           updateNumAtoms_,
+                           *updateStream_,
+                           GpuApiCallBehavior::Sync,
+                           nullptr);
+    }
+}
+
+std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::Impl::takeUpdateConstraintVirialHistory()
+{
+    GMX_RELEASE_ASSERT(updateStream_ != nullptr,
+                       "GaMD deferred constraint-virial history requested before initialization");
+    copyFromDeviceBuffer(h_updateConstraintVirialHistoryCount_.data(),
+                         &d_updateConstraintVirialHistoryCount_,
+                         0,
+                         1,
+                         *updateStream_,
+                         GpuApiCallBehavior::Sync,
+                         nullptr);
+    const int sampleCount = h_updateConstraintVirialHistoryCount_[0];
+    GMX_RELEASE_ASSERT(sampleCount <= c_historyCapacity_,
+                       "GaMD deferred constraint-virial history exceeded its fixed capacity");
+    if (sampleCount == 0)
+    {
+        return {};
+    }
+
+    copyFromDeviceBuffer(h_updateConstraintVirialHistory_.data(),
+                         &d_updateConstraintVirialHistory_,
+                         0,
+                         sampleCount * DIM * DIM,
+                         *updateStream_,
+                         GpuApiCallBehavior::Sync,
+                         nullptr);
+    std::vector<std::array<real, DIM * DIM>> samples(sampleCount);
+    for (int sample = 0; sample < sampleCount; ++sample)
+    {
+        std::copy_n(h_updateConstraintVirialHistory_.data() + sample * DIM * DIM,
+                    DIM * DIM,
+                    samples[sample].begin());
+    }
+    clearDeviceBufferAsync(&d_updateConstraintVirialHistoryCount_, 0, 1, *updateStream_);
+    return samples;
+}
+
+GaMDKineticEnergyHistory GaMDGpuExecutor::Impl::takeUpdateKineticEnergyHistory()
+{
+    GMX_RELEASE_ASSERT(updateStream_ != nullptr,
+                       "GaMD deferred kinetic history requested before initialization");
+    copyFromDeviceBuffer(h_updateKineticHistoryCount_.data(),
+                         &d_updateKineticHistoryCount_,
+                         0,
+                         1,
+                         *updateStream_,
+                         GpuApiCallBehavior::Sync,
+                         nullptr);
+    const int sampleCount = h_updateKineticHistoryCount_[0];
+    GMX_RELEASE_ASSERT(sampleCount <= c_historyCapacity_,
+                       "GaMD deferred kinetic history exceeded its fixed capacity");
+    GaMDKineticEnergyHistory history;
+    history.numGroups = updateNumTemperatureGroups_;
+    if (sampleCount == 0)
+    {
+        return history;
+    }
+
+    const int historyStride = DIM * DIM + updateNumTemperatureGroups_;
+    copyFromDeviceBuffer(h_updateKineticHistory_.data(),
+                         &d_updateKineticHistory_,
+                         0,
+                         sampleCount * historyStride,
+                         *updateStream_,
+                         GpuApiCallBehavior::Sync,
+                         nullptr);
+    history.totalTensors.resize(sampleCount);
+    history.groupKineticEnergies.resize(sampleCount * updateNumTemperatureGroups_);
+    for (int sample = 0; sample < sampleCount; ++sample)
+    {
+        const float* source = h_updateKineticHistory_.data() + sample * historyStride;
+        std::copy_n(source, DIM * DIM, history.totalTensors[sample].begin());
+        std::copy_n(source + DIM * DIM,
+                    updateNumTemperatureGroups_,
+                    history.groupKineticEnergies.begin() + sample * updateNumTemperatureGroups_);
+    }
+    clearDeviceBufferAsync(&d_updateKineticHistoryCount_, 0, 1, *updateStream_);
+    return history;
 }
 
 bool GaMDGpuExecutor::Impl::dihedralShadowEnabled() const
@@ -468,6 +677,47 @@ void GaMDGpuExecutor::recordForceVirialSample()
 std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::takeForceVirialHistory(const int numSamples)
 {
     return impl_->takeGamdForceVirialHistory(numSamples);
+}
+
+void GaMDGpuExecutor::initializeUpdateHistory(const int numTemperatureGroups, const DeviceStream& updateStream)
+{
+    impl_->initializeUpdateHistory(numTemperatureGroups, updateStream);
+}
+
+void GaMDGpuExecutor::bindUpdateBuffers(DeviceBuffer<Float3>           velocities,
+                                        ArrayRef<const real>           masses,
+                                        ArrayRef<const unsigned short> temperatureGroups)
+{
+    impl_->bindUpdateBuffers(velocities, masses, temperatureGroups);
+}
+
+void GaMDGpuExecutor::recordConstraintVirial(DeviceBuffer<float> lincsVirial,
+                                             const bool          haveLincs,
+                                             DeviceBuffer<float> settleVirial,
+                                             const bool          haveSettles,
+                                             const real          scaleFactor)
+{
+    impl_->recordUpdateConstraintVirial(lincsVirial, haveLincs, settleVirial, haveSettles, scaleFactor);
+}
+
+void GaMDGpuExecutor::recordKineticEnergy(const bool recordSample)
+{
+    impl_->recordUpdateKineticEnergy(recordSample);
+}
+
+std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::takeConstraintVirialHistory()
+{
+    return impl_->takeUpdateConstraintVirialHistory();
+}
+
+GaMDKineticEnergyHistory GaMDGpuExecutor::takeKineticEnergyHistory()
+{
+    return impl_->takeUpdateKineticEnergyHistory();
+}
+
+std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::previousHalfStepKineticEnergy()
+{
+    return impl_->takePreviousHalfStepKineticEnergy();
 }
 
 void GaMDGpuExecutor::copyDihedralShadowForces(ArrayRef<RVec> forces)

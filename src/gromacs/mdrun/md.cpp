@@ -57,6 +57,7 @@
 
 #include "gromacs/applied_forces/awh/awh.h"
 #include "gromacs/applied_forces/awh/read_params.h"
+#include "gromacs/applied_forces/gamd/gamddiagnostics.h"
 #include "gromacs/applied_forces/gamd/gamdgpu.h"
 #include "gromacs/applied_forces/gamd/gamdmdmodule.h"
 #include "gromacs/commandline/filenm.h"
@@ -180,40 +181,12 @@
 #include "replicaexchange.h"
 #include "shellfc.h"
 
-/* bonded.cpp dihedral-only debug dump hooks */
-void gmx_gamd_dih_force_debug_prepare_step(int64_t step, int nAtoms);
-void gmx_gamd_dih_force_debug_flush(long step);
-
 struct gmx_mdoutf;
 struct gmx_shellfc_t;
 struct pme_load_balancing_t;
 
 namespace
 {
-
-bool getForcedGaMDScaleP(double* scalePOut)
-{
-    static bool   initialized = false;
-    static bool   active      = false;
-    static double scaleP      = 1.0;
-
-    if (!initialized)
-    {
-        initialized = true;
-
-        if (const char* sp = std::getenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP"))
-        {
-            scaleP = std::max(0.01, std::atof(sp));
-            active = true;
-        }
-    }
-
-    if (active && scalePOut != nullptr)
-    {
-        *scalePOut = scaleP;
-    }
-    return active;
-}
 
 bool doCRescalePressureCouplingThisStep(const t_inputrec& inputRecord, int64_t step)
 {
@@ -539,11 +512,18 @@ void gmx::LegacySimulator::do_md()
                 fr_->deviceStreamManager->streamIsValid(gmx::DeviceStreamType::UpdateAndConstraints),
                 "Update stream should be initialized in order to use GPU "
                 "update-constraints.");
+        GaMDGpuExecutor* gaMDGpuExecutor = nullptr;
+        if (simulationWork.useGpuResidentGaMD())
+        {
+            GMX_RELEASE_ASSERT(gaMDModule_ != nullptr && gaMDModule_->gpuExecutor() != nullptr,
+                               "GPU-resident GaMD requires an initialized GPU executor");
+            gaMDGpuExecutor = gaMDModule_->gpuExecutor();
+        }
         integrator = std::make_unique<UpdateConstrainGpu>(
                 *ir,
                 topGlobal_,
                 ekind_->numTemperatureCouplingGroups(),
-                simulationWork.useGpuResidentGaMD(),
+                gaMDGpuExecutor,
                 fr_->deviceStreamManager->context(),
                 fr_->deviceStreamManager->stream(gmx::DeviceStreamType::UpdateAndConstraints),
                 wallCycleCounters_);
@@ -925,6 +905,11 @@ void gmx::LegacySimulator::do_md()
     const bool useDeviceGlobals       = useResidentEnergy;
     const bool useBufferedOutput      = useResidentEnergy;
     gaMDModule_->setBufferedProductionOutputEnabled(useBufferedOutput);
+    if (useCurrentStepGaMD)
+    {
+        // bonded 层只保存非拥有指针，所有诊断状态仍由当前 GaMD 模块实例管理。
+        fcdata.gaMDDiagnostics = &gaMDModule_->diagnostics();
+    }
     /* and stop now if we should */
     bLastStep = (bLastStep || (ir->nsteps >= 0 && step_rel > ir->nsteps));
     while (!bLastStep)
@@ -1153,11 +1138,8 @@ void gmx::LegacySimulator::do_md()
         if (useCurrentStepGaMD)
         {
             // Current-step GaMD requires raw energies every MD step.
-            static bool gamdWarnedAboutNstcalcenergy = false;
-            if (!gamdWarnedAboutNstcalcenergy)
+            if (gaMDModule_->diagnostics().shouldPrintNstcalcenergyMessage())
             {
-                gamdWarnedAboutNstcalcenergy = true;
-
                 if (cr_->nodeid == 0)
                 {
                     if (ir->nstcalcenergy > 1)
@@ -1261,10 +1243,8 @@ void gmx::LegacySimulator::do_md()
                                         || gaMDModule_->requiresHostEnergyThisStep(step);
             runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost = needHostEnergy;
 
-            static bool loggedResidentEnergyMode = false;
-            if (!loggedResidentEnergyMode && cr_->nodeid == 0)
+            if (cr_->nodeid == 0 && gaMDModule_->diagnostics().shouldPrintResidentEnergyMessage())
             {
-                loggedResidentEnergyMode = true;
                 std::fprintf(
                         stderr,
                         "[GaMD GPU INFO] Device-resident production energy enabled; host staging "
@@ -1387,7 +1367,10 @@ void gmx::LegacySimulator::do_md()
                  * Check comments in sim_util.c
                  */
 
-                gmx_gamd_dih_force_debug_prepare_step(step, state_->numAtoms());
+                if (useCurrentStepGaMD)
+                {
+                    gaMDModule_->diagnostics().prepareDihedralStep(step, state_->numAtoms());
+                }
 
                 do_force(fpLog_,
                          cr_,
@@ -1425,12 +1408,13 @@ void gmx::LegacySimulator::do_md()
              * ========================================================== */
             double scalePForScaling = gaMDModule_->stepResult().scaleP;
             double forcedScaleP     = 1.0;
-            if (getForcedGaMDScaleP(&forcedScaleP))
+            const bool forceScaleOverridden = gaMDModule_->diagnostics().forcedTotalScale(&forcedScaleP);
+            if (forceScaleOverridden)
             {
                 scalePForScaling = forcedScaleP;
             }
 
-            if (std::getenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP") != nullptr && scalePForScaling != 1.0)
+            if (forceScaleOverridden && scalePForScaling != 1.0)
             {
                 auto forces = f.view().force();
                 for (size_t i = 0; i < forces.size(); ++i)
@@ -1449,95 +1433,10 @@ void gmx::LegacySimulator::do_md()
             }
 
 
-            gmx_gamd_dih_force_debug_flush(step);
+            gaMDModule_->diagnostics().flushDihedralForces(step);
 
-            /* ========================================================== */
-            /* GaMD force debug dump (single-rank validation helper)
-             *
-             * Environment variables:
-             *   GMX_GAMD_FORCE_DEBUG_FILE   output file path
-             *   GMX_GAMD_FORCE_DEBUG_STEP   MD step to dump
-             *   GMX_GAMD_FORCE_DEBUG_BEGIN  first atom index to dump (default 0)
-             *   GMX_GAMD_FORCE_DEBUG_COUNT  number of atoms to dump; <0 means all
-             *
-             * Notes:
-             * - Intended for 1 MPI rank CPU validation.
-             * - Dumps FINAL total forces after any GaMD post-processing in md.cpp.
-             */
-            {
-                static bool  dumpConfigInitialized = false;
-                static long  dumpStep              = -1;
-                static int   dumpBegin             = 0;
-                static int   dumpCount             = -1;
-                static FILE* dumpFp                = nullptr;
-
-                if (!dumpConfigInitialized)
-                {
-                    dumpConfigInitialized = true;
-
-                    if (const char* s = std::getenv("GMX_GAMD_FORCE_DEBUG_STEP"))
-                    {
-                        dumpStep = std::atol(s);
-                    }
-                    if (const char* s = std::getenv("GMX_GAMD_FORCE_DEBUG_BEGIN"))
-                    {
-                        dumpBegin = std::atoi(s);
-                    }
-                    if (const char* s = std::getenv("GMX_GAMD_FORCE_DEBUG_COUNT"))
-                    {
-                        dumpCount = std::atoi(s);
-                    }
-                    if (const char* s = std::getenv("GMX_GAMD_FORCE_DEBUG_FILE"))
-                    {
-                        dumpFp = std::fopen(s, "w");
-                        if (dumpFp != nullptr)
-                        {
-                            std::fprintf(dumpFp, "# step atom fx fy fz |f|\n");
-                            std::fflush(dumpFp);
-                        }
-                    }
-                }
-
-                if (dumpFp != nullptr && MAIN(cr_) && step == dumpStep)
-                {
-                    auto forces = f.view().force();
-
-                    const int nAtoms = static_cast<int>(forces.size());
-                    const int begin  = std::max(0, std::min(dumpBegin, nAtoms));
-                    const int end =
-                            (dumpCount < 0 ? nAtoms
-                                           : std::max(begin, std::min(begin + dumpCount, nAtoms)));
-
-                    std::fprintf(dumpFp,
-                                 "# dump step %lld nAtoms %d begin %d end %d\n",
-                                 static_cast<long long>(step),
-                                 nAtoms,
-                                 begin,
-                                 end);
-
-                    for (int ii = begin; ii < end; ++ii)
-                    {
-                        const double fx = forces[ii][0];
-                        const double fy = forces[ii][1];
-                        const double fz = forces[ii][2];
-                        const double fn = std::sqrt(fx * fx + fy * fy + fz * fz);
-
-                        std::fprintf(dumpFp,
-                                     "%lld %d %.9e %.9e %.9e %.9e\n",
-                                     static_cast<long long>(step),
-                                     ii,
-                                     fx,
-                                     fy,
-                                     fz,
-                                     fn);
-                    }
-                    std::fflush(dumpFp);
-                }
-            }
-            /* ========================================================== */
-            /* ========================================================== */
-            /* ========================================================== */
-            /* ========================================================== */
+            // 最终总力诊断也由模块实例写出，避免跨模拟共享文件句柄和步号。
+            gaMDModule_->diagnostics().dumpFinalForces(step, f.view().force(), MAIN(cr_));
             // VV integrators do not need the following velocity half step
             // if it is the first step after starting from a checkpoint.
             // That is, the half step is needed on all other steps, and
@@ -1863,7 +1762,8 @@ void gmx::LegacySimulator::do_md()
                         && runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost
                         && !deferredPressureBoxes.empty())
                     {
-                        const auto previousHalfKinetic = integrator->previousHalfStepKineticEnergy();
+                        const auto previousHalfKinetic =
+                                gaMDModule_->gpuExecutor()->previousHalfStepKineticEnergy();
                         GMX_RELEASE_ASSERT(previousHalfKinetic.size() == ekind_->tcstat.size(),
                                            "GPU and host temperature-group counts must match");
                         for (std::size_t group = 0; group < previousHalfKinetic.size(); ++group)
@@ -2249,7 +2149,8 @@ void gmx::LegacySimulator::do_md()
                                 gaMDModule_->gpuExecutor()->takeEnergyHistory();
                         const auto deferredForceVirials = gaMDModule_->gpuExecutor()->takeForceVirialHistory(
                                 deferredEnergySamples.size());
-                        const auto deferredConstraintVirials = integrator->takeConstraintVirialHistory();
+                        const auto deferredConstraintVirials =
+                                gaMDModule_->gpuExecutor()->takeConstraintVirialHistory();
                         GMX_RELEASE_ASSERT(
                                 deferredForceVirials.size() == deferredConstraintVirials.size()
                                         && deferredForceVirials.size() == deferredPressureBoxes.size(),
@@ -2258,7 +2159,8 @@ void gmx::LegacySimulator::do_md()
                         std::vector<std::array<real, DIM * DIM>> pressureKineticTensors;
                         if (useDeviceGlobals)
                         {
-                            const auto deferredKineticHistory = integrator->takeKineticEnergyHistory();
+                            const auto deferredKineticHistory =
+                                    gaMDModule_->gpuExecutor()->takeKineticEnergyHistory();
                             GMX_RELEASE_ASSERT(
                                     deferredKineticHistory.numSamples()
                                                     == static_cast<int>(deferredForceVirials.size())

@@ -43,9 +43,7 @@
 #ifndef GMX_MDLIB_UPDATE_CONSTRAIN_GPU_H
 #define GMX_MDLIB_UPDATE_CONSTRAIN_GPU_H
 
-#include <array>
 #include <memory>
-#include <vector>
 
 #include "gromacs/gpu_utils/devicebuffer_datatype.h"
 #include "gromacs/math/matrix.h"
@@ -66,14 +64,7 @@ struct t_pbc;
 namespace gmx
 {
 
-struct GpuKineticEnergyHistory
-{
-    int                                      numGroups = 0;
-    std::vector<std::array<real, DIM * DIM>> totalTensors;
-    std::vector<real>                        groupKineticEnergies;
-
-    int numSamples() const { return totalTensors.size(); }
-};
+class GaMDGpuExecutor;
 
 class UpdateConstrainGpu
 {
@@ -89,6 +80,7 @@ public:
      * \param[in] mtop                Topology of the system: SETTLE gets the masses for O and H atoms
      *                                and target O-H and H-H distances from this object.
      * \param[in] numTempScaleValues  Number of temperature scaling groups. Zero for no temperature scaling.
+     * \param[in] gaMDGpuExecutor     Optional module-owned GaMD device executor.
      * \param[in] deviceContext       GPU device context.
      * \param[in] deviceStream        GPU stream to use.
      * \param[in] wcycle              The wallclock counter
@@ -96,7 +88,7 @@ public:
     UpdateConstrainGpu(const t_inputrec&    ir,
                        const gmx_mtop_t&    mtop,
                        int                  numTempScaleValues,
-                       bool                 useGpuResidentGaMD,
+                       GaMDGpuExecutor*     gaMDGpuExecutor,
                        const DeviceContext& deviceContext,
                        const DeviceStream&  deviceStream,
                        gmx_wallcycle*       wcycle);
@@ -136,15 +128,6 @@ public:
 
     /*! \brief Copy and scale the most recently computed constraint virial to the host. */
     void copyConstraintVirialToHost(real dt, tensor virial);
-
-    /*! \brief Copies and clears deferred device constraint-virial samples. */
-    std::vector<std::array<real, DIM * DIM>> takeConstraintVirialHistory();
-
-    /*! \brief Copies and clears deferred full-step kinetic tensors, grouped by temperature group. */
-    GpuKineticEnergyHistory takeKineticEnergyHistory();
-
-    /*! \brief Copies the most recent half-step kinetic tensors for host continuation. */
-    std::vector<std::array<real, DIM * DIM>> previousHalfStepKineticEnergy();
 
     /*! \brief Scale coordinates on the GPU for the pressure coupling.
      *

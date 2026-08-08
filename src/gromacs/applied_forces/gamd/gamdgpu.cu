@@ -73,6 +73,189 @@
 namespace gmx
 {
 
+// 这些核在 update stream 上记录约束维里和动能历史，避免 GaMD 状态散落在 update 模块中。
+__global__ void recordConstraintVirialKernel(const float* gm_lincsVirial,
+                                             const bool   haveLincs,
+                                             const float* gm_settleVirial,
+                                             const bool   haveSettles,
+                                             const float  scaleFactor,
+                                             int*         gm_historyCount,
+                                             const int    historyCapacity,
+                                             float*       gm_history)
+{
+    if (blockIdx.x == 0 && threadIdx.x == 0)
+    {
+        const int sampleIndex = atomicAdd(gm_historyCount, 1);
+        if (sampleIndex >= historyCapacity)
+        {
+            return;
+        }
+        float compact[6] = {};
+        for (int component = 0; component < 6; ++component)
+        {
+            if (haveLincs)
+            {
+                compact[component] += gm_lincsVirial[component];
+            }
+            if (haveSettles)
+            {
+                compact[component] += gm_settleVirial[component];
+            }
+            compact[component] *= scaleFactor;
+        }
+        float* sample         = gm_history + sampleIndex * DIM * DIM;
+        sample[XX * DIM + XX] = compact[0];
+        sample[XX * DIM + YY] = compact[1];
+        sample[XX * DIM + ZZ] = compact[2];
+        sample[YY * DIM + XX] = compact[1];
+        sample[YY * DIM + YY] = compact[3];
+        sample[YY * DIM + ZZ] = compact[4];
+        sample[ZZ * DIM + XX] = compact[2];
+        sample[ZZ * DIM + YY] = compact[4];
+        sample[ZZ * DIM + ZZ] = compact[5];
+    }
+}
+
+__global__ void accumulateHalfStepKineticKernel(const int             numAtoms,
+                                                const int             numGroups,
+                                                const float3*         gm_velocities,
+                                                const float*          gm_masses,
+                                                const unsigned short* gm_temperatureGroups,
+                                                float*                gm_halfKinetic)
+{
+    const int               atom          = blockIdx.x * blockDim.x + threadIdx.x;
+    const int               numComponents = 6 + numGroups;
+    extern __shared__ float sm_warpSums[];
+    float                   values[8] = {};
+    int                     group     = 0;
+    if (atom < numAtoms)
+    {
+        group                 = gm_temperatureGroups[atom];
+        const float3 v        = gm_velocities[atom];
+        const float  halfMass = 0.5F * gm_masses[atom];
+        values[0]             = halfMass * v.x * v.x;
+        values[1]             = halfMass * v.x * v.y;
+        values[2]             = halfMass * v.x * v.z;
+        values[3]             = halfMass * v.y * v.y;
+        values[4]             = halfMass * v.y * v.z;
+        values[5]             = halfMass * v.z * v.z;
+        values[6 + group]     = values[0] + values[3] + values[5];
+    }
+
+    const unsigned int activeMask = __activemask();
+    for (int offset = warpSize / 2; offset > 0; offset /= 2)
+    {
+        for (int component = 0; component < numComponents; ++component)
+        {
+            values[component] += __shfl_down_sync(activeMask, values[component], offset);
+        }
+    }
+    const int lane = threadIdx.x % warpSize;
+    const int warp = threadIdx.x / warpSize;
+    if (lane == 0)
+    {
+        for (int component = 0; component < numComponents; ++component)
+        {
+            sm_warpSums[warp * numComponents + component] = values[component];
+        }
+    }
+    __syncthreads();
+
+    const int numWarps = blockDim.x / warpSize;
+    if (threadIdx.x < numComponents)
+    {
+        float blockSum = 0.0F;
+        for (int warpIndex = 0; warpIndex < numWarps; ++warpIndex)
+        {
+            blockSum += sm_warpSums[warpIndex * numComponents + threadIdx.x];
+        }
+        atomicAdd(&gm_halfKinetic[threadIdx.x], blockSum);
+    }
+}
+
+__global__ void finalizeKineticHistoryKernel(const int    numGroups,
+                                             const bool   recordSample,
+                                             const float* gm_currentHalf,
+                                             float*       gm_previousHalf,
+                                             int*         gm_historyCount,
+                                             const int    historyCapacity,
+                                             float*       gm_history)
+{
+    if (blockIdx.x == 0 && threadIdx.x == 0)
+    {
+        int sampleIndex = -1;
+        if (recordSample)
+        {
+            sampleIndex = atomicAdd(gm_historyCount, 1);
+        }
+        const int   historyStride  = DIM * DIM + numGroups;
+        const float fullCompact[6] = { 0.5F * (gm_currentHalf[0] + gm_previousHalf[0]),
+                                       0.5F * (gm_currentHalf[1] + gm_previousHalf[1]),
+                                       0.5F * (gm_currentHalf[2] + gm_previousHalf[2]),
+                                       0.5F * (gm_currentHalf[3] + gm_previousHalf[3]),
+                                       0.5F * (gm_currentHalf[4] + gm_previousHalf[4]),
+                                       0.5F * (gm_currentHalf[5] + gm_previousHalf[5]) };
+        if (recordSample && sampleIndex < historyCapacity)
+        {
+            float* history         = gm_history + sampleIndex * historyStride;
+            history[XX * DIM + XX] = fullCompact[0];
+            history[XX * DIM + YY] = fullCompact[1];
+            history[XX * DIM + ZZ] = fullCompact[2];
+            history[YY * DIM + XX] = fullCompact[1];
+            history[YY * DIM + YY] = fullCompact[3];
+            history[YY * DIM + ZZ] = fullCompact[4];
+            history[ZZ * DIM + XX] = fullCompact[2];
+            history[ZZ * DIM + YY] = fullCompact[4];
+            history[ZZ * DIM + ZZ] = fullCompact[5];
+            for (int group = 0; group < numGroups; ++group)
+            {
+                history[DIM * DIM + group] =
+                        0.5F * (gm_currentHalf[6 + group] + gm_previousHalf[6 + group]);
+            }
+        }
+        for (int component = 0; component < 6 + numGroups; ++component)
+        {
+            gm_previousHalf[component] = gm_currentHalf[component];
+        }
+    }
+}
+
+__global__ void accumulateGroupHalfKineticTensorKernel(const int             numAtoms,
+                                                       const int             numGroups,
+                                                       const float3*         gm_velocities,
+                                                       const float*          gm_masses,
+                                                       const unsigned short* gm_temperatureGroups,
+                                                       float*                gm_groupTensors)
+{
+    extern __shared__ float sm_groupKinetic[];
+    for (int component = threadIdx.x; component < numGroups * DIM * DIM; component += blockDim.x)
+    {
+        sm_groupKinetic[component] = 0.0F;
+    }
+    __syncthreads();
+    const int atom = blockIdx.x * blockDim.x + threadIdx.x;
+    if (atom < numAtoms)
+    {
+        const int    group    = gm_temperatureGroups[atom];
+        const float3 v        = gm_velocities[atom];
+        const float  value[3] = { v.x, v.y, v.z };
+        const float  halfMass = 0.5F * gm_masses[atom];
+        for (int row = 0; row < DIM; ++row)
+        {
+            for (int column = 0; column < DIM; ++column)
+            {
+                atomicAdd(&sm_groupKinetic[group * DIM * DIM + row * DIM + column],
+                          halfMass * value[row] * value[column]);
+            }
+        }
+    }
+    __syncthreads();
+    for (int component = threadIdx.x; component < numGroups * DIM * DIM; component += blockDim.x)
+    {
+        atomicAdd(&gm_groupTensors[component], sm_groupKinetic[component]);
+    }
+}
+
 __global__ void mapNbnxnToStateForceKernel(const int     numAtoms,
                                            const int*    gm_nbnxnAtomOrder,
                                            const float3* gm_nbnxnForce,
@@ -296,6 +479,154 @@ __global__ void reduceGamdDihedralVirialKernel(const int     numAtoms,
 
 /*-------------------------------- End CUDA kernels-----------------------------*/
 
+void GaMDGpuExecutor::Impl::recordUpdateConstraintVirial(DeviceBuffer<float> lincsVirial,
+                                                         const bool          haveLincs,
+                                                         DeviceBuffer<float> settleVirial,
+                                                         const bool          haveSettles,
+                                                         const real          scaleFactor)
+{
+    GMX_RELEASE_ASSERT(updateStream_ != nullptr,
+                       "GaMD constraint-virial history requested before initialization");
+
+    KernelLaunchConfig config;
+    config.blockSize[0]     = 1;
+    config.blockSize[1]     = 1;
+    config.blockSize[2]     = 1;
+    config.gridSize[0]      = 1;
+    config.gridSize[1]      = 1;
+    config.gridSize[2]      = 1;
+    config.sharedMemorySize = 0;
+
+    auto       kernel     = recordConstraintVirialKernel;
+    const auto kernelArgs = prepareGpuKernelArguments(kernel,
+                                                      config,
+                                                      &lincsVirial,
+                                                      &haveLincs,
+                                                      &settleVirial,
+                                                      &haveSettles,
+                                                      &scaleFactor,
+                                                      &d_updateConstraintVirialHistoryCount_,
+                                                      &c_historyCapacity_,
+                                                      &d_updateConstraintVirialHistory_);
+    launchGpuKernel(kernel, config, *updateStream_, nullptr, "Record deferred constraint virial", kernelArgs);
+}
+
+void GaMDGpuExecutor::Impl::recordUpdateKineticEnergy(const bool recordSample)
+{
+    GMX_RELEASE_ASSERT(updateStream_ != nullptr && updateVelocities_ != nullptr
+                               && d_updateMasses_ != nullptr && d_updateTemperatureGroups_ != nullptr,
+                       "GaMD kinetic history requires bound update buffers");
+    if (updateNumAtoms_ == 0)
+    {
+        return;
+    }
+
+    clearDeviceBufferAsync(&d_updateCurrentHalfKinetic_, 0, 6 + updateNumTemperatureGroups_, *updateStream_);
+    constexpr int      c_kineticThreadsPerBlock = 256;
+    KernelLaunchConfig kineticConfig;
+    kineticConfig.blockSize[0] = c_kineticThreadsPerBlock;
+    kineticConfig.blockSize[1] = 1;
+    kineticConfig.blockSize[2] = 1;
+    kineticConfig.gridSize[0] = (updateNumAtoms_ + c_kineticThreadsPerBlock - 1) / c_kineticThreadsPerBlock;
+    kineticConfig.gridSize[1] = 1;
+    kineticConfig.gridSize[2] = 1;
+    kineticConfig.sharedMemorySize =
+            (c_kineticThreadsPerBlock / 32) * (6 + updateNumTemperatureGroups_) * sizeof(float);
+
+    auto       kineticKernel = accumulateHalfStepKineticKernel;
+    const auto kineticArgs   = prepareGpuKernelArguments(kineticKernel,
+                                                       kineticConfig,
+                                                       &updateNumAtoms_,
+                                                       &updateNumTemperatureGroups_,
+                                                       &updateVelocities_,
+                                                       &d_updateMasses_,
+                                                       &d_updateTemperatureGroups_,
+                                                       &d_updateCurrentHalfKinetic_);
+    launchGpuKernel(kineticKernel,
+                    kineticConfig,
+                    *updateStream_,
+                    nullptr,
+                    "Accumulate GaMD GPU kinetic energy",
+                    kineticArgs);
+
+    KernelLaunchConfig finalizeConfig;
+    finalizeConfig.blockSize[0]     = 1;
+    finalizeConfig.blockSize[1]     = 1;
+    finalizeConfig.blockSize[2]     = 1;
+    finalizeConfig.gridSize[0]      = 1;
+    finalizeConfig.gridSize[1]      = 1;
+    finalizeConfig.gridSize[2]      = 1;
+    finalizeConfig.sharedMemorySize = 0;
+
+    auto       finalizeKernel = finalizeKineticHistoryKernel;
+    const auto finalizeArgs   = prepareGpuKernelArguments(finalizeKernel,
+                                                        finalizeConfig,
+                                                        &updateNumTemperatureGroups_,
+                                                        &recordSample,
+                                                        &d_updateCurrentHalfKinetic_,
+                                                        &d_updatePreviousHalfKinetic_,
+                                                        &d_updateKineticHistoryCount_,
+                                                        &c_historyCapacity_,
+                                                        &d_updateKineticHistory_);
+    launchGpuKernel(finalizeKernel,
+                    finalizeConfig,
+                    *updateStream_,
+                    nullptr,
+                    "Finalize GaMD GPU kinetic-energy history",
+                    finalizeArgs);
+}
+
+std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::Impl::takePreviousHalfStepKineticEnergy()
+{
+    GMX_RELEASE_ASSERT(updateStream_ != nullptr && updateVelocities_ != nullptr
+                               && d_updateMasses_ != nullptr && d_updateTemperatureGroups_ != nullptr,
+                       "GaMD previous half-step kinetic state requires bound update buffers");
+    clearDeviceBufferAsync(
+            &d_updateGroupHalfKineticTensor_, 0, updateNumTemperatureGroups_ * DIM * DIM, *updateStream_);
+
+    constexpr int      c_kineticThreadsPerBlock = 256;
+    KernelLaunchConfig config;
+    config.blockSize[0] = c_kineticThreadsPerBlock;
+    config.blockSize[1] = 1;
+    config.blockSize[2] = 1;
+    config.gridSize[0] = (updateNumAtoms_ + c_kineticThreadsPerBlock - 1) / c_kineticThreadsPerBlock;
+    config.gridSize[1]      = 1;
+    config.gridSize[2]      = 1;
+    config.sharedMemorySize = updateNumTemperatureGroups_ * DIM * DIM * sizeof(float);
+
+    auto       kernel     = accumulateGroupHalfKineticTensorKernel;
+    const auto kernelArgs = prepareGpuKernelArguments(kernel,
+                                                      config,
+                                                      &updateNumAtoms_,
+                                                      &updateNumTemperatureGroups_,
+                                                      &updateVelocities_,
+                                                      &d_updateMasses_,
+                                                      &d_updateTemperatureGroups_,
+                                                      &d_updateGroupHalfKineticTensor_);
+    launchGpuKernel(kernel,
+                    config,
+                    *updateStream_,
+                    nullptr,
+                    "Stage GaMD temperature-group half-step kinetic energy",
+                    kernelArgs);
+    copyFromDeviceBuffer(h_updatePreviousHalfKinetic_.data(),
+                         &d_updateGroupHalfKineticTensor_,
+                         0,
+                         updateNumTemperatureGroups_ * DIM * DIM,
+                         *updateStream_,
+                         GpuApiCallBehavior::Sync,
+                         nullptr);
+
+    std::vector<std::array<real, DIM * DIM>> tensors(updateNumTemperatureGroups_);
+    for (int group = 0; group < updateNumTemperatureGroups_; ++group)
+    {
+        std::copy_n(h_updatePreviousHalfKinetic_.data() + group * DIM * DIM,
+                    DIM * DIM,
+                    tensors[group].begin());
+    }
+    return tensors;
+}
+
 void GaMDGpuExecutor::Impl::finishGamdDihedralBuffers()
 {
     GMX_ASSERT(gamdDihedralBufferEnabled_, "GaMD dihedral buffers requested while disabled");
@@ -404,7 +735,7 @@ void GaMDGpuExecutor::Impl::launchGamdEnergyShadowReduction(int    igamd,
                                                                  &listedEnergies_,
                                                                  &d_gamdEnergyShadow_,
                                                                  &d_gamdEnergyHistoryCount_,
-                                                                 &c_gamdEnergyHistoryCapacity_,
+                                                                 &c_historyCapacity_,
                                                                  &d_gamdEnergyHistory_);
         launchGpuKernel(
                 historyKernel, config, deviceStream_, nullptr, "Record deferred GaMD energy sample", historyKernelArgs);
@@ -442,7 +773,7 @@ std::vector<std::array<real, F_NRE>> GaMDGpuExecutor::Impl::takeGamdEnergyHistor
                          GpuApiCallBehavior::Sync,
                          nullptr);
     const int sampleCount = h_gamdEnergyHistoryCount_[0];
-    GMX_RELEASE_ASSERT(sampleCount <= c_gamdEnergyHistoryCapacity_,
+    GMX_RELEASE_ASSERT(sampleCount <= c_historyCapacity_,
                        "Deferred GaMD energy history exceeded its fixed capacity");
     if (sampleCount == 0)
     {
@@ -488,7 +819,7 @@ void GaMDGpuExecutor::Impl::recordGamdForceVirialSample()
                                                       &d_gamdPmeEnergy_,
                                                       &d_gamdEnergyShadow_,
                                                       &d_gamdEnergyHistoryCount_,
-                                                      &c_gamdEnergyHistoryCapacity_,
+                                                      &c_historyCapacity_,
                                                       &d_gamdForceVirialHistory_);
     launchGpuKernel(kernel, config, deviceStream_, nullptr, "Record deferred GaMD force virial", kernelArgs);
 }
@@ -497,7 +828,7 @@ std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::Impl::takeGamdForceVir
 {
     GMX_RELEASE_ASSERT(gamdEnergyHistoryEnabled_,
                        "Deferred GaMD force-virial history requested while disabled");
-    GMX_RELEASE_ASSERT(numSamples >= 0 && numSamples <= c_gamdEnergyHistoryCapacity_,
+    GMX_RELEASE_ASSERT(numSamples >= 0 && numSamples <= c_historyCapacity_,
                        "Deferred GaMD force-virial sample count is out of range");
     if (numSamples == 0)
     {

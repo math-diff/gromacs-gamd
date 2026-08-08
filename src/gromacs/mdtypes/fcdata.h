@@ -224,6 +224,11 @@ struct bondedtable_t
     std::vector<real> data;  /* the actual table data, per point there are 4 numbers */
 };
 
+namespace gmx
+{
+class GaMDDiagnostics;
+}
+
 /*
  * Data struct used in the force calculation routines
  * for storing the tables for bonded interactions and
@@ -244,6 +249,8 @@ struct t_fcdata
     // GaMD listed-force bridge. The regular force evaluation is raw (1.0);
     // dedicated GaMD diagnostics can select another scale without global state.
     double gaMDDihedralForceScale = 1.0;
+    // 该指针不拥有对象，只把 bonded 热路径接到当前模拟的 GaMD 诊断实例。
+    gmx::GaMDDiagnostics* gaMDDiagnostics = nullptr;
 };
 
 #endif

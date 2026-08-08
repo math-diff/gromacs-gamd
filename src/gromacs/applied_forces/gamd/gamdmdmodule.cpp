@@ -14,13 +14,17 @@
 
 #include "gromacs/utility/gmxassert.h"
 
+#include "gamddiagnostics.h"
 #include "gamdgpu.h"
 #include "gamdruntime.h"
 
 namespace gmx
 {
 
-GaMDMDModule::GaMDMDModule() : runtime_(std::make_unique<GaMDRuntime>()) {}
+GaMDMDModule::GaMDMDModule() :
+    runtime_(std::make_unique<GaMDRuntime>()), diagnostics_(std::make_unique<GaMDDiagnostics>())
+{
+}
 
 GaMDMDModule::~GaMDMDModule() = default;
 
@@ -81,6 +85,16 @@ const GaMDGpuExecutor* GaMDMDModule::gpuExecutor() const
     return gpuExecutor_.get();
 }
 
+GaMDDiagnostics& GaMDMDModule::diagnostics()
+{
+    return *diagnostics_;
+}
+
+const GaMDDiagnostics& GaMDMDModule::diagnostics() const
+{
+    return *diagnostics_;
+}
+
 void GaMDMDModule::finalizeCurrentStep(int64_t        step,
                                        int            rank,
                                        double         totalPotentialEnergy,
@@ -132,7 +146,8 @@ void GaMDMDModule::warnIfRunTooShort(int64_t initStep, int64_t numSteps, int ran
 
 void GaMDMDModule::resetStateForTesting()
 {
-    runtime_ = std::make_unique<GaMDRuntime>();
+    runtime_     = std::make_unique<GaMDRuntime>();
+    diagnostics_ = std::make_unique<GaMDDiagnostics>();
 }
 
 std::unique_ptr<GaMDMDModule> createGaMDModule()
