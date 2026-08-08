@@ -45,9 +45,9 @@
 
 #include "gmxpre.h"
 
-#include <cstdlib>
 #include <cstring>
 
+#include "gromacs/applied_forces/gamd/gamdgpu.h"
 #include "gromacs/gpu_utils/device_context.h"
 #include "gromacs/gpu_utils/device_stream.h"
 #include "gromacs/gpu_utils/devicebuffer.h"
@@ -157,11 +157,11 @@ static int chooseSubGroupSizeForDevice(const DeviceInformation& deviceInfo)
 ListedForcesGpu::Impl::Impl(const gmx_ffparams_t& ffparams,
                             const float           electrostaticsScaleFactor,
                             const int             numEnergyGroupsForListedForces,
-                            const bool            useGpuResidentGaMD,
+                            GaMDGpuExecutor*      gaMDGpuExecutor,
                             const DeviceContext&  deviceContext,
                             const DeviceStream&   deviceStream,
                             gmx_wallcycle*        wcycle) :
-    deviceContext_(deviceContext), deviceStream_(deviceStream)
+    gaMDGpuExecutor_(gaMDGpuExecutor), deviceContext_(deviceContext), deviceStream_(deviceStream)
 {
     GMX_RELEASE_ASSERT(numEnergyGroupsForListedForces == 1,
                        "Only a single energy group is supported with listed forces on GPU");
@@ -176,49 +176,6 @@ ListedForcesGpu::Impl::Impl(const gmx_ffparams_t& ffparams,
 
     wcycle_ = wcycle;
 
-#if GMX_GPU_CUDA
-    gamdDihedralShadowEnabled_          = (std::getenv("GMX_GAMD_GPU_DIH_SHADOW") != nullptr);
-    gamdEnergyShadowDiagnosticsEnabled_ = (std::getenv("GMX_GAMD_GPU_ENERGY_SHADOW") != nullptr);
-    gamdForceCorrectionEnabled_ = useGpuResidentGaMD;
-    gamdScaleFromDeviceEnabled_ = useGpuResidentGaMD;
-    gamdEnergyHistoryEnabled_   = useGpuResidentGaMD;
-    gamdEnergyShadowEnabled_   = gamdEnergyShadowDiagnosticsEnabled_ || gamdScaleFromDeviceEnabled_;
-    gamdDihedralBufferEnabled_ = gamdDihedralShadowEnabled_ || gamdForceCorrectionEnabled_;
-    if (gamdForceCorrectionEnabled_)
-    {
-        gamdForcesReadyEvent_ =
-                (gamdDihedralShadowEnabled_ ? std::make_unique<GpuEventSynchronizer>(2, 2)
-                                            : std::make_unique<GpuEventSynchronizer>());
-    }
-    if (gamdDihedralBufferEnabled_)
-    {
-        allocateDeviceBuffer(&d_gamdDihedralShiftForces_, c_numShiftVectors, deviceContext_);
-        allocateDeviceBuffer(&d_gamdDihedralVirial_, DIM * DIM, deviceContext_);
-        allocateDeviceBuffer(&d_gamdShortRangeVirial_, DIM * DIM, deviceContext_);
-    }
-    if (gamdEnergyShadowEnabled_)
-    {
-        // Layout: reciprocal energy followed by the full symmetric virial tensor.
-        allocateDeviceBuffer(&d_gamdPmeEnergy_, 1 + DIM * DIM, deviceContext_);
-        allocateDeviceBuffer(&d_gamdEnergyShadow_, 6, deviceContext_);
-        if (gamdEnergyHistoryEnabled_)
-        {
-            allocateDeviceBuffer(&d_gamdEnergyHistory_, c_gamdEnergyHistoryCapacity_ * F_NRE, deviceContext_);
-            allocateDeviceBuffer(
-                    &d_gamdForceVirialHistory_, c_gamdEnergyHistoryCapacity_ * DIM * DIM, deviceContext_);
-            allocateDeviceBuffer(&d_gamdEnergyHistoryCount_, 1, deviceContext_);
-            clearDeviceBufferAsync(&d_gamdEnergyHistoryCount_, 0, 1, deviceStream_);
-            h_gamdEnergyHistory_.resize(c_gamdEnergyHistoryCapacity_ * F_NRE);
-            h_gamdForceVirialHistory_.resize(c_gamdEnergyHistoryCapacity_ * DIM * DIM);
-            h_gamdEnergyHistoryCount_.resize(1);
-        }
-        if (gamdEnergyShadowDiagnosticsEnabled_)
-        {
-            h_gamdEnergyShadow_.resize(6);
-        }
-        gamdPmeEnergyReadyEvent_ = std::make_unique<GpuEventSynchronizer>();
-    }
-#endif
 
     allocateDeviceBuffer(&d_forceParams_, ffparams.numTypes(), deviceContext_);
     // This could be an async transfer (if the source is pinned), so
@@ -298,54 +255,6 @@ ListedForcesGpu::Impl::~Impl()
     if (d_cmapCoefficients_ != nullptr)
     {
         freeDeviceBuffer(&d_cmapCoefficients_);
-    }
-    if (d_gamdDihedralForcesNbnxn_ != nullptr)
-    {
-        freeDeviceBuffer(&d_gamdDihedralForcesNbnxn_);
-    }
-    if (d_gamdDihedralForcesState_ != nullptr)
-    {
-        freeDeviceBuffer(&d_gamdDihedralForcesState_);
-    }
-    if (d_gamdDihedralShiftForces_ != nullptr)
-    {
-        freeDeviceBuffer(&d_gamdDihedralShiftForces_);
-    }
-    if (d_gamdDihedralVirial_ != nullptr)
-    {
-        freeDeviceBuffer(&d_gamdDihedralVirial_);
-    }
-    if (d_gamdShortRangeVirial_ != nullptr)
-    {
-        freeDeviceBuffer(&d_gamdShortRangeVirial_);
-    }
-    if (d_gamdCorrectedForcesState_ != nullptr)
-    {
-        freeDeviceBuffer(&d_gamdCorrectedForcesState_);
-    }
-    if (d_nbnxnAtomOrder_ != nullptr)
-    {
-        freeDeviceBuffer(&d_nbnxnAtomOrder_);
-    }
-    if (d_gamdEnergyShadow_ != nullptr)
-    {
-        freeDeviceBuffer(&d_gamdEnergyShadow_);
-    }
-    if (d_gamdPmeEnergy_ != nullptr)
-    {
-        freeDeviceBuffer(&d_gamdPmeEnergy_);
-    }
-    if (d_gamdEnergyHistory_ != nullptr)
-    {
-        freeDeviceBuffer(&d_gamdEnergyHistory_);
-    }
-    if (d_gamdForceVirialHistory_ != nullptr)
-    {
-        freeDeviceBuffer(&d_gamdForceVirialHistory_);
-    }
-    if (d_gamdEnergyHistoryCount_ != nullptr)
-    {
-        freeDeviceBuffer(&d_gamdEnergyHistoryCount_);
     }
 }
 
@@ -437,55 +346,6 @@ void ListedForcesGpu::Impl::updateInteractionListsAndDeviceBuffers(ArrayRef<cons
 {
     wallcycle_sub_start(wcycle_, WallCycleSubCounter::GpuBondedListUpdate);
 
-    if (gamdDihedralBufferEnabled_)
-    {
-        if (!idef.il[F_FOURDIHS].empty())
-        {
-            gmx_fatal(FARGS,
-                      "The GaMD GPU force path does not support FOURDIHS. Use -update cpu or "
-                      "add CUDA FOURDIHS support before using this topology.");
-        }
-        for (const int ftype : { F_PDIHS, F_RBDIHS, F_CMAP })
-        {
-            if (!idef.il[ftype].empty() && fTypeHasPerturbedEntries(idef, ftype))
-            {
-                gmx_fatal(FARGS,
-                          "The GaMD GPU force path does not support perturbed %s interactions. "
-                          "Use -update cpu for this topology.",
-                          interaction_function[ftype].longname);
-            }
-        }
-        GMX_RELEASE_ASSERT(!nbnxnAtomOrder.empty(),
-                           "GaMD GPU dihedral forces require an atom-order mapping");
-        const int nbnxnForceSize = *std::max_element(nbnxnAtomOrder.begin(), nbnxnAtomOrder.end()) + 1;
-        reallocateDeviceBuffer(&d_gamdDihedralForcesNbnxn_,
-                               nbnxnForceSize,
-                               &gamdNbnxnForceSize_,
-                               &gamdNbnxnForceCapacity_,
-                               deviceContext_);
-        reallocateDeviceBuffer(&d_gamdDihedralForcesState_,
-                               nbnxnAtomOrder.ssize(),
-                               &gamdStateForceSize_,
-                               &gamdStateForceCapacity_,
-                               deviceContext_);
-        reallocateDeviceBuffer(&d_gamdCorrectedForcesState_,
-                               nbnxnAtomOrder.ssize(),
-                               &gamdCorrectedForceSize_,
-                               &gamdCorrectedForceCapacity_,
-                               deviceContext_);
-        reallocateDeviceBuffer(&d_nbnxnAtomOrder_,
-                               nbnxnAtomOrder.ssize(),
-                               &nbnxnAtomOrderSize_,
-                               &nbnxnAtomOrderCapacity_,
-                               deviceContext_);
-        copyToDeviceBuffer(&d_nbnxnAtomOrder_,
-                           nbnxnAtomOrder.data(),
-                           0,
-                           nbnxnAtomOrder.ssize(),
-                           deviceStream_,
-                           GpuApiCallBehavior::Async,
-                           nullptr);
-    }
 
     bool haveGpuInteractions = false;
     int  fTypesCounter       = 0;
@@ -559,11 +419,15 @@ void ListedForcesGpu::Impl::updateInteractionListsAndDeviceBuffers(ArrayRef<cons
     int fTypeRangeEnd               = kernelParams_.fTypeRangeEnd[numFTypesOnGpu - 1];
     kernelLaunchConfig_.gridSize[0] = (fTypeRangeEnd + c_threadsPerBlock) / c_threadsPerBlock;
 
-    d_xq_           = d_xqPtr;
-    d_f_            = d_fPtr;
-    d_fShift_       = d_fShiftPtr;
-    d_nbLJEnergy_   = d_nbLJEnergyPtr;
-    d_nbElecEnergy_ = d_nbElecEnergyPtr;
+    d_xq_     = d_xqPtr;
+    d_f_      = d_fPtr;
+    d_fShift_ = d_fShiftPtr;
+
+    if (gaMDGpuExecutor_ != nullptr)
+    {
+        gaMDGpuExecutor_->bindListedForceBuffers(
+                nbnxnAtomOrder, idef, d_xqPtr, d_fPtr, d_fShiftPtr, d_nbLJEnergyPtr, d_nbElecEnergyPtr, d_vTot_);
+    }
 
     kernelBuffers_.d_forceParams      = d_forceParams_;
     kernelBuffers_.d_vTot             = d_vTot_;
@@ -580,6 +444,10 @@ void ListedForcesGpu::Impl::setPbc(PbcType pbcType, const matrix box, bool canMo
     PbcAiuc pbcAiuc;
     setPbcAiuc(canMoleculeSpanPbc ? numPbcDimensions(pbcType) : 0, box, &pbcAiuc);
     kernelParams_.pbcAiuc = pbcAiuc;
+    if (gaMDGpuExecutor_ != nullptr)
+    {
+        gaMDGpuExecutor_->setPbc(pbcAiuc);
+    }
 }
 
 bool ListedForcesGpu::Impl::haveInteractions() const
@@ -632,127 +500,20 @@ void ListedForcesGpu::Impl::clearEnergies()
     wallcycle_stop(wcycle_, WallCycleCounter::LaunchGpuPp);
 }
 
-bool ListedForcesGpu::Impl::gamdDihedralShadowEnabled() const
-{
-    return gamdDihedralShadowEnabled_;
-}
-
-bool ListedForcesGpu::Impl::gamdDihedralBufferEnabled() const
-{
-    return gamdDihedralBufferEnabled_;
-}
-
-bool ListedForcesGpu::Impl::gamdEnergyShadowEnabled() const
-{
-    return gamdEnergyShadowEnabled_;
-}
-
-bool ListedForcesGpu::Impl::gamdEnergyShadowDiagnosticsEnabled() const
-{
-    return gamdEnergyShadowDiagnosticsEnabled_;
-}
-
-bool ListedForcesGpu::Impl::gamdScaleFromDeviceEnabled() const
-{
-    return gamdScaleFromDeviceEnabled_;
-}
-
-void ListedForcesGpu::Impl::copyGamdDihedralShadowForces(ArrayRef<RVec> forces)
-{
-    GMX_RELEASE_ASSERT(gamdDihedralShadowEnabled_,
-                       "GaMD GPU dihedral shadow-force copy requested while disabled");
-    GMX_RELEASE_ASSERT(forces.ssize() == gamdStateForceSize_,
-                       "GaMD GPU dihedral shadow-force host buffer has the wrong size");
-    copyFromDeviceBuffer(reinterpret_cast<Float3*>(forces.data()),
-                         &d_gamdDihedralForcesState_,
-                         0,
-                         gamdStateForceSize_,
-                         deviceStream_,
-                         GpuApiCallBehavior::Sync,
-                         nullptr);
-}
-
-void ListedForcesGpu::Impl::copyGamdDihedralVirial(std::array<real, DIM * DIM>* virial)
-{
-    GMX_RELEASE_ASSERT(gamdDihedralBufferEnabled_,
-                       "GaMD GPU dihedral virial copy requested while disabled");
-    GMX_RELEASE_ASSERT(virial != nullptr, "GaMD GPU dihedral virial requires host storage");
-    copyFromDeviceBuffer(
-            virial->data(), &d_gamdDihedralVirial_, 0, virial->size(), deviceStream_, GpuApiCallBehavior::Sync, nullptr);
-}
-
-void ListedForcesGpu::Impl::copyGamdShortRangeVirial(std::array<real, DIM * DIM>* virial)
-{
-    GMX_RELEASE_ASSERT(gamdForceCorrectionEnabled_,
-                       "GaMD GPU short-range virial copy requested while disabled");
-    GMX_RELEASE_ASSERT(virial != nullptr, "GaMD GPU short-range virial requires host storage");
-    copyFromDeviceBuffer(virial->data(),
-                         &d_gamdShortRangeVirial_,
-                         0,
-                         virial->size(),
-                         deviceStream_,
-                         GpuApiCallBehavior::Sync,
-                         nullptr);
-}
-
-void ListedForcesGpu::Impl::applyGamdForceCorrectionShadow(ArrayRef<const RVec> rawForces,
-                                                           real                 totalScale,
-                                                           real           dihedralCorrectionScale,
-                                                           ArrayRef<RVec> correctedForces)
-{
-    GMX_RELEASE_ASSERT(gamdDihedralShadowEnabled_,
-                       "GaMD GPU force-correction shadow requested while disabled");
-    GMX_RELEASE_ASSERT(rawForces.ssize() == gamdStateForceSize_ && correctedForces.ssize() == gamdStateForceSize_,
-                       "GaMD GPU force-correction shadow buffers have the wrong size");
-    copyToDeviceBuffer(&d_gamdCorrectedForcesState_,
-                       reinterpret_cast<const Float3*>(rawForces.data()),
-                       0,
-                       gamdStateForceSize_,
-                       deviceStream_,
-                       GpuApiCallBehavior::Async,
-                       nullptr);
-    launchGamdForceCorrectionShadowKernel(totalScale, dihedralCorrectionScale);
-    copyFromDeviceBuffer(reinterpret_cast<Float3*>(correctedForces.data()),
-                         &d_gamdCorrectedForcesState_,
-                         0,
-                         gamdStateForceSize_,
-                         deviceStream_,
-                         GpuApiCallBehavior::Sync,
-                         nullptr);
-}
-
-void ListedForcesGpu::Impl::applyGamdForceCorrection(DeviceBuffer<RVec>    forces,
-                                                     real                  totalScale,
-                                                     real                  dihedralCorrectionScale,
-                                                     GpuEventSynchronizer* rawForcesReady)
-{
-    GMX_RELEASE_ASSERT(gamdForceCorrectionEnabled_,
-                       "GaMD GPU force correction requested while disabled");
-    GMX_RELEASE_ASSERT(forces != nullptr && rawForcesReady != nullptr,
-                       "GaMD GPU force correction requires forces and a dependency event");
-    launchGamdForceCorrectionKernel(forces, totalScale, dihedralCorrectionScale, rawForcesReady);
-}
-
-GpuEventSynchronizer* ListedForcesGpu::Impl::gamdForcesReadyEvent()
-{
-    GMX_RELEASE_ASSERT(gamdForcesReadyEvent_ != nullptr,
-                       "GaMD corrected-force event requested while GPU correction is disabled");
-    return gamdForcesReadyEvent_.get();
-}
 
 // ---- ListedForcesGpu
 
 ListedForcesGpu::ListedForcesGpu(const gmx_ffparams_t& ffparams,
                                  const float           electrostaticsScaleFactor,
                                  const int             numEnergyGroupsForListedForces,
-                                 const bool            useGpuResidentGaMD,
+                                 GaMDGpuExecutor*      gaMDGpuExecutor,
                                  const DeviceContext&  deviceContext,
                                  const DeviceStream&   deviceStream,
                                  gmx_wallcycle*        wcycle) :
     impl_(new Impl(ffparams,
                    electrostaticsScaleFactor,
                    numEnergyGroupsForListedForces,
-                   useGpuResidentGaMD,
+                   gaMDGpuExecutor,
                    deviceContext,
                    deviceStream,
                    wcycle))
@@ -813,111 +574,5 @@ void ListedForcesGpu::clearEnergies()
     impl_->clearEnergies();
 }
 
-bool ListedForcesGpu::gamdDihedralShadowEnabled() const
-{
-    return impl_->gamdDihedralShadowEnabled();
-}
-
-bool ListedForcesGpu::gamdDihedralBufferEnabled() const
-{
-    return impl_->gamdDihedralBufferEnabled();
-}
-
-bool ListedForcesGpu::gamdEnergyShadowEnabled() const
-{
-    return impl_->gamdEnergyShadowEnabled();
-}
-
-bool ListedForcesGpu::gamdEnergyShadowDiagnosticsEnabled() const
-{
-    return impl_->gamdEnergyShadowDiagnosticsEnabled();
-}
-
-bool ListedForcesGpu::gamdScaleFromDeviceEnabled() const
-{
-    return impl_->gamdScaleFromDeviceEnabled();
-}
-
-DeviceBuffer<float> ListedForcesGpu::gamdPmeEnergyStagingBuffer()
-{
-    return impl_->gamdPmeEnergyStagingBuffer();
-}
-
-GpuEventSynchronizer* ListedForcesGpu::gamdPmeEnergyReadyEvent()
-{
-    return impl_->gamdPmeEnergyReadyEvent();
-}
-
-void ListedForcesGpu::launchGamdEnergyShadowReduction(int    igamd,
-                                                      int    stage,
-                                                      double thresholdP,
-                                                      double kP,
-                                                      double thresholdD,
-                                                      double kD,
-                                                      bool   recordEnergySample)
-{
-    impl_->launchGamdEnergyShadowReduction(igamd, stage, thresholdP, kP, thresholdD, kD, recordEnergySample);
-}
-
-std::array<double, 6> ListedForcesGpu::gamdEnergyShadowValues()
-{
-    return impl_->gamdEnergyShadowValues();
-}
-
-std::vector<std::array<real, F_NRE>> ListedForcesGpu::takeGamdEnergyHistory()
-{
-    return impl_->takeGamdEnergyHistory();
-}
-
-void ListedForcesGpu::recordGamdForceVirialSample()
-{
-    impl_->recordGamdForceVirialSample();
-}
-
-std::vector<std::array<real, DIM * DIM>> ListedForcesGpu::takeGamdForceVirialHistory(const int numSamples)
-{
-    return impl_->takeGamdForceVirialHistory(numSamples);
-}
-
-void ListedForcesGpu::copyGamdDihedralShadowForces(ArrayRef<RVec> forces)
-{
-    impl_->copyGamdDihedralShadowForces(forces);
-}
-
-void ListedForcesGpu::copyGamdDihedralVirial(std::array<real, DIM * DIM>* virial)
-{
-    impl_->copyGamdDihedralVirial(virial);
-}
-
-void ListedForcesGpu::launchGamdShortRangeVirialReduction()
-{
-    impl_->launchGamdShortRangeVirialReduction();
-}
-
-void ListedForcesGpu::copyGamdShortRangeVirial(std::array<real, DIM * DIM>* virial)
-{
-    impl_->copyGamdShortRangeVirial(virial);
-}
-
-void ListedForcesGpu::applyGamdForceCorrectionShadow(ArrayRef<const RVec> rawForces,
-                                                     real                 totalScale,
-                                                     real                 dihedralCorrectionScale,
-                                                     ArrayRef<RVec>       correctedForces)
-{
-    impl_->applyGamdForceCorrectionShadow(rawForces, totalScale, dihedralCorrectionScale, correctedForces);
-}
-
-void ListedForcesGpu::applyGamdForceCorrection(DeviceBuffer<RVec>    forces,
-                                               real                  totalScale,
-                                               real                  dihedralCorrectionScale,
-                                               GpuEventSynchronizer* rawForcesReady)
-{
-    impl_->applyGamdForceCorrection(forces, totalScale, dihedralCorrectionScale, rawForcesReady);
-}
-
-GpuEventSynchronizer* ListedForcesGpu::gamdForcesReadyEvent()
-{
-    return impl_->gamdForcesReadyEvent();
-}
 
 } // namespace gmx

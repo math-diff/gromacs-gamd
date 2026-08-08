@@ -57,6 +57,7 @@
 
 #include "gromacs/applied_forces/awh/awh.h"
 #include "gromacs/applied_forces/awh/read_params.h"
+#include "gromacs/applied_forces/gamd/gamdgpu.h"
 #include "gromacs/applied_forces/gamd/gamdmdmodule.h"
 #include "gromacs/commandline/filenm.h"
 #include "gromacs/compat/pointers.h"
@@ -1248,13 +1249,14 @@ void gmx::LegacySimulator::do_md()
         if (useCurrentStepGaMD && useResidentEnergy)
         {
             if (simulationWork.gamdExecutionMode != GaMDExecutionMode::GpuResident
-                || fr_->listedForcesGpu == nullptr || !fr_->listedForcesGpu->gamdScaleFromDeviceEnabled())
+                || fr_->listedForcesGpu == nullptr
+                || !gaMDModule_->gpuExecutor()->scaleFromDeviceEnabled())
             {
                 gmx_fatal(FARGS, "GPU-resident GaMD was selected but its GPU state is unavailable.");
             }
 
-            const bool diagnosticHostState = fr_->listedForcesGpu->gamdEnergyShadowDiagnosticsEnabled()
-                                             || fr_->listedForcesGpu->gamdDihedralShadowEnabled();
+            const bool diagnosticHostState = gaMDModule_->gpuExecutor()->energyDiagnosticsEnabled()
+                                             || gaMDModule_->gpuExecutor()->dihedralShadowEnabled();
             const bool needHostEnergy = needEnergyAndVirial || diagnosticHostState
                                         || gaMDModule_->requiresHostEnergyThisStep(step);
             runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost = needHostEnergy;
@@ -1853,7 +1855,7 @@ void gmx::LegacySimulator::do_md()
 
                     GpuEventSynchronizer* forcesReadyForUpdate =
                             (simulationWork.gamdExecutionMode == gmx::GaMDExecutionMode::GpuResident
-                                     ? fr_->listedForcesGpu->gamdForcesReadyEvent()
+                                     ? gaMDModule_->gpuExecutor()->forcesReadyEvent()
                                      : stateGpu->getLocalForcesReadyOnDeviceEvent(
                                                runScheduleWork_->stepWork, runScheduleWork_->simulationWork));
 
@@ -2243,8 +2245,9 @@ void gmx::LegacySimulator::do_md()
                 {
                     if (runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost)
                     {
-                        const auto deferredEnergySamples = fr_->listedForcesGpu->takeGamdEnergyHistory();
-                        const auto deferredForceVirials = fr_->listedForcesGpu->takeGamdForceVirialHistory(
+                        const auto deferredEnergySamples =
+                                gaMDModule_->gpuExecutor()->takeEnergyHistory();
+                        const auto deferredForceVirials = gaMDModule_->gpuExecutor()->takeForceVirialHistory(
                                 deferredEnergySamples.size());
                         const auto deferredConstraintVirials = integrator->takeConstraintVirialHistory();
                         GMX_RELEASE_ASSERT(

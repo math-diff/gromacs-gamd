@@ -12,6 +12,9 @@
 
 #include "gamdmdmodule.h"
 
+#include "gromacs/utility/gmxassert.h"
+
+#include "gamdgpu.h"
 #include "gamdruntime.h"
 
 namespace gmx
@@ -55,6 +58,27 @@ const GaMDStepResult& GaMDMDModule::stepResult() const
 GaMDGpuProductionParameters GaMDMDModule::gpuProductionParameters() const
 {
     return runtime_->gpuProductionParameters();
+}
+
+void GaMDMDModule::initializeGpuExecutor(const bool           useGpuResidentGaMD,
+                                         const DeviceContext& deviceContext,
+                                         const DeviceStream&  deviceStream,
+                                         gmx_wallcycle*       wallCycleCounters)
+{
+    GMX_RELEASE_ASSERT(gpuExecutor_ == nullptr,
+                       "The GaMD GPU executor can only be initialized once");
+    gpuExecutor_ = std::make_unique<GaMDGpuExecutor>(
+            useGpuResidentGaMD, deviceContext, deviceStream, wallCycleCounters);
+}
+
+GaMDGpuExecutor* GaMDMDModule::gpuExecutor()
+{
+    return gpuExecutor_.get();
+}
+
+const GaMDGpuExecutor* GaMDMDModule::gpuExecutor() const
+{
+    return gpuExecutor_.get();
 }
 
 void GaMDMDModule::finalizeCurrentStep(int64_t        step,

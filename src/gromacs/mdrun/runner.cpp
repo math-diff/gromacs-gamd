@@ -60,6 +60,7 @@
 #include <variant>
 #include <vector>
 
+#include "gromacs/applied_forces/gamd/gamdmdmodule.h"
 #include "gromacs/commandline/filenm.h"
 #include "gromacs/domdec/builder.h"
 #include "gromacs/domdec/domdec.h"
@@ -1907,14 +1908,27 @@ int Mdrunner::mdrunner()
             GMX_RELEASE_ASSERT(deviceStreamManager != nullptr,
                                "GPU device stream manager should be valid in order to use GPU "
                                "version of bonded forces.");
-            fr->listedForcesGpu = std::make_unique<ListedForcesGpu>(
-                    mtop.ffparams,
-                    fr->ic->epsfac * fr->fudgeQQ,
-                    inputrec->opts.ngener - inputrec->nwall,
-                    runScheduleWork.simulationWork.useGpuResidentGaMD(),
-                    deviceStreamManager->context(),
-                    deviceStreamManager->bondedStream(),
-                    wcycle.get());
+            const bool useGaMDGpuExecutor =
+                    runScheduleWork.simulationWork.useGpuResidentGaMD()
+                    || ((inputrec->bDoGaMD || std::getenv("GMX_USE_GAMD") != nullptr)
+                        && (std::getenv("GMX_GAMD_GPU_DIH_SHADOW") != nullptr
+                            || std::getenv("GMX_GAMD_GPU_ENERGY_SHADOW") != nullptr));
+            if (useGaMDGpuExecutor)
+            {
+                mdModules_->gaMDModule()->initializeGpuExecutor(
+                        runScheduleWork.simulationWork.useGpuResidentGaMD(),
+                        deviceStreamManager->context(),
+                        deviceStreamManager->bondedStream(),
+                        wcycle.get());
+            }
+            fr->listedForcesGpu =
+                    std::make_unique<ListedForcesGpu>(mtop.ffparams,
+                                                      fr->ic->epsfac * fr->fudgeQQ,
+                                                      inputrec->opts.ngener - inputrec->nwall,
+                                                      mdModules_->gaMDModule()->gpuExecutor(),
+                                                      deviceStreamManager->context(),
+                                                      deviceStreamManager->bondedStream(),
+                                                      wcycle.get());
         }
         fr->longRangeNonbondeds = std::make_unique<CpuPpLongRangeNonbondeds>(fr->n_tpi,
                                                                              fr->ic->ewaldcoeff_q,

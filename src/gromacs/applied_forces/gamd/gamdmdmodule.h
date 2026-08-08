@@ -23,11 +23,14 @@
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/real.h"
 
+class DeviceContext;
+class DeviceStream;
 struct gmx_wallcycle;
 
 namespace gmx
 {
 
+class GaMDGpuExecutor;
 class GaMDRuntime;
 
 /*! \internal
@@ -58,6 +61,14 @@ public:
     const GaMDStepResult& stepResult() const;
     //! Returns parameters consumed by the device-resident production path.
     GaMDGpuProductionParameters gpuProductionParameters() const;
+    //! Creates the optional executor that owns the GaMD device state.
+    void initializeGpuExecutor(bool                 useGpuResidentGaMD,
+                               const DeviceContext& deviceContext,
+                               const DeviceStream&  deviceStream,
+                               gmx_wallcycle*       wallCycleCounters);
+    //! Returns the module-owned device executor, or nullptr when unavailable.
+    GaMDGpuExecutor*       gpuExecutor();
+    const GaMDGpuExecutor* gpuExecutor() const;
     //! Updates host statistics and the host step result from current raw energies.
     void finalizeCurrentStep(int64_t        step,
                              int            rank,
@@ -82,12 +93,12 @@ public:
     void writeRestartState(int64_t step);
     //! Warns once when the requested run cannot reach production.
     void warnIfRunTooShort(int64_t initStep, int64_t numSteps, int rank);
-    //! Sets the step used by optional force diagnostics.
     //! Resets this instance for an independent unit-test scenario.
     void resetStateForTesting();
 
 private:
-    std::unique_ptr<GaMDRuntime> runtime_;
+    std::unique_ptr<GaMDRuntime>     runtime_;
+    std::unique_ptr<GaMDGpuExecutor> gpuExecutor_;
 };
 
 //! Constructs the built-in GaMD module.

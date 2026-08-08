@@ -53,7 +53,6 @@ if(GMX_GPU_CUDA)
     # the CI build that does clang-tidy analysis of a CUDA build.
     if (NOT GMX_CLANG_TIDY)
        gmx_add_libgromacs_sources(
-           gamd_scale_gpu.cu
            listed_forces_gpu_internal.cu
            )
     endif()

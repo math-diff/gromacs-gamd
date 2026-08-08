@@ -53,6 +53,7 @@
 #include <vector>
 
 #include "gromacs/applied_forces/awh/awh.h"
+#include "gromacs/applied_forces/gamd/gamdgpu.h"
 #include "gromacs/applied_forces/gamd/gamdmdmodule.h"
 #include "gromacs/domdec/dlbtiming.h"
 #include "gromacs/domdec/domdec.h"
@@ -554,14 +555,16 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
 
         gaMDModule->finalizeCurrentStep(step, cr->nodeid, rawPotentialEnergy, rawDihedralEnergy, wcycle);
 
-        if (fr->listedForcesGpu != nullptr && fr->listedForcesGpu->gamdEnergyShadowDiagnosticsEnabled())
+        if (fr->listedForcesGpu != nullptr
+            && runScheduleWork.gaMDModule->gpuExecutor()->energyDiagnosticsEnabled())
         {
-            const std::array<double, 6> deviceState = fr->listedForcesGpu->gamdEnergyShadowValues();
-            const GaMDStepResult&       stepResult  = gaMDModule->stepResult();
-            const double                totalDifference    = deviceState[0] - rawPotentialEnergy;
-            const double                dihedralDifference = deviceState[1] - rawDihedralEnergy;
-            const double                scalePDifference   = deviceState[2] - stepResult.scaleP;
-            const double                scaleDDifference   = deviceState[3] - stepResult.scaleD;
+            const std::array<double, 6> deviceState =
+                    runScheduleWork.gaMDModule->gpuExecutor()->energyDiagnostics();
+            const GaMDStepResult& stepResult         = gaMDModule->stepResult();
+            const double          totalDifference    = deviceState[0] - rawPotentialEnergy;
+            const double          dihedralDifference = deviceState[1] - rawDihedralEnergy;
+            const double          scalePDifference   = deviceState[2] - stepResult.scaleP;
+            const double          scaleDDifference   = deviceState[3] - stepResult.scaleD;
             const double totalBoostDifference = deviceState[4] + deviceState[5] - stepResult.totalBoost();
             std::fprintf(stderr,
                          "[GaMD GPU energy shadow] step=%lld total_diff=%.9g dihedral_diff=%.9g "
@@ -599,7 +602,7 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
     {
         GMX_RELEASE_ASSERT(simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuResident
                                    && fr->listedForcesGpu != nullptr
-                                   && fr->listedForcesGpu->gamdScaleFromDeviceEnabled(),
+                                   && runScheduleWork.gaMDModule->gpuExecutor()->scaleFromDeviceEnabled(),
                            "GaMD can skip host energy staging only with device scale correction");
     }
 
@@ -615,7 +618,7 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
     {
         GMX_RELEASE_ASSERT(fr->stateGpu != nullptr && fr->listedForcesGpu != nullptr,
                            "GPU GaMD force correction requires GPU state and listed-force objects");
-        GMX_RELEASE_ASSERT(fr->listedForcesGpu->gamdDihedralBufferEnabled(),
+        GMX_RELEASE_ASSERT(runScheduleWork.gaMDModule->gpuExecutor()->dihedralBufferEnabled(),
                            "GPU GaMD force correction requires the device dihedral-force buffer");
         if (haveDDAtomOrdering(*cr))
         {
@@ -634,7 +637,8 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
                       "boundary conditions.");
         }
 
-        const bool validateLiveGpuCorrection = fr->listedForcesGpu->gamdDihedralShadowEnabled();
+        const bool validateLiveGpuCorrection =
+                runScheduleWork.gaMDModule->gpuExecutor()->dihedralShadowEnabled();
         static std::vector<gmx::RVec> gamdGpuModeDihedralForces;
         static std::vector<gmx::RVec> gamdGpuModeDihedralShiftForces;
         static std::vector<gmx::RVec> gpuShadowDihedralForces;
@@ -654,7 +658,7 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
         if (stepWork.stageGpuEnergyAndVirialToHost && dihedralCorrectionScale != 0.0)
         {
             wallcycle_start(wcycle, WallCycleCounter::GaMDDihedral);
-            fr->listedForcesGpu->copyGamdDihedralVirial(&gpuDihedralVirial);
+            runScheduleWork.gaMDModule->gpuExecutor()->copyDihedralVirial(&gpuDihedralVirial);
 
             if (validateLiveGpuCorrection)
             {
@@ -686,7 +690,7 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
                                                   lambda,
                                                   nullptr);
                 gpuShadowDihedralForces.resize(force.size());
-                fr->listedForcesGpu->copyGamdDihedralShadowForces(gpuShadowDihedralForces);
+                runScheduleWork.gaMDModule->gpuExecutor()->copyDihedralShadowForces(gpuShadowDihedralForces);
                 validateGaMDGpuShadowForces(
                         "live-dihedral", step, gamdGpuModeDihedralForces, gpuShadowDihedralForces, 0.005, 0.0001);
 
@@ -779,7 +783,7 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
                 }
             }
         }
-        fr->listedForcesGpu->applyGamdForceCorrection(
+        runScheduleWork.gaMDModule->gpuExecutor()->applyForceCorrection(
                 fr->stateGpu->getForces(), totalScale, dihedralCorrectionScale, rawForcesReady);
         if (stepWork.useGpuFBufferOps && validateLiveGpuCorrection)
         {
@@ -788,7 +792,7 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
         if (validateLiveGpuCorrection)
         {
             // The event has a second consumer in diagnostic mode; GPU update consumes the other.
-            fr->listedForcesGpu->gamdForcesReadyEvent()->waitForEvent();
+            runScheduleWork.gaMDModule->gpuExecutor()->forcesReadyEvent()->waitForEvent();
             fr->stateGpu->copyForcesFromGpu(liveGpuCorrectedForces, AtomLocality::Local);
             fr->stateGpu->waitForcesReadyOnHost(AtomLocality::Local);
             validateGaMDGpuShadowForces(
@@ -798,7 +802,8 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
     }
 
     const bool gpuShadowEnabled =
-            (fr->listedForcesGpu != nullptr && fr->listedForcesGpu->gamdDihedralShadowEnabled());
+            (fr->listedForcesGpu != nullptr
+             && runScheduleWork.gaMDModule->gpuExecutor()->dihedralShadowEnabled());
     if (gpuShadowEnabled && haveDDAtomOrdering(*cr))
     {
         gmx_fatal(FARGS,
@@ -824,7 +829,7 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
     {
         if (gpuShadowEnabled && !correctionShadowCompared)
         {
-            fr->listedForcesGpu->applyGamdForceCorrectionShadow(
+            runScheduleWork.gaMDModule->gpuExecutor()->applyForceCorrectionShadow(
                     rawForcesForGpuShadow, totalScale, dihedralCorrectionScale, correctedGpuShadowForces);
             validateGaMDGpuShadowForces(
                     "force-correction", step, force, correctedGpuShadowForces, 0.1, 0.01);
@@ -897,7 +902,7 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
         if (!shadowCompared)
         {
             gpuShadowForces.resize(gamdDihedralForces.size());
-            fr->listedForcesGpu->copyGamdDihedralShadowForces(gpuShadowForces);
+            runScheduleWork.gaMDModule->gpuExecutor()->copyDihedralShadowForces(gpuShadowForces);
             validateGaMDGpuShadowForces("dihedral", step, gamdDihedralForces, gpuShadowForces, 0.1, 0.01);
             shadowCompared = true;
         }
@@ -3027,11 +3032,11 @@ void do_force(FILE*                         fplog,
 
         if (useGpuGaMDShortRangeVirial)
         {
-            fr->listedForcesGpu->launchGamdShortRangeVirialReduction();
+            runScheduleWork.gaMDModule->gpuExecutor()->launchShortRangeVirialReduction();
             if (stepWork.stageGpuEnergyAndVirialToHost)
             {
                 std::array<real, DIM * DIM> shortRangeVirial = {};
-                fr->listedForcesGpu->copyGamdShortRangeVirial(&shortRangeVirial);
+                runScheduleWork.gaMDModule->gpuExecutor()->copyShortRangeVirial(&shortRangeVirial);
                 for (int i = 0; i < DIM; ++i)
                 {
                     for (int j = 0; j < DIM; ++j)
@@ -3119,7 +3124,8 @@ void do_force(FILE*                         fplog,
 
             if (stepWork.computeNonbondedForces)
             {
-                if (useGpuGaMDShortRangeVirial && fr->listedForcesGpu->gamdDihedralShadowEnabled())
+                if (useGpuGaMDShortRangeVirial
+                    && runScheduleWork.gaMDModule->gpuExecutor()->dihedralShadowEnabled())
                 {
                     stateGpu->setFReducedOnDeviceEventExpectedConsumptionCount(AtomLocality::Local, 2);
                 }
@@ -3162,25 +3168,27 @@ void do_force(FILE*                         fplog,
     }
 
     if (stepWork.computeEnergy && fr->listedForcesGpu != nullptr
-        && fr->listedForcesGpu->gamdEnergyShadowEnabled())
+        && runScheduleWork.gaMDModule->gpuExecutor()->energyEnabled())
     {
-        pme_gpu_stage_gamd_reciprocal_energy(fr->pmedata,
-                                             fr->listedForcesGpu->gamdPmeEnergyStagingBuffer(),
-                                             fr->listedForcesGpu->gamdPmeEnergyReadyEvent());
+        pme_gpu_stage_gamd_reciprocal_energy(
+                fr->pmedata,
+                runScheduleWork.gaMDModule->gpuExecutor()->pmeEnergyStagingBuffer(),
+                runScheduleWork.gaMDModule->gpuExecutor()->pmeEnergyReadyEvent());
         GMX_RELEASE_ASSERT(runScheduleWork.gaMDModule != nullptr,
                            "GPU-resident GaMD requires the built-in GaMD module");
         const GaMDGpuProductionParameters gamdParameters =
                 runScheduleWork.gaMDModule->gpuProductionParameters();
-        fr->listedForcesGpu->launchGamdEnergyShadowReduction(gamdParameters.igamd,
-                                                             gamdParameters.stage,
-                                                             gamdParameters.thresholdP,
-                                                             gamdParameters.kP,
-                                                             gamdParameters.thresholdD,
-                                                             gamdParameters.kD,
-                                                             !stepWork.stageGpuEnergyAndVirialToHost);
+        runScheduleWork.gaMDModule->gpuExecutor()->launchEnergyReduction(
+                gamdParameters.igamd,
+                gamdParameters.stage,
+                gamdParameters.thresholdP,
+                gamdParameters.kP,
+                gamdParameters.thresholdD,
+                gamdParameters.kD,
+                !stepWork.stageGpuEnergyAndVirialToHost);
         if (useGpuGaMDShortRangeVirial && !stepWork.stageGpuEnergyAndVirialToHost)
         {
-            fr->listedForcesGpu->recordGamdForceVirialSample();
+            runScheduleWork.gaMDModule->gpuExecutor()->recordForceVirialSample();
         }
     }
 

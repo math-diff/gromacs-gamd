@@ -16,3 +16,15 @@ gmx_add_libgromacs_sources(
     gamdcontroller.cpp
     gamdexecution.cpp
 )
+
+if(GMX_GPU_CUDA)
+    gmx_add_libgromacs_sources(
+        gamdgpu.cpp
+        gamdgpu.cu
+        gamd_scale_gpu.cu
+    )
+else()
+    gmx_add_libgromacs_sources(
+        gamdgpu_stubs.cpp
+    )
+endif()

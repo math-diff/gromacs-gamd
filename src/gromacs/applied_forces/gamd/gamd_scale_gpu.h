@@ -3,8 +3,8 @@
  *
  * Copyright 2026 The GROMACS Authors
  */
-#ifndef GMX_LISTED_FORCES_GAMD_SCALE_GPU_H
-#define GMX_LISTED_FORCES_GAMD_SCALE_GPU_H
+#ifndef GMX_APPLIED_FORCES_GAMD_GAMD_SCALE_GPU_H
+#define GMX_APPLIED_FORCES_GAMD_GAMD_SCALE_GPU_H
 
 #include "gromacs/gpu_utils/devicebuffer.h"
 #include "gromacs/gpu_utils/gputraits.h"
@@ -28,4 +28,4 @@ void launchGamdProductionScaleKernel(DeviceBuffer<float> gamdState,
 
 } // namespace gmx
 
-#endif // GMX_LISTED_FORCES_GAMD_SCALE_GPU_H
+#endif // GMX_APPLIED_FORCES_GAMD_GAMD_SCALE_GPU_H

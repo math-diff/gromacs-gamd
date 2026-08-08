@@ -169,7 +169,7 @@ if (GMX_GPU_CUDA)
     # GaMD scale calculation. Disable ptxas warnings only for this source so
     # the global double-usage warning is not promoted to an error.
     set_source_files_properties(
-        ${CMAKE_CURRENT_SOURCE_DIR}/listed_forces/gamd_scale_gpu.cu
+        ${CMAKE_CURRENT_SOURCE_DIR}/applied_forces/gamd/gamd_scale_gpu.cu
         PROPERTIES COMPILE_OPTIONS "-Xptxas=-w")
 endif()
 
