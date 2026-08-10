@@ -372,7 +372,7 @@ from different replicas or production segments.
 ## Citation, license, and support
 
 Please cite both GROMACS and the GaMD method when using this software in
-research. GROMACS citation metadata is provided in [`CITATION.cff`](CITATION.cff).
+research. 
 The original GaMD method is described in:
 
 - Miao, Y.; Feher, V. A.; McCammon, J. A. *Gaussian Accelerated Molecular
