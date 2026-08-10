@@ -58,6 +58,7 @@ overwrite another GROMACS installation:
 git clone https://github.com/math-diff/gromacs-gamd.git
 cd gromacs-gamd
 mkdir build
+cd build
 cmake .. \
   -DGMX_GPU=CUDA \
   -DGMX_BUILD_OWN_FFTW=ON \
@@ -65,7 +66,7 @@ cmake .. \
 make -j 8
 make install
 
-source "usr/local/gromacs/bin/GMXRC"
+source "/usr/local/gromacs/bin/GMXRC"
 gmx --version
 ```
 
