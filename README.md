@@ -11,7 +11,6 @@ not in the upstream GROMACS issue tracker.
 ## What this version provides
 
 - GaMD total-potential, dihedral, and dual-boost modes.
-- A CPU-reference GaMD path selected with `-update cpu`.
 - An automatic GPU-resident GaMD path selected with `-update gpu`.
 - GPU force correction, device-side scale evaluation, resident energy and
   global histories, buffered GaMD output, and eligible CUDA Graphs.
@@ -20,8 +19,6 @@ not in the upstream GROMACS issue tracker.
 - Checkpoint-aware GaMD restart files and deterministic reconciliation of GaMD
   text output after continuation.
 
-No GaMD performance-selection environment variables are required. A supported
-run with `-update gpu` automatically enables the complete GPU-resident path.
 
 ## Supported production target
 
@@ -32,7 +29,6 @@ The validated high-performance configuration is:
 - GPU nonbonded, PME, bonded, and update tasks.
 - No domain decomposition, separate PME rank, or multiple time stepping.
 - `nstfout = 0` because corrected-force trajectory output is not implemented.
-- One or two temperature-coupling groups.
 - No pressure coupling, or C-rescale with `isotropic` or `semiisotropic`
   coupling.
 
@@ -61,50 +57,16 @@ overwrite another GROMACS installation:
 ```bash
 git clone https://github.com/math-diff/gromacs-gamd.git
 cd gromacs-gamd
-
-cmake -S . -B build \
-  -DCMAKE_BUILD_TYPE=Release \
+mkdir build
+cmake .. \
   -DGMX_GPU=CUDA \
-  -DGMX_MPI=OFF \
-  -DGMX_THREAD_MPI=ON \
-  -DGMX_OPENMP=ON \
-  -DGMX_DOUBLE=OFF \
   -DGMX_BUILD_OWN_FFTW=ON \
-  -DGMX_CYCLE_SUBCOUNTERS=OFF \
-  -DBUILD_TESTING=ON \
-  -DCMAKE_INSTALL_PREFIX="$HOME/.local/gromacs-gamd"
 
-cmake --build build -j 8
-ctest --test-dir build --output-on-failure -j 4
-cmake --install build
+make -j 8
+make install
 
-source "$HOME/.local/gromacs-gamd/bin/GMXRC"
+source "usr/local/gromacs/bin/GMXRC"
 gmx --version
-```
-
-Change `-j 8` and the test parallelism to suit the available CPU and memory.
-`GMX_BUILD_OWN_FFTW=ON` downloads and builds FFTW; omit that option when a
-compatible single-precision FFTW installation is already available.
-
-For a system-wide installation, configure with a dedicated prefix such as
-`-DCMAKE_INSTALL_PREFIX=/usr/local/gromacs-gamd`, then run only the installation
-step with elevated privileges:
-
-```bash
-sudo cmake --install build
-source /usr/local/gromacs-gamd/bin/GMXRC
-```
-
-Do not configure or compile as root.
-
-### CPU-only build
-
-GaMD also has a CPU-reference path. On a machine without CUDA, configure a
-separate build with `-DGMX_GPU=OFF` and run with CPU task assignment:
-
-```bash
-gmx mdrun -deffnm gamd \
-  -nb cpu -pme cpu -bonded cpu -update cpu
 ```
 
 ## Quick start
@@ -185,8 +147,6 @@ gmx mdrun \
   -update gpu
 ```
 
-Replace `-ntomp 8` with a value suitable for the CPU paired with the GPU. No
-`GMX_GAMD_GPU*` variables and no `GMX_CUDA_GRAPH` variable are needed.
 
 Confirm the selected path in `gamd.log`:
 
@@ -201,25 +161,6 @@ GaMD execution mode: GPU resident.
 CUDA Graph eligibility enabled automatically for GPU-resident GaMD.
 ```
 
-### 5. CPU-reference comparison
-
-To retain GPU force offload but execute the GaMD reference/update path on the
-CPU, change only the update assignment:
-
-```bash
-gmx mdrun \
-  -s gamd.tpr \
-  -deffnm gamd-cpu-reference \
-  -ntmpi 1 \
-  -ntomp 8 \
-  -pin on \
-  -nb gpu \
-  -pme gpu \
-  -bonded gpu \
-  -update cpu
-```
-
-This is a mixed CPU/GPU reference run, not a CPU-only run.
 
 ## GaMD modes and stages
 
