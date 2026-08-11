@@ -386,3 +386,5 @@ version 2.1 or later. See [`COPYING`](COPYING) and [`AUTHORS`](AUTHORS).
 
 For questions or bug reports specific to this fork, open an issue at
 <https://github.com/math-diff/gromacs-gamd/issues>.
+
+Author Email：yuefeng_yang@mail.ustc.edu.cn
