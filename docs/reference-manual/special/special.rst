@@ -12,6 +12,7 @@ the use of |Gromacs| for specific scientific problems.
    free-energy-implementation
    pulling
    awh
+   gamd
    enforced-rotation
    electric-fields
    comp-electrophys
@@ -28,5 +29,4 @@ the use of |Gromacs| for specific scientific problems.
    colvars
    plumed
    nnpot
-
 

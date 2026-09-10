@@ -48,6 +48,7 @@ The documentation does not yet cover all areas, but more content is being
    :maxdepth: 2
 
    contribute
+   gamd-upstream
    overview
    build-system
    change-management
@@ -84,5 +85,4 @@ Doxygen documentation
 .. only:: latex
 
     The doxygen code documentation is available on the |Gromacs| webpage.
-
 

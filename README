@@ -1,4 +1,9 @@
-               Welcome to the official version of GROMACS!
+       GaMD development version based on GROMACS 2025.4
+
+This downstream checkout includes a GaMD extension. Its scientific definition
+and supported configurations are documented in
+docs/reference-manual/special/gamd.rst. The upstream integration decisions and
+proposed review sequence are in docs/dev-manual/gamd-upstream.rst.
 
 If you are familiar with Unix, it should be fairly trivial to compile and
 install GROMACS. GROMACS uses only the CMake build system, and our

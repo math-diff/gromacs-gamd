@@ -1,0 +1,146 @@
+.. _gamd-downstream:
+
+Gaussian accelerated molecular dynamics (GaMD)
+==============================================
+
+This page describes the GaMD extension in this downstream development tree.
+It is based on GROMACS 2025.4 and is not a statement that the feature has been
+accepted upstream. See :doc:`../../dev-manual/gamd-upstream` for integration
+boundaries and the proposed contribution sequence.
+
+The original method is described by Y. Miao, V. A. Feher, and J. A. McCammon,
+*Journal of Chemical Theory and Computation* **11**, 3584--3595 (2015),
+`doi:10.1021/acs.jctc.5b00436 <https://doi.org/10.1021/acs.jctc.5b00436>`_.
+The implementation-specific component and safety policies are documented below.
+
+Bias and force definition
+-------------------------
+
+For energy component :math:`V`, threshold :math:`E`, and non-negative force
+constant :math:`k`, the bias is
+
+.. math::
+
+   B(V;E,k) = \begin{cases}
+       \tfrac12 k(E-V)^2, & V < E,\\
+       0, & V \ge E.
+   \end{cases}
+
+The corresponding raw force weight below the threshold is
+:math:`s=1-k(E-V)` and is one above the threshold. Energies are in kJ/mol and
+:math:`k` is in inverse kJ/mol. The core returns raw weights; the calling
+CPU/CUDA boundary applies the existing safety policy.
+
+``igamd=1`` boosts the total potential, ``igamd=2`` boosts the dihedral
+component, and ``igamd=3`` applies the following ordered dual boost:
+
+.. math::
+
+   B_D &= B(V_D; E_D, k_D),\\
+   B_P &= B(V_P+B_D; E_P, k_P),\\
+   V^* &= V_P + B_D + B_P,\\
+   \mathbf F^* &= s_P\mathbf F_P + s_P(s_D-1)\mathbf F_D.
+
+Here :math:`\mathbf F_P` is the complete unbiased force, including the
+dihedral contribution; :math:`\mathbf F_D` is the force of the selected
+component. Applying the second term to a force that already excludes
+:math:`\mathbf F_D` would be incorrect.
+
+The present component is the sum of ``F_PDIHS``, ``F_RBDIHS``, ``F_FOURDIHS``,
+and ``F_CMAP``. It is not Amber's proper-dihedral-only partition. Changing this
+partition changes both the bias and the meaning of saved statistics, and needs
+separate scientific validation and restart versioning.
+
+.. warning::
+
+   The existing runtime clamps each force weight to a minimum of 0.01 without
+   changing the reported bias energy. If that floor is active, the applied
+   force is not the exact gradient of the unmodified bias above. This refactor
+   preserves that compatibility policy and warns on the CPU path. Its physical
+   interpretation and an upstream policy must be agreed before submission;
+   numerical equivalence to this fork is not independent scientific validation.
+
+Statistics and stages
+---------------------
+
+Each averaging window uses Welford accumulation of count, mean, and M2. The
+standard deviation is the population value ``sqrt(M2/count)``, not the sample
+estimate with ``count-1``. Min/max and cumulative counts are stored separately.
+An empty window does not replace previous statistics; a one-sample window has
+zero deviation. Degenerate energy ranges retain the previous threshold and
+force constant.
+
+For lower-bound mode, ``E=Vmax`` and
+
+.. math::
+
+   k_0=\min\left(1,\frac{\sigma_0}{\sigma_V}
+                    \frac{V_{\max}-V_{\min}}{V_{\max}-V_{\rm avg}}\right),
+   \qquad k=\frac{k_0}{V_{\max}-V_{\min}}.
+
+Upper-bound mode first evaluates
+
+.. math::
+
+   k_0=\left(1-\frac{\sigma_0}{\sigma_V}\right)
+       \frac{V_{\max}-V_{\min}}{V_{\rm avg}-V_{\min}}.
+
+If ``0 < k0 <= 1``, it uses ``E=Vmin+(Vmax-Vmin)/k0``; otherwise it falls back
+to the lower-bound calculation. The implementation retains its existing
+``1e-6`` denominator/variance guards. ``iEP`` and ``iED`` select the component
+threshold policies. The legacy ``iE`` field remains validated and recorded for
+compatibility; it does not override those component selections.
+
+The five stages are conventional preparation, conventional statistics, boost
+preparation, boosted statistics, and fixed-parameter production. The two
+preparation stages do not update statistics. Stage four accumulates the
+boosted total potential while retaining the existing dihedral statistics
+convention. Thresholds update at the conventional-statistics boundary and
+during stage four. ``irest_gamd=1`` resumes initialized parameters in production.
+
+Input, output, and continuation
+-------------------------------
+
+Set ``gamd = yes`` in the MDP used by ``grompp``. The TPR currently stores only
+the activation flag; detailed parameters are read from ``gamd.in`` in the
+``mdrun`` working directory. Preserve that file together with the TPR.
+
+The strict legacy parser rejects unknown/duplicate keys, missing values,
+trailing non-comment tokens, invalid ranges, and unaligned averaging windows.
+``sigma0P`` and ``sigma0D`` are provided in kcal/mol and converted to kJ/mol.
+``gamd-para.dat`` uses kJ/mol; ``gamd-reweight.dat`` uses kcal/mol. The two boost
+columns are separate contributions and must be combined when a total bias is
+needed for reweighting.
+
+The runtime preserves ``gamd-restart.dat`` versions 1--3 and the current
+version-3 writer. Parameters, statistics, window state, and saved step are
+validated before use. A previous restart may be selected when it matches the
+GROMACS checkpoint. Text output is reconciled to the checkpoint without
+replaying duplicate rows. Counters and their text formatting are 64 bit.
+
+GPU production can buffer text/energy histories until a host consumer needs
+them. This changes when rows are physically written, not their logical step
+numbers or configured ``reweight_nst`` / ``para_nst`` cadence.
+
+Supported execution
+-------------------
+
+The existing CPU reference path is selected with ``-update cpu``. The validated
+GPU-resident target uses CUDA mixed precision, one PP rank and one GPU, with
+``-nb gpu -pme gpu -bonded gpu -update gpu``. It requires ``nstfout=0`` and does
+not support DD, separate PME ranks, or MTS. The supported pressure modes are
+NVT and C-rescale isotropic/semiisotropic NPT. Coupling steps stage the current
+corrected virial and required globals; eligible intervening steps retain the
+resident/CUDA Graph path. Other builds/workloads are not implied to be supported.
+
+Verification
+------------
+
+``AppliedForcesUnitTest`` contains analytical single/dual-boost values,
+finite-difference checks of the un-clamped biased potential against the force
+composition, threshold branches, population statistics, restart counters, and
+input failures. CPU and CUDA compile the same bias evaluator. Integration
+validation additionally needs numerical GPU shadows, all supported continuation
+ensembles, CUDA memory checking, and matched production-equivalent benchmarks.
+Long-time trajectory equality is not a suitable sole criterion for stochastic
+or chaotic simulations.
