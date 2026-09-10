@@ -3174,10 +3174,9 @@ void do_force(FILE*                         fplog,
                 fr->pmedata,
                 runScheduleWork.gaMDModule->gpuExecutor()->pmeEnergyStagingBuffer(),
                 runScheduleWork.gaMDModule->gpuExecutor()->pmeEnergyReadyEvent());
-        const GaMDGpuProductionParameters gamdParameters =
-                runScheduleWork.gaMDModule->gpuProductionParameters();
+        const GaMDBiasParameters gamdParameters = runScheduleWork.gaMDModule->biasParameters();
         runScheduleWork.gaMDModule->gpuExecutor()->launchEnergyReduction(
-                gamdParameters.igamd,
+                gamdParameters.boostType,
                 gamdParameters.stage,
                 gamdParameters.thresholdP,
                 gamdParameters.kP,

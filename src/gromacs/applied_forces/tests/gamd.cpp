@@ -427,11 +427,6 @@ TEST_F(GaMDTest, BufferedProductionOutputDefersTextCadenceButNotCheckpointing)
     gaMDModule_.setBufferedProductionOutputEnabled(false);
 }
 
-TEST_F(GaMDTest, GaMDGpuExecutionModeSelectsResidentPathAutomatically)
-{
-    EXPECT_EQ(GaMDExecutionMode::GpuResident, selectSupportedGaMDExecutionMode());
-}
-
 TEST_F(GaMDTest, GaMDCpuUpdateSelectsCpuReference)
 {
     EXPECT_EQ(GaMDExecutionMode::CpuReference,
@@ -465,7 +460,7 @@ TEST_F(GaMDTest, NonGaMDGpuUpdateRetainsNormalExecutionMode)
 }
 
 #if GMX_GPU_CUDA
-TEST_F(GaMDTest, GaMDGpuExecutionModeSelectsResidentCudaPath)
+TEST_F(GaMDTest, GaMDGpuExecutionModeSelectsResidentPathAutomatically)
 {
     EXPECT_EQ(GaMDExecutionMode::GpuResident, selectSupportedGaMDExecutionMode());
     EXPECT_STREQ("GPU resident", gaMDExecutionModeName(GaMDExecutionMode::GpuResident));
@@ -596,6 +591,68 @@ TEST_F(GaMDTest, IrestProductionCheckpointCanContinueWithoutDuplicateRows)
 
     EXPECT_EQ(countNumericRows("gamd-para.dat"), paraRowsAtCheckpoint);
     EXPECT_EQ(countNumericRows("gamd-reweight.dat"), reweightRowsAtCheckpoint);
+}
+
+TEST_F(GaMDTest, RestartRetains64BitCounters)
+{
+    TestFileManager fileManager;
+    const auto      workDirectory =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    ScopedWorkingDirectory scopedWorkingDirectory(workDirectory);
+    {
+        std::ofstream input("gamd.in");
+        input << "igamd 1\nirest_gamd 1\niE 1\niEP 1\nreweight_nst 50\nsigma0P 6.0\n";
+        std::ofstream restart("gamd-restart.dat");
+        restart << "version 3\nsaved_step 5000000000\nproduction_restart 1\n";
+        restart << "params 1 1 1 1 10 20 10 20 10 50 25.104 25.104\n";
+        restart << "windowP 4000000000 5 2\nwindowD 0 0 0\n";
+        restart << "statP 10 0 5 2 0 4000000000 10 1 0.1\n";
+        restart << "statD -1e99 1e99 0 0.001 0 0 0 0 0\n";
+    }
+
+    // 超过 32 位的步数和窗口计数必须完整地读回并再次写出。
+    gaMDModule_.prepareStep(INT64_C(5000000000), 0);
+    gaMDModule_.setCheckpointingThisStep(true);
+    gaMDModule_.writeRestartState(INT64_C(5000000000));
+
+    int64_t       restoredStep        = -1;
+    int64_t       restoredWindowCount = -1;
+    std::ifstream restart("gamd-restart.dat");
+    std::string   line;
+    while (std::getline(restart, line))
+    {
+        std::istringstream columns(line);
+        std::string        key;
+        columns >> key;
+        if (key == "saved_step")
+        {
+            columns >> restoredStep;
+        }
+        else if (key == "windowP")
+        {
+            columns >> restoredWindowCount;
+        }
+    }
+    EXPECT_EQ(restoredStep, INT64_C(5000000000));
+    EXPECT_EQ(restoredWindowCount, INT64_C(4000000000));
+}
+
+TEST_F(GaMDTest, StrictInputRejectsMissingAndTrailingValues)
+{
+    TestFileManager fileManager;
+    const auto      workDirectory =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    ScopedWorkingDirectory scopedWorkingDirectory(workDirectory);
+    {
+        std::ofstream input("gamd.in");
+        input << "igamd\n";
+    }
+    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0), "Missing or invalid value");
+    {
+        std::ofstream input("gamd.in");
+        input << "igamd 1 unexpected\n";
+    }
+    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0), "Unexpected trailing token");
 }
 
 TEST_F(GaMDTest, StrictInputRejectsUnknownParameter)

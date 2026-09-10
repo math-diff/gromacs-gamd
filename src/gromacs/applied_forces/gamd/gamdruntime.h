@@ -1,12 +1,35 @@
 /*
  * This file is part of the GROMACS molecular simulation package.
  *
- * Copyright 2026 The GROMACS Authors
+ * Copyright 2026- The GROMACS Authors
+ * and the project initiators Erik Lindahl, Berk Hess and David van der Spoel.
+ * Consult the AUTHORS/COPYING files and https://www.gromacs.org for details.
  *
  * GROMACS is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
  * as published by the Free Software Foundation; either version 2.1
  * of the License, or (at your option) any later version.
+ *
+ * GROMACS is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with GROMACS; if not, see
+ * https://www.gnu.org/licenses, or write to the Free Software Foundation,
+ * Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA.
+ *
+ * If you want to redistribute modifications to GROMACS, please
+ * consider that scientific software is very special. Version
+ * control is crucial - bugs must be traceable. We will be happy to
+ * consider code for inclusion in the official distribution, but
+ * derived work must not be called official GROMACS. Details are found
+ * in the README & COPYING files - if they are missing, get the
+ * official version at https://www.gromacs.org.
+ *
+ * To help us fund GROMACS development, we humbly ask that you cite
+ * the research papers on the package. Check out https://www.gromacs.org.
  */
 /*! \internal \file
  * \brief Declares instance-owned GaMD host runtime state.
@@ -19,7 +42,7 @@
 
 #include <array>
 
-#include "gromacs/applied_forces/gamd/gamdtypes.h"
+#include "gromacs/applied_forces/gamd/gamdmath.h"
 #include "gromacs/topology/ifunc.h"
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/real.h"
@@ -47,36 +70,6 @@ struct GaMDParameters
     double  dihedralSigmaLimit  = 6.0 * 4.184;
 };
 
-struct GaMDEnergyStatistics
-{
-    double  maximum       = -1e99;
-    double  minimum       = 1e99;
-    double  average       = 0.0;
-    double  deviation     = 0.001;
-    double  m2            = 0.0;
-    int64_t count         = 0;
-    double  threshold     = 0.0;
-    double  k0            = 0.0;
-    double  forceConstant = 0.0;
-};
-
-struct GaMDWindowStatistics
-{
-    int64_t count = 0;
-    double  mean  = 0.0;
-    double  m2    = 0.0;
-};
-
-struct GaMDProductionOutputRecord
-{
-    double potentialEnergy = 0.0;
-    double dihedralEnergy  = 0.0;
-    double scaleP          = 1.0;
-    double scaleD          = 1.0;
-    double boostP          = 0.0;
-    double boostD          = 0.0;
-};
-
 /*! \internal
  * \brief Owns all mutable GaMD host state for one simulation.
  */
@@ -86,26 +79,26 @@ public:
     GaMDRuntime() = default;
     ~GaMDRuntime();
 
-    const GaMDStepPlan&         prepareStep(int64_t step, int rank, bool pressureCouplingThisStep);
-    const GaMDStepPlan&         stepPlan() const { return stepPlan_; }
-    const GaMDStepResult&       stepResult() const { return stepResult_; }
-    GaMDGpuProductionParameters gpuProductionParameters() const;
-    void                        finalizeCurrentStep(int64_t        step,
-                                                    int            rank,
-                                                    double         totalPotentialEnergy,
-                                                    double         dihedralEnergy,
-                                                    gmx_wallcycle* wallCycle);
-    bool                        requiresHostEnergyThisStep(int64_t step) const;
-    void                        setBufferedProductionOutputEnabled(bool enabled);
-    bool                        bufferedProductionOutputEnabled() const;
-    void                        writeBufferedProductionOutput(ArrayRef<const int64_t> deferredSteps,
-                                                              ArrayRef<const std::array<real, F_NRE>> deferredEnergySamples,
-                                                              int64_t        currentStep,
-                                                              int            rank,
-                                                              gmx_wallcycle* wallCycle);
-    void                        setCheckpointingThisStep(bool checkpointingThisStep);
-    void                        writeRestartState(int64_t step);
-    void                        warnIfRunTooShort(int64_t initStep, int64_t numSteps, int rank);
+    const GaMDStepPlan&   prepareStep(int64_t step, int rank, bool pressureCouplingThisStep);
+    const GaMDStepPlan&   stepPlan() const { return stepPlan_; }
+    const GaMDStepResult& stepResult() const { return stepResult_; }
+    GaMDBiasParameters    biasParameters() const;
+    void                  finalizeCurrentStep(int64_t        step,
+                                              int            rank,
+                                              double         totalPotentialEnergy,
+                                              double         dihedralEnergy,
+                                              gmx_wallcycle* wallCycle);
+    bool                  requiresHostEnergyThisStep(int64_t step) const;
+    void                  setBufferedProductionOutputEnabled(bool enabled);
+    bool                  bufferedProductionOutputEnabled() const;
+    void                  writeBufferedProductionOutput(ArrayRef<const int64_t> deferredSteps,
+                                                        ArrayRef<const std::array<real, F_NRE>> deferredEnergySamples,
+                                                        int64_t        currentStep,
+                                                        int            rank,
+                                                        gmx_wallcycle* wallCycle);
+    void                  setCheckpointingThisStep(bool checkpointingThisStep);
+    void                  writeRestartState(int64_t step);
+    void                  warnIfRunTooShort(int64_t initStep, int64_t numSteps, int rank);
 
 private:
     void loadParameters(int rank);
@@ -116,7 +109,7 @@ private:
     FILE* reweightFile(int rank);
     FILE* parameterFile(int rank);
     void  writeParameterLine(int64_t step, int rank, bool flushOutput);
-    void writeReweightRecord(int64_t step, int rank, const GaMDProductionOutputRecord& record, bool flushOutput);
+    void writeReweightRecord(int64_t step, int rank, const GaMDStepResult& record, bool flushOutput);
     void writeReweightLine(int64_t step, int rank, bool flushOutput);
     bool suppressTextOutputForStep(int64_t step) const;
     void closeOutputFiles();
