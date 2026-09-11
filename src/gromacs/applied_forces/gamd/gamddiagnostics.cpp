@@ -1,12 +1,35 @@
 /*
  * This file is part of the GROMACS molecular simulation package.
  *
- * Copyright 2026 The GROMACS Authors
+ * Copyright 2026- The GROMACS Authors
+ * and the project initiators Erik Lindahl, Berk Hess and David van der Spoel.
+ * Consult the AUTHORS/COPYING files and https://www.gromacs.org for details.
  *
  * GROMACS is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
  * as published by the Free Software Foundation; either version 2.1
  * of the License, or (at your option) any later version.
+ *
+ * GROMACS is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with GROMACS; if not, see
+ * https://www.gnu.org/licenses, or write to the Free Software Foundation,
+ * Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA.
+ *
+ * If you want to redistribute modifications to GROMACS, please
+ * consider that scientific software is very special. Version
+ * control is crucial - bugs must be traceable. We will be happy to
+ * consider code for inclusion in the official distribution, but
+ * derived work must not be called official GROMACS. Details are found
+ * in the README & COPYING files - if they are missing, get the
+ * official version at https://www.gromacs.org.
+ *
+ * To help us fund GROMACS development, we humbly ask that you cite
+ * the research papers on the package. Check out https://www.gromacs.org.
  */
 #include "gmxpre.h"
 
@@ -18,24 +41,129 @@
 #include <algorithm>
 
 #include "gromacs/math/vec.h"
+#include "gromacs/utility/exceptions.h"
+#include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/gmxassert.h"
+#include "gromacs/utility/strconvert.h"
+
+#include "gamdmath.h"
 
 namespace gmx
 {
+namespace
+{
+
+struct GaMDForceComparison
+{
+    double     maxAbsoluteError = 0.0;
+    double     rmsError         = 0.0;
+    gmx::Index worstAtom        = 0;
+    int        worstComponent   = 0;
+};
+
+static GaMDForceComparison compareGaMDForceBuffers(ArrayRef<const RVec> reference,
+                                                   ArrayRef<const RVec> candidate)
+{
+    GMX_RELEASE_ASSERT(reference.size() == candidate.size() && !reference.empty(),
+                       "GaMD GPU shadow-force comparison requires equally sized non-empty buffers");
+
+    GaMDForceComparison comparison;
+    double              sumSquaredError = 0.0;
+    for (gmx::Index atom = 0; atom < reference.ssize(); ++atom)
+    {
+        for (int component = 0; component < DIM; ++component)
+        {
+            const double error = static_cast<double>(candidate[atom][component])
+                                 - static_cast<double>(reference[atom][component]);
+            const double absoluteError = std::abs(error);
+            sumSquaredError += error * error;
+            if (absoluteError > comparison.maxAbsoluteError)
+            {
+                comparison.maxAbsoluteError = absoluteError;
+                comparison.worstAtom        = atom;
+                comparison.worstComponent   = component;
+            }
+        }
+    }
+    comparison.rmsError = std::sqrt(sumSquaredError / (DIM * reference.size()));
+    return comparison;
+}
+
+} // namespace
+
+void validateGaMDGpuShadowForces(const char*          label,
+                                 int64_t              step,
+                                 ArrayRef<const RVec> reference,
+                                 ArrayRef<const RVec> candidate,
+                                 double               maxAbsoluteTolerance,
+                                 double               rmsTolerance)
+{
+    const GaMDForceComparison comparison = compareGaMDForceBuffers(reference, candidate);
+    std::fprintf(stderr,
+                 "[GaMD GPU shadow] %s step=%lld max_abs=%.9g rms=%.9g "
+                 "worst_atom=%td component=%d cpu=%.9g gpu=%.9g\n",
+                 label,
+                 static_cast<long long>(step),
+                 comparison.maxAbsoluteError,
+                 comparison.rmsError,
+                 comparison.worstAtom,
+                 comparison.worstComponent,
+                 static_cast<double>(reference[comparison.worstAtom][comparison.worstComponent]),
+                 static_cast<double>(candidate[comparison.worstAtom][comparison.worstComponent]));
+
+    if (!std::isfinite(comparison.maxAbsoluteError) || !std::isfinite(comparison.rmsError)
+        || comparison.maxAbsoluteError > maxAbsoluteTolerance || comparison.rmsError > rmsTolerance)
+    {
+        gmx_fatal(FARGS,
+                  "GaMD GPU %s shadow forces exceed provisional mixed-precision tolerances "
+                  "(max %.9g > %.9g or RMS %.9g > %.9g).",
+                  label,
+                  comparison.maxAbsoluteError,
+                  maxAbsoluteTolerance,
+                  comparison.rmsError,
+                  rmsTolerance);
+    }
+}
+
+double readGaMDDiagnosticReal(const char* variableName, double defaultValue)
+{
+    const char* configuredValue = std::getenv(variableName);
+    if (configuredValue == nullptr)
+    {
+        return defaultValue;
+    }
+
+    double value = 0.0;
+    bool   valid = false;
+    try
+    {
+        value = doubleFromString(configuredValue);
+        valid = std::isfinite(value);
+    }
+    catch (const InvalidInputError&)
+    {
+        // 下面统一报告变量名，不能把解析失败变成可用的零值。
+    }
+    if (!valid)
+    {
+        gmx_fatal(FARGS,
+                  "GaMD diagnostic variable %s must be a finite number without trailing text.",
+                  variableName);
+    }
+    return value;
+}
+
 
 GaMDDiagnostics::GaMDDiagnostics()
 {
     // 诊断变量只在模块构造时读取一次，生产热路径不反复查询进程环境。
-    if (const char* totalScale = std::getenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP"))
+    if (std::getenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP") != nullptr)
     {
-        totalScaleOverride_        = std::max(0.01, std::atof(totalScale));
+        const double totalScale    = readGaMDDiagnosticReal("GMX_GAMD_FORCE_OVERRIDE_SCALEP", 1.0);
+        totalScaleOverride_        = std::max(c_gaMDScaleFloor, totalScale);
         totalScaleOverrideEnabled_ = true;
-
-        double dihedralRatio = std::atof(totalScale);
-        if (const char* configuredRatio = std::getenv("GMX_GAMD_FORCE_OVERRIDE_SCALED"))
-        {
-            dihedralRatio = std::atof(configuredRatio);
-        }
-        dihedralRatioOverride_        = std::max(0.01, dihedralRatio);
+        const double dihedralRatio = readGaMDDiagnosticReal("GMX_GAMD_FORCE_OVERRIDE_SCALED", totalScale);
+        dihedralRatioOverride_        = std::max(c_gaMDScaleFloor, dihedralRatio);
         dihedralRatioOverrideEnabled_ = true;
     }
 
@@ -53,15 +181,15 @@ GaMDDiagnostics::GaMDDiagnostics()
 
     if (const char* configuredStep = std::getenv("GMX_GAMD_DIH_FORCE_DEBUG_STEP"))
     {
-        boostedDihedralStep_ = std::atol(configuredStep);
+        boostedDihedralStep_ = int64FromString(configuredStep);
     }
     if (const char* configuredBegin = std::getenv("GMX_GAMD_DIH_FORCE_DEBUG_BEGIN"))
     {
-        boostedDihedralBegin_ = std::atoi(configuredBegin);
+        boostedDihedralBegin_ = intFromString(configuredBegin);
     }
     if (const char* configuredCount = std::getenv("GMX_GAMD_DIH_FORCE_DEBUG_COUNT"))
     {
-        boostedDihedralCount_ = std::atoi(configuredCount);
+        boostedDihedralCount_ = intFromString(configuredCount);
     }
     if (const char* filename = std::getenv("GMX_GAMD_DIH_FORCE_DEBUG_FILE"))
     {
@@ -76,15 +204,15 @@ GaMDDiagnostics::GaMDDiagnostics()
 
     if (const char* configuredStep = std::getenv("GMX_GAMD_FORCE_DEBUG_STEP"))
     {
-        finalForceStep_ = std::atol(configuredStep);
+        finalForceStep_ = int64FromString(configuredStep);
     }
     if (const char* configuredBegin = std::getenv("GMX_GAMD_FORCE_DEBUG_BEGIN"))
     {
-        finalForceBegin_ = std::atoi(configuredBegin);
+        finalForceBegin_ = intFromString(configuredBegin);
     }
     if (const char* configuredCount = std::getenv("GMX_GAMD_FORCE_DEBUG_COUNT"))
     {
-        finalForceCount_ = std::atoi(configuredCount);
+        finalForceCount_ = intFromString(configuredCount);
     }
     if (const char* filename = std::getenv("GMX_GAMD_FORCE_DEBUG_FILE"))
     {

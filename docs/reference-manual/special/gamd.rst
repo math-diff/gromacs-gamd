@@ -113,9 +113,12 @@ columns are separate contributions and must be combined when a total bias is
 needed for reweighting.
 
 The runtime preserves ``gamd-restart.dat`` versions 1--3 and the current
-version-3 writer. Parameters, statistics, window state, and saved step are
-validated before use. A previous restart may be selected when it matches the
-GROMACS checkpoint. Text output is reconciled to the checkpoint without
+version-3 writer. It rejects duplicate/unknown fields, trailing non-comment
+content, invalid values, and a version-3 record without ``production_restart``.
+Each candidate is parsed into a complete snapshot before selection; a malformed
+current file can only be replaced by a validated backup matching the checkpoint.
+A valid matching current file does not depend on an unused older backup.
+Parameters, statistics, window state, and saved step are validated before use. Text output is reconciled to the checkpoint without
 replaying duplicate rows. Counters and their text formatting are 64 bit.
 
 GPU production can buffer text/energy histories until a host consumer needs
@@ -125,13 +128,24 @@ numbers or configured ``reweight_nst`` / ``para_nst`` cadence.
 Supported execution
 -------------------
 
-The existing CPU reference path is selected with ``-update cpu``. The validated
-GPU-resident target uses CUDA mixed precision, one PP rank and one GPU, with
+All GaMD execution modes require one PP rank without domain decomposition and
+reject MTS before dynamics. CPU update does not provide a distributed GaMD
+energy/force reduction. The CPU reference path is selected with ``-update cpu``.
+The validated GPU-resident target uses CUDA mixed precision and one GPU, with
 ``-nb gpu -pme gpu -bonded gpu -update gpu``. It requires ``nstfout=0`` and does
 not support DD, separate PME ranks, or MTS. The supported pressure modes are
 NVT and C-rescale isotropic/semiisotropic NPT. Coupling steps stage the current
 corrected virial and required globals; eligible intervening steps retain the
 resident/CUDA Graph path. Other builds/workloads are not implied to be supported.
+
+Diagnostic configuration
+------------------------
+
+Explicit numeric diagnostic environment variables use the existing GROMACS
+strict converters. Empty, non-numeric, trailing-text, overflow, and non-finite
+force override values are errors rather than implicit zeroes. Integer debug
+indices and steps also use checked conversion. Valid diagnostic settings keep
+their existing interpretation; these switches are not production mode selectors.
 
 Verification
 ------------

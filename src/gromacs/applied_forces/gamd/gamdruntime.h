@@ -131,9 +131,8 @@ private:
 
     GaMDStepPlan   stepPlan_;
     GaMDStepResult stepResult_;
-    int64_t        lastPreparedStep_   = -1;
-    int64_t        lastAccountedStep_  = -1;
-    bool           stepReadyForOutput_ = false;
+    int64_t        lastPreparedStep_  = -1;
+    int64_t        lastAccountedStep_ = -1;
 
     bool    restartLoadAttempted_            = false;
     bool    forceProductionRestart_          = false;

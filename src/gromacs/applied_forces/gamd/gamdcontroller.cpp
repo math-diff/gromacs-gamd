@@ -47,6 +47,7 @@
 #include "gromacs/utility/fatalerror.h"
 #include "gromacs/utility/gmxassert.h"
 
+#include "gamddiagnostics.h"
 #include "gamdruntime.h"
 
 namespace gmx
@@ -107,7 +108,6 @@ const GaMDStepPlan& GaMDRuntime::prepareStep(int64_t step, int rank, bool pressu
     // correction later in do_force(), after raw energies and raw listed forces
     // for the current coordinates are available.
     stepResult_         = {};
-    stepReadyForOutput_ = false;
     stepPlan_           = {};
     stepPlan_.step      = step;
     stepPlan_.boostType = parameters_.boostType;
@@ -129,7 +129,6 @@ const GaMDStepPlan& GaMDRuntime::prepareStep(int64_t step, int rank, bool pressu
             parameters_.parameterInterval > 0 && step % parameters_.parameterInterval == 0;
     stepPlan_.writesReweight =
             step > 0 && parameters_.reweightInterval > 0 && step % parameters_.reweightInterval == 0;
-    stepReadyForOutput_ = (stepPlan_.stage >= 3);
 
     const bool forcedScale            = std::getenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP") != nullptr;
     const bool writesUnbufferedOutput = (stepPlan_.writesParameters || stepPlan_.writesReweight)
@@ -254,30 +253,15 @@ void GaMDRuntime::finalizeCurrentStep(int64_t        step,
 
     currentRank_ = rank;
     GMX_RELEASE_ASSERT(stepPlan_.step == step, "GaMD finalization must use the prepared step");
-    stepReadyForOutput_         = (stepPlan_.stage >= 3);
     stepResult_.potentialEnergy = totalPotentialEnergy;
     stepResult_.dihedralEnergy  = dihedralEnergy;
 
-    if (const char* potentialScaleOverride = std::getenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP"))
+    if (std::getenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP") != nullptr)
     {
-        const double scaleP = std::atof(potentialScaleOverride);
-
-        double scaleD = scaleP;
-        if (const char* dihedralScaleOverride = std::getenv("GMX_GAMD_FORCE_OVERRIDE_SCALED"))
-        {
-            scaleD = std::atof(dihedralScaleOverride);
-        }
-
-        double boostP = 0.0;
-        double boostD = 0.0;
-        if (const char* potentialBoostOverride = std::getenv("GMX_GAMD_FORCE_OVERRIDE_BOOSTP"))
-        {
-            boostP = std::atof(potentialBoostOverride);
-        }
-        if (const char* dihedralBoostOverride = std::getenv("GMX_GAMD_FORCE_OVERRIDE_BOOSTD"))
-        {
-            boostD = std::atof(dihedralBoostOverride);
-        }
+        const double scaleP = readGaMDDiagnosticReal("GMX_GAMD_FORCE_OVERRIDE_SCALEP", 1.0);
+        const double scaleD = readGaMDDiagnosticReal("GMX_GAMD_FORCE_OVERRIDE_SCALED", scaleP);
+        const double boostP = readGaMDDiagnosticReal("GMX_GAMD_FORCE_OVERRIDE_BOOSTP", 0.0);
+        const double boostD = readGaMDDiagnosticReal("GMX_GAMD_FORCE_OVERRIDE_BOOSTD", 0.0);
 
         const GaMDEnergyStatistics overrideStats{};
         stepResult_.scaleP = validateAndClampScale(

@@ -41,6 +41,7 @@
 
 #include <cstdlib>
 
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -53,6 +54,7 @@
 #include "gromacs/applied_forces/gamd/gamddiagnostics.h"
 #include "gromacs/applied_forces/gamd/gamdexecution.h"
 #include "gromacs/applied_forces/gamd/gamdmdmodule.h"
+#include "gromacs/utility/exceptions.h"
 
 #include "testutils/setenv.h"
 #include "testutils/testasserts.h"
@@ -144,6 +146,60 @@ class GaMDTest : public ::testing::Test
 protected:
     GaMDMDModule gaMDModule_;
 };
+
+const std::string c_validGaMDRestart =
+        "version 3\nsaved_step 10\nproduction_restart 1\n"
+        "params 1 1 1 1 10 20 10 20 10 50 25.104 25.104\n"
+        "windowP 0 0 0\nwindowD 0 0 0\n"
+        "statP 10 0 5 2 0 2 10 1 0.1\n"
+        "statD -1e99 1e99 0 0.001 0 0 0 0 0\n";
+
+void writeGaMDProductionInput(const std::string& restartContents)
+{
+    std::ofstream input("gamd.in");
+    input << "igamd 1\nirest_gamd 1\niE 1\niEP 1\nreweight_nst 50\nsigma0P 6.0\n";
+    std::ofstream restart("gamd-restart.dat");
+    restart << restartContents;
+}
+
+TEST(GaMDDiagnosticsDeathTest, InvalidForceOverridesAreRejected)
+{
+    const std::array<const char*, 5> invalidValues{ "abc", "0.8junk", "nan", "inf", "1e999" };
+    for (size_t valueIndex = 0; valueIndex < invalidValues.size(); valueIndex++)
+    {
+        gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP", invalidValues[valueIndex], 1);
+        GMX_EXPECT_DEATH_IF_SUPPORTED(readGaMDDiagnosticReal("GMX_GAMD_FORCE_OVERRIDE_SCALEP", 1.0),
+                                      "diagnostic variable");
+        GMX_EXPECT_DEATH_IF_SUPPORTED(GaMDDiagnostics(), "diagnostic variable");
+    }
+#if !GMX_NATIVE_WINDOWS
+    // Windows 的环境变量接口把空值当作未设置，Unix 则应拒绝空字符串。
+    gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP", "", 1);
+    GMX_EXPECT_DEATH_IF_SUPPORTED(readGaMDDiagnosticReal("GMX_GAMD_FORCE_OVERRIDE_SCALEP", 1.0),
+                                  "diagnostic variable");
+#endif
+    gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP");
+}
+
+TEST(GaMDDiagnosticsTest, ValidOverridesAndIntegerValidationUseNativeConverters)
+{
+    gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP", "0.8", 1);
+    gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_SCALED", "0.6", 1);
+    {
+        GaMDDiagnostics diagnostics;
+        double          scale = 0.0;
+        double          ratio = 0.0;
+        EXPECT_TRUE(diagnostics.forcedTotalScale(&scale));
+        EXPECT_TRUE(diagnostics.forcedDihedralRatio(&ratio));
+        EXPECT_DOUBLE_EQ(scale, 0.8);
+        EXPECT_DOUBLE_EQ(ratio, 0.6);
+    }
+    gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP");
+    gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALED");
+    gmxSetenv("GMX_GAMD_FORCE_DEBUG_BEGIN", "1bad", 1);
+    EXPECT_THROW(GaMDDiagnostics(), InvalidInputError);
+    gmxUnsetenv("GMX_GAMD_FORCE_DEBUG_BEGIN");
+}
 
 TEST(GaMDModuleOwnershipTest, DiagnosticsAndHostWorkspaceAreInstanceOwned)
 {
@@ -435,12 +491,24 @@ TEST_F(GaMDTest, GaMDCpuUpdateSelectsCpuReference)
                                       false,
                                       false,
                                       false,
-                                      true,
-                                      true,
-                                      true,
+                                      false,
+                                      false,
+                                      false,
                                       PressureCoupling::ParrinelloRahman,
                                       PressureCouplingType::Anisotropic,
                                       1));
+}
+
+TEST_F(GaMDTest, CpuGaMDRejectsDomainDecompositionAndMts)
+{
+    GMX_EXPECT_DEATH_IF_SUPPORTED(
+            selectGaMDExecutionMode(
+                    true, false, false, false, false, true, false, false, PressureCoupling::No, PressureCouplingType::Isotropic, 0),
+            "one PP rank without domain decomposition");
+    GMX_EXPECT_DEATH_IF_SUPPORTED(
+            selectGaMDExecutionMode(
+                    true, false, false, false, false, false, false, true, PressureCoupling::No, PressureCouplingType::Isotropic, 0),
+            "does not support MTS");
 }
 
 TEST_F(GaMDTest, NonGaMDGpuUpdateRetainsNormalExecutionMode)
@@ -591,6 +659,98 @@ TEST_F(GaMDTest, IrestProductionCheckpointCanContinueWithoutDuplicateRows)
 
     EXPECT_EQ(countNumericRows("gamd-para.dat"), paraRowsAtCheckpoint);
     EXPECT_EQ(countNumericRows("gamd-reweight.dat"), reweightRowsAtCheckpoint);
+}
+
+TEST_F(GaMDTest, RestartRejectsMalformedRecordsBeforeRestoringState)
+{
+    TestFileManager fileManager;
+    const auto      directory =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    ScopedWorkingDirectory           workingDirectory(directory);
+    const std::array<std::string, 4> suffixes{ "saved_step 10\n",
+                                               "unexpected 1\n",
+                                               "statP 10 0 5 2 0 2 10 1 0.1\n",
+                                               "version 3 trailing\n" };
+    const std::array<const char*, 4> errors{ "Duplicate", "Unknown", "Duplicate", "Duplicate" };
+    for (size_t suffixIndex = 0; suffixIndex < suffixes.size(); suffixIndex++)
+    {
+        writeGaMDProductionInput(c_validGaMDRestart + suffixes[suffixIndex]);
+        GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0), errors[suffixIndex]);
+    }
+    std::string trailing = c_validGaMDRestart;
+    trailing.replace(
+            trailing.find("version 3\n"), std::string("version 3\n").size(), "version 3 trailing\n");
+    writeGaMDProductionInput(trailing);
+    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0), "Unexpected trailing token");
+
+    std::string missingFlag = c_validGaMDRestart;
+    missingFlag.erase(missingFlag.find("production_restart 1\n"),
+                      std::string("production_restart 1\n").size());
+    writeGaMDProductionInput(missingFlag);
+    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0), "requires production_restart");
+
+    std::string invalidFlag = c_validGaMDRestart;
+    invalidFlag.replace(invalidFlag.find("production_restart 1"),
+                        std::string("production_restart 1").size(),
+                        "production_restart 2");
+    writeGaMDProductionInput(invalidFlag);
+    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0),
+                                  "production_restart must be 0 or 1");
+}
+
+TEST_F(GaMDTest, RestartReadsAllSupportedVersions)
+{
+    TestFileManager fileManager;
+    for (int version = 1; version <= 3; version++)
+    {
+        const auto directory = fileManager.getOutputTempDirectory()
+                               / TestFileManager::getTestSpecificFileNameRoot() / std::to_string(version);
+        ScopedWorkingDirectory workingDirectory(directory);
+        std::string            restart = c_validGaMDRestart;
+        restart.replace(restart.find("version 3"),
+                        std::string("version 3").size(),
+                        "version " + std::to_string(version));
+        if (version < 3)
+        {
+            restart.erase(restart.find("production_restart 1\n"),
+                          std::string("production_restart 1\n").size());
+        }
+        if (version == 1)
+        {
+            restart.erase(restart.find("windowP 0 0 0\n"), std::string("windowP 0 0 0\n").size());
+            restart.erase(restart.find("windowD 0 0 0\n"), std::string("windowD 0 0 0\n").size());
+        }
+        writeGaMDProductionInput(restart);
+        gaMDModule_.resetStateForTesting();
+        const GaMDStepPlan& plan = gaMDModule_.prepareStep(0, 0);
+        EXPECT_EQ(plan.stage, 5);
+        EXPECT_DOUBLE_EQ(plan.thresholdP, 10.0);
+    }
+}
+
+TEST_F(GaMDTest, RestartSelectsOnlyAValidatedMatchingSnapshot)
+{
+    TestFileManager fileManager;
+    const auto      directory =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    ScopedWorkingDirectory workingDirectory(directory);
+    writeGaMDProductionInput(c_validGaMDRestart + "saved_step 10\n");
+    {
+        std::ofstream previous("gamd-restart-prev.dat");
+        previous << c_validGaMDRestart;
+    }
+    const GaMDStepPlan& recovered = gaMDModule_.prepareStep(10, 0);
+    EXPECT_EQ(recovered.stage, 5);
+    EXPECT_DOUBLE_EQ(recovered.thresholdP, 10.0);
+
+    // 当前快照有效且匹配时，无关的旧备份不能阻止正常续跑。
+    gaMDModule_.resetStateForTesting();
+    writeGaMDProductionInput(c_validGaMDRestart);
+    {
+        std::ofstream previous("gamd-restart-prev.dat");
+        previous << "corrupted backup\n";
+    }
+    EXPECT_EQ(gaMDModule_.prepareStep(10, 0).stage, 5);
 }
 
 TEST_F(GaMDTest, RestartRetains64BitCounters)
