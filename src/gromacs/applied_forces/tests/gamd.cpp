@@ -44,6 +44,7 @@
 #include <array>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -54,6 +55,7 @@
 #include "gromacs/applied_forces/gamd/gamddiagnostics.h"
 #include "gromacs/applied_forces/gamd/gamdexecution.h"
 #include "gromacs/applied_forces/gamd/gamdmdmodule.h"
+#include "gromacs/applied_forces/gamd/gamdruntime.h"
 #include "gromacs/utility/exceptions.h"
 
 #include "testutils/setenv.h"
@@ -160,6 +162,212 @@ void writeGaMDProductionInput(const std::string& restartContents)
     input << "igamd 1\nirest_gamd 1\niE 1\niEP 1\nreweight_nst 50\nsigma0P 6.0\n";
     std::ofstream restart("gamd-restart.dat");
     restart << restartContents;
+}
+
+TEST(GaMDDiagnosticsDeathTest, NonFiniteEnergyStateIsRejected)
+{
+    const GaMDStepResult        reference;
+    const std::array<double, 3> invalidValues = { std::numeric_limits<double>::quiet_NaN(),
+                                                  std::numeric_limits<double>::infinity(),
+                                                  -std::numeric_limits<double>::infinity() };
+    for (std::size_t valueIndex = 0; valueIndex < invalidValues.size(); ++valueIndex)
+    {
+        // 六种物理量分别破坏一次，主机和设备两侧都必须拒绝。
+        std::array<GaMDStepResult, 6> invalidStates = {};
+        invalidStates[0].potentialEnergy            = invalidValues[valueIndex];
+        invalidStates[1].dihedralEnergy             = invalidValues[valueIndex];
+        invalidStates[2].scaleP                     = invalidValues[valueIndex];
+        invalidStates[3].scaleD                     = invalidValues[valueIndex];
+        invalidStates[4].boostP                     = invalidValues[valueIndex];
+        invalidStates[5].boostD                     = invalidValues[valueIndex];
+        for (std::size_t stateIndex = 0; stateIndex < invalidStates.size(); ++stateIndex)
+        {
+            GMX_EXPECT_DEATH_IF_SUPPORTED(
+                    validateGaMDGpuShadowEnergy(1, reference, invalidStates[stateIndex]),
+                    "Non-finite");
+            GMX_EXPECT_DEATH_IF_SUPPORTED(
+                    validateGaMDGpuShadowEnergy(1, invalidStates[stateIndex], reference),
+                    "Non-finite");
+        }
+    }
+}
+
+TEST(GaMDDiagnosticsDeathTest, NonFiniteVirialComponentsAreRejected)
+{
+    tensor                      reference     = {};
+    std::array<real, DIM * DIM> candidate     = {};
+    const std::array<real, 3>   invalidValues = { std::numeric_limits<real>::quiet_NaN(),
+                                                  std::numeric_limits<real>::infinity(),
+                                                  -std::numeric_limits<real>::infinity() };
+    for (std::size_t valueIndex = 0; valueIndex < invalidValues.size(); ++valueIndex)
+    {
+        for (int componentIndex = 0; componentIndex < DIM * DIM; ++componentIndex)
+        {
+            candidate[componentIndex] = invalidValues[valueIndex];
+            GMX_EXPECT_DEATH_IF_SUPPORTED(validateGaMDGpuShadowVirial(1, reference, candidate),
+                                          "Non-finite");
+            candidate[componentIndex]                             = 0;
+            reference[componentIndex / DIM][componentIndex % DIM] = invalidValues[valueIndex];
+            GMX_EXPECT_DEATH_IF_SUPPORTED(validateGaMDGpuShadowVirial(1, reference, candidate),
+                                          "Non-finite");
+            reference[componentIndex / DIM][componentIndex % DIM] = 0;
+        }
+    }
+}
+
+TEST(GaMDDiagnosticsDeathTest, NonFiniteForcesAndExcessiveDifferencesAreRejected)
+{
+    const std::array<RVec, 1> referenceForces = { RVec(0, 0, 0) };
+    std::array<RVec, 1>       candidateForces = { RVec(0, 0, 0) };
+    candidateForces[0][ZZ]                    = std::numeric_limits<real>::quiet_NaN();
+    GMX_EXPECT_DEATH_IF_SUPPORTED(
+            validateGaMDGpuShadowForces("test", 1, referenceForces, candidateForces, 0.005, 0.0001),
+            "Non-finite");
+    GMX_EXPECT_DEATH_IF_SUPPORTED(
+            validateGaMDGpuShadowForces("test", 1, candidateForces, referenceForces, 0.005, 0.0001),
+            "Non-finite");
+    candidateForces[0][ZZ] = 1;
+    GMX_EXPECT_DEATH_IF_SUPPORTED(
+            validateGaMDGpuShadowForces("test", 1, referenceForces, candidateForces, 0.005, 0.0001),
+            "exceed provisional");
+
+    GaMDStepResult candidateEnergy;
+    candidateEnergy.potentialEnergy = 1;
+    GMX_EXPECT_DEATH_IF_SUPPORTED(validateGaMDGpuShadowEnergy(1, GaMDStepResult{}, candidateEnergy),
+                                  "shadow mismatch");
+    tensor                      referenceVirial = {};
+    std::array<real, DIM * DIM> candidateVirial = {};
+    candidateVirial.back()                      = 1;
+    GMX_EXPECT_DEATH_IF_SUPPORTED(validateGaMDGpuShadowVirial(1, referenceVirial, candidateVirial),
+                                  "exceeds provisional");
+}
+
+TEST(GaMDDiagnosticsTest, FiniteShadowsWithinExistingTolerancesAreAccepted)
+{
+    GaMDStepResult candidateEnergy;
+    candidateEnergy.potentialEnergy = 0.1;
+    candidateEnergy.dihedralEnergy  = 0.0005;
+    candidateEnergy.scaleP += 0.00001;
+    candidateEnergy.scaleD -= 0.00001;
+    candidateEnergy.boostP = 0.05;
+    validateGaMDGpuShadowEnergy(1, GaMDStepResult{}, candidateEnergy);
+    tensor                      referenceVirial = {};
+    std::array<real, DIM * DIM> candidateVirial = {};
+    candidateVirial.back()                      = 0.005_real;
+    validateGaMDGpuShadowVirial(1, referenceVirial, candidateVirial);
+    const std::array<RVec, 1> referenceForces = { RVec(0, 0, 0) };
+    const std::array<RVec, 1> candidateForces = { RVec(0.0001_real, 0, 0) };
+    validateGaMDGpuShadowForces("test", 1, referenceForces, candidateForces, 0.005, 0.0001);
+}
+
+TEST(GaMDParameterTest, StageBoundariesAreCheckedBeforeAdding)
+{
+    GaMDParameters parameters;
+    parameters.conventionalPrepEnd = 0;
+    parameters.conventionalEnd     = std::numeric_limits<int64_t>::max() - 1;
+    parameters.boostPrepLength     = 0;
+    parameters.boostLength         = 1;
+    parameters.averagingWindow     = 1;
+    EXPECT_TRUE(gaMDStageParameterError(parameters).empty());
+    parameters.boostLength = 2;
+    EXPECT_NE(gaMDStageParameterError(parameters).find("64-bit"), std::string::npos);
+    parameters.conventionalEnd = 20;
+    parameters.boostLength     = 20;
+    parameters.averagingWindow = 0;
+    EXPECT_NE(gaMDStageParameterError(parameters).find("ntave>0"), std::string::npos);
+    parameters.averagingWindow = 3;
+    EXPECT_NE(gaMDStageParameterError(parameters).find("multiples of ntave"), std::string::npos);
+}
+
+TEST_F(GaMDTest, FreshInputRejectsStageAndRunLengthOverflow)
+{
+    TestFileManager fileManager;
+    const auto      directory =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    ScopedWorkingDirectory workingDirectory(directory);
+    {
+        std::ofstream input("gamd.in");
+        input << "igamd 1\niE 1\niEP 1\nreweight_nst 50\nsigma0P 6\n"
+                 "ntcmdprep 0\nntcmd 9223372036854775806\n"
+                 "ntebprep 0\nnteb 2\nntave 1\n";
+    }
+    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0), "64-bit");
+    {
+        std::ofstream input("gamd.in");
+        input << "igamd 1\niE 1\niEP 1\nreweight_nst 50\nsigma0P 6\n"
+                 "ntcmdprep 0\nntcmd 2\nntebprep 0\nnteb 2\nntave 1\n";
+    }
+    gaMDModule_.prepareStep(0, 0);
+    GMX_EXPECT_DEATH_IF_SUPPORTED(
+            gaMDModule_.warnIfRunTooShort(std::numeric_limits<int64_t>::max() - 1, 2, 0), "64-bit");
+}
+
+TEST_F(GaMDTest, RestartRejectsInvalidStageCounters)
+{
+    TestFileManager fileManager;
+    const auto      directory =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    ScopedWorkingDirectory           workingDirectory(directory);
+    const std::array<std::string, 3> invalidParameters = {
+        "params 1 1 1 1 10 20 10 20 0 50 25.104 25.104",
+        "params 1 1 1 1 0 9223372036854775806 0 2 1 50 25.104 25.104",
+        "params 1 1 1 1 10 20 10 20 3 50 25.104 25.104"
+    };
+    for (std::size_t caseIndex = 0; caseIndex < invalidParameters.size(); ++caseIndex)
+    {
+        std::string restart        = c_validGaMDRestart;
+        const auto  parameterStart = restart.find("params ");
+        const auto  parameterEnd   = restart.find('\n', parameterStart);
+        restart.replace(parameterStart, parameterEnd - parameterStart, invalidParameters[caseIndex]);
+        writeGaMDProductionInput(restart);
+        GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0), "invalid");
+    }
+}
+
+TEST_F(GaMDTest, ProductionRestartMayIgnoreZeroStageInput)
+{
+    TestFileManager fileManager;
+    const auto      directory =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    ScopedWorkingDirectory workingDirectory(directory);
+    writeGaMDProductionInput(c_validGaMDRestart);
+    {
+        std::ofstream input("gamd.in", std::ios::app);
+        input << "ntcmdprep 0\nntcmd 0\nntebprep 0\nnteb 0\nntave 0\n";
+    }
+    const GaMDStepPlan& plan = gaMDModule_.prepareStep(0, 0);
+    EXPECT_EQ(plan.stage, GaMDStage::Production);
+    EXPECT_DOUBLE_EQ(plan.thresholdP, 10.0);
+}
+
+TEST_F(GaMDTest, StageTransitionsPreserveNumericOutput)
+{
+    TestFileManager fileManager;
+    const auto      directory =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    ScopedWorkingDirectory workingDirectory(directory);
+    {
+        std::ofstream input("gamd.in");
+        input << "igamd 1\niE 1\niEP 1\nreweight_nst 1\npara_nst 1\nsigma0P 6\n"
+                 "ntcmdprep 2\nntcmd 4\nntebprep 2\nnteb 4\nntave 2\n";
+    }
+    // 固定旧协议的阶段数字，同时覆盖每个边界的前后两侧。
+    const std::array<int, 10> expectedStages = { 1, 1, 1, 2, 2, 3, 3, 4, 4, 5 };
+    for (std::size_t stepIndex = 0; stepIndex < expectedStages.size(); ++stepIndex)
+    {
+        const GaMDStepPlan& plan = gaMDModule_.prepareStep(stepIndex, 0);
+        EXPECT_EQ(static_cast<int>(plan.stage), expectedStages[stepIndex]);
+        gaMDModule_.finalizeCurrentStep(stepIndex, 0, stepIndex, 0);
+    }
+    const auto rows = readNumericRows("gamd-para.dat");
+    ASSERT_EQ(rows.size(), 7U);
+    for (std::size_t rowIndex = 0; rowIndex < rows.size(); ++rowIndex)
+    {
+        ASSERT_GE(rows[rowIndex].size(), 3U);
+        const auto stepIndex = static_cast<std::size_t>(rows[rowIndex][1]);
+        ASSERT_LT(stepIndex, expectedStages.size());
+        EXPECT_EQ(rows[rowIndex][2], expectedStages[stepIndex]);
+    }
 }
 
 TEST(GaMDDiagnosticsDeathTest, InvalidForceOverridesAreRejected)
@@ -670,7 +878,12 @@ TEST_F(GaMDTest, IrestProductionCheckpointCanContinueWithoutDuplicateRows)
     for (long step = 1; step <= 4; step++)
     {
         gaMDModule_.prepareStep(step, 0);
-        gaMDModule_.finalizeCurrentStep(step, 0, (step == 2 ? 10.0 : 0.0), 0.0);
+        double potentialEnergy = 0.0;
+        if (step == 2)
+        {
+            potentialEnergy = 10.0;
+        }
+        gaMDModule_.finalizeCurrentStep(step, 0, potentialEnergy, 0.0);
     }
     gaMDModule_.setCheckpointingThisStep(true);
     gaMDModule_.writeRestartState(4);
@@ -773,7 +986,7 @@ TEST_F(GaMDTest, RestartReadsAllSupportedVersions)
         writeGaMDProductionInput(restart);
         gaMDModule_.resetStateForTesting();
         const GaMDStepPlan& plan = gaMDModule_.prepareStep(0, 0);
-        EXPECT_EQ(plan.stage, 5);
+        EXPECT_EQ(plan.stage, GaMDStage::Production);
         EXPECT_DOUBLE_EQ(plan.thresholdP, 10.0);
     }
 }
@@ -790,7 +1003,7 @@ TEST_F(GaMDTest, RestartSelectsOnlyAValidatedMatchingSnapshot)
         previous << c_validGaMDRestart;
     }
     const GaMDStepPlan& recovered = gaMDModule_.prepareStep(10, 0);
-    EXPECT_EQ(recovered.stage, 5);
+    EXPECT_EQ(recovered.stage, GaMDStage::Production);
     EXPECT_DOUBLE_EQ(recovered.thresholdP, 10.0);
 
     // 当前快照有效且匹配时，无关的旧备份不能阻止正常续跑。
@@ -800,7 +1013,7 @@ TEST_F(GaMDTest, RestartSelectsOnlyAValidatedMatchingSnapshot)
         std::ofstream previous("gamd-restart-prev.dat");
         previous << "corrupted backup\n";
     }
-    EXPECT_EQ(gaMDModule_.prepareStep(10, 0).stage, 5);
+    EXPECT_EQ(gaMDModule_.prepareStep(10, 0).stage, GaMDStage::Production);
 }
 
 TEST_F(GaMDTest, RestartRetains64BitCounters)

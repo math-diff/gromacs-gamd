@@ -14,3 +14,10 @@ _Avoid_: Production mode, additional force scaling
 **Deferred sample batch**:
 Energy, force virial, constraint virial, and kinetic records for the same ordered simulation steps, held until their next output consumer.
 _Avoid_: Independent histories when referring to the complete set
+
+**GaMD stage**:
+Conventional preparation, conventional statistics, boost preparation, boost statistics, or production. `GaMDStage` names these states in code; the text protocol retains values 1 through 5, with 0 reserved for an inactive plan.
+
+**Device bias state**:
+The fixed six-float layout containing potential/dihedral energies, their force weights, and their boosts. Named indices describe the device layout; host diagnostics receive a `GaMDStepResult` copied from that state.
+_Avoid_: Energy shadow when referring to the production device buffer

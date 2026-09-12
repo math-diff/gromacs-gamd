@@ -39,6 +39,7 @@
 #include <memory>
 #include <vector>
 
+#include "gromacs/applied_forces/gamd/gamdtypes.h"
 #include "gromacs/gpu_utils/devicebuffer_datatype.h"
 #include "gromacs/gpu_utils/gputraits.h"
 #include "gromacs/math/vectypes.h"
@@ -55,9 +56,6 @@ namespace gmx
 
 template<typename>
 class ArrayRef;
-
-struct GaMDBiasParameters;
-struct GaMDForceOverrides;
 
 struct GaMDBondedDeviceBuffers
 {
@@ -118,10 +116,10 @@ public:
     DeviceBuffer<float>   pmeEnergyStagingBuffer();
     GpuEventSynchronizer* pmeEnergyReadyEvent();
 
-    void                  launchEnergyReduction(const GaMDBiasParameters& parameters,
-                                                const GaMDForceOverrides& forceOverrides,
-                                                bool                      recordEnergySample);
-    std::array<double, 6> energyDiagnostics();
+    void           launchEnergyReduction(const GaMDBiasParameters& parameters,
+                                         const GaMDForceOverrides& forceOverrides,
+                                         bool                      recordEnergySample);
+    GaMDStepResult energyDiagnostics();
     //! Read all deferred records together and clear their counters in stream order.
     GaMDHistoryBatch takeHistory();
 

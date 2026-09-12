@@ -53,7 +53,7 @@ namespace
 
 TEST(GaMDMathTest, BoostModesHaveIndependentAnalyticalValues)
 {
-    GaMDBiasParameters   parameters{ 1, 5, 10.0, 0.1, 5.0, 0.2 };
+    GaMDBiasParameters   parameters{ 1, GaMDStage::Production, 10.0, 0.1, 5.0, 0.2 };
     const GaMDStepResult potential = evaluateGaMDBias(parameters, 8.0, 2.0);
     EXPECT_DOUBLE_EQ(potential.boostP, 0.2);
     EXPECT_DOUBLE_EQ(potential.scaleP, 0.8);
@@ -80,7 +80,7 @@ TEST(GaMDMathTest, BoostModesHaveIndependentAnalyticalValues)
 
 TEST(GaMDMathTest, ThresholdAndPreparationStagesHaveNoBias)
 {
-    GaMDBiasParameters parameters{ 3, 5, 10.0, 0.1, 5.0, 0.2 };
+    GaMDBiasParameters parameters{ 3, GaMDStage::Production, 10.0, 0.1, 5.0, 0.2 };
     for (double energyOffset : std::array<double, 2>{ 0.0, 1.0 })
     {
         const GaMDStepResult result =
@@ -89,9 +89,12 @@ TEST(GaMDMathTest, ThresholdAndPreparationStagesHaveNoBias)
         EXPECT_DOUBLE_EQ(result.scaleP, 1.0);
         EXPECT_DOUBLE_EQ(result.scaleD, 1.0);
     }
-    for (int stage = 0; stage < 3; stage++)
+    const std::array<GaMDStage, 3> neutralStages = { GaMDStage::Inactive,
+                                                     GaMDStage::ConventionalPreparation,
+                                                     GaMDStage::ConventionalStatistics };
+    for (std::size_t stageIndex = 0; stageIndex < neutralStages.size(); ++stageIndex)
     {
-        parameters.stage            = stage;
+        parameters.stage            = neutralStages[stageIndex];
         const GaMDStepResult result = evaluateGaMDBias(parameters, 8.0, 2.0);
         EXPECT_DOUBLE_EQ(result.totalBoost(), 0.0);
         EXPECT_DOUBLE_EQ(result.scaleP, 1.0);
@@ -105,7 +108,7 @@ TEST(GaMDMathTest, BiasGradientMatchesForceComposition)
     constexpr double increment  = 1e-6;
     for (int boostType = 1; boostType <= 3; boostType++)
     {
-        GaMDBiasParameters   parameters{ boostType, 5, 10.0, 0.05, 5.0, 0.1 };
+        GaMDBiasParameters   parameters{ boostType, GaMDStage::Production, 10.0, 0.05, 5.0, 0.1 };
         const GaMDStepResult result = evaluateGaMDBias(
                 parameters, 2.0 * coordinate * coordinate, 0.5 * coordinate * coordinate);
         const double         lowerCoordinate = coordinate - increment;
@@ -128,7 +131,7 @@ TEST(GaMDMathTest, BiasGradientMatchesForceComposition)
 
 TEST(GaMDMathTest, EvaluatorLeavesSafetyFloorToTheCaller)
 {
-    const GaMDBiasParameters parameters{ 1, 5, 10.0, 0.2, 0.0, 0.0 };
+    const GaMDBiasParameters parameters{ 1, GaMDStage::Production, 10.0, 0.2, 0.0, 0.0 };
     const GaMDStepResult     result = evaluateGaMDBias(parameters, 0.0, 0.0);
     EXPECT_DOUBLE_EQ(result.scaleP, -1.0);
     EXPECT_DOUBLE_EQ(result.boostP, 10.0);

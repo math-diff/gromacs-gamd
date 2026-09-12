@@ -266,11 +266,11 @@ void GaMDRuntime::saveRestartState(int64_t step, int rank)
         return;
     }
 
-    const int  currentStage          = determineStage(step);
-    const bool saveAtCmdStatBoundary = (step == parameters_.conventionalEnd);
+    const GaMDStage currentStage          = determineStage(step);
+    const bool      saveAtCmdStatBoundary = (step == parameters_.conventionalEnd);
     const bool saveAtBoostStatBoundary = (step == parameters_.conventionalEnd + parameters_.boostLength);
-    const bool inBoostStatPhase     = (currentStage == 4);
-    const bool inProductionPhase    = (currentStage == 5);
+    const bool inBoostStatPhase     = (currentStage == GaMDStage::BoostStatistics);
+    const bool inProductionPhase    = (currentStage == GaMDStage::Production);
     const bool saveDuringBoostStat  = (inBoostStatPhase && checkpointingThisStep_);
     const bool saveDuringProduction = (inProductionPhase && checkpointingThisStep_);
 
@@ -513,6 +513,12 @@ static std::optional<GaMDRestartState> readGaMDRestartState(const char* filename
         *error = "GaMD restart version 3 requires production_restart.";
         return std::nullopt;
     }
+    // 连备份也先校验完整阶段参数，不能把坏计数恢复到正在运行的模拟。
+    *error = gaMDStageParameterError(state.parameters);
+    if (!error->empty())
+    {
+        return std::nullopt;
+    }
     if (state.savedStep < 0 || !validStats(state.potentialStatistics) || !validStats(state.dihedralStatistics)
         || (state.version >= 2
             && (!validWindowStats(state.potentialWindow) || !validWindowStats(state.dihedralWindow)))
@@ -689,7 +695,7 @@ void GaMDRuntime::loadRestartStateIfNeeded(int64_t step, int rank)
         parameters_.conventionalEnd     = savedParameters.conventionalEnd;
         parameters_.boostPrepLength     = savedParameters.boostPrepLength;
         parameters_.boostLength         = savedParameters.boostLength;
-        parameters_.averagingWindow     = std::max<int64_t>(1, savedParameters.averagingWindow);
+        parameters_.averagingWindow     = savedParameters.averagingWindow;
 
         forceProductionRestart_ = true;
 
@@ -918,7 +924,7 @@ void GaMDRuntime::writeParameterLine(int64_t step, int rank, bool flushOutput)
         return;
     }
 
-    if (stepPlan_.stage < 2 || step == 0)
+    if (stepPlan_.stage < GaMDStage::ConventionalStatistics || step == 0)
     {
         return;
     }
@@ -946,7 +952,7 @@ void GaMDRuntime::writeParameterLine(int64_t step, int rank, bool flushOutput)
                      "%10" PRId64 " %12" PRId64 " %6d",
                      parameters_.parameterInterval,
                      step,
-                     stepPlan_.stage)
+                     static_cast<int>(stepPlan_.stage))
         < 0)
     {
         gmx_fatal(FARGS, "Failed to write gamd-para.dat at step %" PRId64 ".", step);
@@ -971,7 +977,7 @@ void GaMDRuntime::writeReweightRecord(int64_t step, int rank, const GaMDStepResu
         return;
     }
 
-    if (stepPlan_.stage < 3)
+    if (stepPlan_.stage < GaMDStage::BoostPreparation)
     {
         return;
     }

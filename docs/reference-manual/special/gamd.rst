@@ -107,6 +107,11 @@ the activation flag; detailed parameters are read from ``gamd.in`` in the
 
 The strict legacy parser rejects unknown/duplicate keys, missing values,
 trailing non-comment tokens, invalid ranges, and unaligned averaging windows.
+Input and restart snapshots share stage validation: ``ntave`` must be positive,
+stage lengths must be ordered and window-aligned, and ``ntcmd + nteb`` must fit
+in a signed 64-bit step counter. Invalid restart windows are rejected.
+With ``irest_gamd=1``, stage controls in ``gamd.in`` may still be omitted or zero;
+the validated restart supplies their stored values.
 ``sigma0P`` and ``sigma0D`` are provided in kcal/mol and converted to kJ/mol.
 ``gamd-para.dat`` uses kJ/mol; ``gamd-reweight.dat`` uses kcal/mol. The two boost
 columns are separate contributions and must be combined when a total bias is
@@ -131,6 +136,8 @@ Supported execution
 All GaMD execution modes require one PP rank without domain decomposition and
 reject MTS before dynamics. CPU update does not provide a distributed GaMD
 energy/force reduction. The CPU reference path is selected with ``-update cpu``.
+Single-rank CPU runs may still use the engine's DD-style atom ordering; their
+local periodic-boundary information and atom mapping remain in use.
 The validated GPU-resident target uses CUDA mixed precision and one GPU, with
 ``-nb gpu -pme gpu -bonded gpu -update gpu``. It requires ``nstfout=0`` and does
 not support DD, separate PME ranks, or MTS. The supported pressure modes are

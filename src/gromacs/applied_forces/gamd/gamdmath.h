@@ -70,7 +70,7 @@ __host__ __device__
     GaMDStepResult result;
     result.potentialEnergy = potentialEnergy;
     result.dihedralEnergy  = dihedralEnergy;
-    if (parameters.stage < 3)
+    if (parameters.stage < GaMDStage::BoostPreparation)
     {
         return result;
     }

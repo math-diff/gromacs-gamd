@@ -42,25 +42,48 @@
 namespace gmx
 {
 
+//! 阶段名称用于代码判断，固定数值继续用于已有的文本输出。
+enum class GaMDStage : int
+{
+    Inactive                = 0,
+    ConventionalPreparation = 1,
+    ConventionalStatistics  = 2,
+    BoostPreparation        = 3,
+    BoostStatistics         = 4,
+    Production              = 5
+};
+
+//! 给设备数组的六个位置命名，保持已有 CUDA 缓冲区布局不变。
+enum GaMDDeviceStateIndex
+{
+    c_gaMDPotentialEnergy = 0,
+    c_gaMDDihedralEnergy  = 1,
+    c_gaMDPotentialScale  = 2,
+    c_gaMDDihedralScale   = 3,
+    c_gaMDPotentialBoost  = 4,
+    c_gaMDDihedralBoost   = 5,
+    c_gaMDStateSize       = 6
+};
+
 /*! \internal
  * \brief Immutable work description prepared at the start of one GaMD step.
  */
 struct GaMDStepPlan
 {
-    int64_t step               = -1;
-    int     boostType          = 0;
-    int     stage              = 0;
-    int     debug              = 0;
-    double  thresholdP         = 0;
-    double  kP                 = 0;
-    double  thresholdD         = 0;
-    double  kD                 = 0;
-    bool    enabled            = false;
-    bool    checkpointing      = false;
-    bool    writesParameters   = false;
-    bool    writesReweight     = false;
-    bool    requiresHostEnergy = false;
-    bool    gpuGraphEligible   = false;
+    int64_t   step               = -1;
+    int       boostType          = 0;
+    GaMDStage stage              = GaMDStage::Inactive;
+    int       debug              = 0;
+    double    thresholdP         = 0;
+    double    kP                 = 0;
+    double    thresholdD         = 0;
+    double    kD                 = 0;
+    bool      enabled            = false;
+    bool      checkpointing      = false;
+    bool      writesParameters   = false;
+    bool      writesReweight     = false;
+    bool      requiresHostEnergy = false;
+    bool      gpuGraphEligible   = false;
 };
 
 /*! \internal
@@ -83,12 +106,12 @@ struct GaMDStepResult
  */
 struct GaMDBiasParameters
 {
-    int    boostType  = 0;
-    int    stage      = 0;
-    double thresholdP = 0;
-    double kP         = 0;
-    double thresholdD = 0;
-    double kD         = 0;
+    int       boostType  = 0;
+    GaMDStage stage      = GaMDStage::Inactive;
+    double    thresholdP = 0;
+    double    kP         = 0;
+    double    thresholdD = 0;
+    double    kD         = 0;
 };
 
 /*! \internal

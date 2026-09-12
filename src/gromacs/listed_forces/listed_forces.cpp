@@ -764,9 +764,6 @@ void calculateGaMDDihedralListedForces(const InteractionDefinitions&            
 
     GMX_RELEASE_ASSERT(fcdata != nullptr,
                        "GaMD dihedral force calculation requires force calculation data");
-    const double savedDihedralForceScale = fcdata->gaMDDihedralForceScale;
-    fcdata->gaMDDihedralForceScale       = 1.0;
-
     std::fill(forces.begin(), forces.end(), gmx::RVec(0.0_real, 0.0_real, 0.0_real));
     std::fill(shiftForces.begin(), shiftForces.end(), gmx::RVec(0.0_real, 0.0_real, 0.0_real));
 
@@ -837,7 +834,6 @@ void calculateGaMDDihedralListedForces(const InteractionDefinitions&            
         forces[i][YY] = scratchForces[i][YY];
         forces[i][ZZ] = scratchForces[i][ZZ];
     }
-    fcdata->gaMDDihedralForceScale = savedDihedralForceScale;
 }
 
 void ListedForces::calculate(struct gmx_wallcycle*                     wcycle,

@@ -64,13 +64,14 @@ __global__ void gamdProductionScaleKernel(float*                   gm_gamdState,
         else
         {
             // 普通 GaMD 继续使用共享公式，保持原有计算顺序。
-            result = evaluateGaMDBias(parameters, gm_gamdState[0], gm_gamdState[1]);
+            result = evaluateGaMDBias(
+                    parameters, gm_gamdState[c_gaMDPotentialEnergy], gm_gamdState[c_gaMDDihedralEnergy]);
         }
 
-        gm_gamdState[2] = static_cast<float>(fmax(c_gaMDScaleFloor, result.scaleP));
-        gm_gamdState[3] = static_cast<float>(fmax(c_gaMDScaleFloor, result.scaleD));
-        gm_gamdState[4] = static_cast<float>(result.boostP);
-        gm_gamdState[5] = static_cast<float>(result.boostD);
+        gm_gamdState[c_gaMDPotentialScale] = static_cast<float>(fmax(c_gaMDScaleFloor, result.scaleP));
+        gm_gamdState[c_gaMDDihedralScale] = static_cast<float>(fmax(c_gaMDScaleFloor, result.scaleD));
+        gm_gamdState[c_gaMDPotentialBoost] = static_cast<float>(result.boostP);
+        gm_gamdState[c_gaMDDihedralBoost]  = static_cast<float>(result.boostD);
     }
 }
 

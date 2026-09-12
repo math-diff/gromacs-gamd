@@ -72,10 +72,10 @@ public:
 
     DeviceBuffer<float>   gamdPmeEnergyStagingBuffer();
     GpuEventSynchronizer* gamdPmeEnergyReadyEvent();
-    void                  launchGamdEnergyShadowReduction(const GaMDBiasParameters& parameters,
-                                                          const GaMDForceOverrides& forceOverrides,
-                                                          bool                      recordEnergySample);
-    std::array<double, 6> gamdEnergyShadowValues();
+    void                  launchGamdEnergyReduction(const GaMDBiasParameters& parameters,
+                                                    const GaMDForceOverrides& forceOverrides,
+                                                    bool                      recordEnergySample);
+    GaMDStepResult        gamdDiagnosticState();
     GaMDHistoryBatch      takeHistory();
     void                  recordGamdForceVirialSample();
 
@@ -124,6 +124,7 @@ private:
 
     static constexpr int c_historyCapacity_ = 4096;
 
+    const bool           useGpuResidentGaMD_;
     const DeviceContext& deviceContext_;
     const DeviceStream&  deviceStream_;
     const DeviceStream*  updateStream_      = nullptr;
@@ -155,20 +156,15 @@ private:
     int                  nbnxnAtomOrderCapacity_     = 0;
 
     bool gamdDihedralShadowEnabled_          = false;
-    bool gamdDihedralBufferEnabled_          = false;
-    bool gamdForceCorrectionEnabled_         = false;
-    bool gamdEnergyShadowEnabled_            = false;
     bool gamdEnergyShadowDiagnosticsEnabled_ = false;
-    bool gamdScaleFromDeviceEnabled_         = false;
-    bool gamdEnergyHistoryEnabled_           = false;
 
     DeviceBuffer<float> d_gamdPmeEnergy_          = nullptr;
-    DeviceBuffer<float> d_gamdEnergyShadow_       = nullptr;
+    DeviceBuffer<float> d_gamdState_              = nullptr;
     DeviceBuffer<float> d_gamdEnergyHistory_      = nullptr;
     DeviceBuffer<float> d_gamdForceVirialHistory_ = nullptr;
     DeviceBuffer<int>   d_gamdEnergyHistoryCount_ = nullptr;
 
-    HostVector<float> h_gamdEnergyShadow_ = { {}, gmx::HostAllocationPolicy(gmx::PinningPolicy::PinnedIfSupported) };
+    HostVector<float> h_gamdDiagnosticState_ = { {}, gmx::HostAllocationPolicy(gmx::PinningPolicy::PinnedIfSupported) };
     HostVector<float> h_gamdEnergyHistory_ = { {}, gmx::HostAllocationPolicy(gmx::PinningPolicy::PinnedIfSupported) };
     HostVector<float> h_gamdForceVirialHistory_ = { {},
                                                     gmx::HostAllocationPolicy(

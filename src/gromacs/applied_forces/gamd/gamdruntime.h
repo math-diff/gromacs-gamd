@@ -41,6 +41,7 @@
 #include <cstdio>
 
 #include <array>
+#include <string>
 
 #include "gromacs/applied_forces/gamd/gamdmath.h"
 #include "gromacs/topology/ifunc.h"
@@ -71,6 +72,9 @@ struct GaMDParameters
     double  potentialSigmaLimit = 6.0 * 4.184;
     double  dihedralSigmaLimit  = 6.0 * 4.184;
 };
+
+//! 输入和重启文件共用阶段校验；空字符串表示这些计数可以安全使用。
+std::string gaMDStageParameterError(const GaMDParameters& parameters);
 
 /*! \internal
  * \brief Owns all mutable GaMD host state for one simulation.
@@ -103,10 +107,10 @@ public:
     void                  warnIfRunTooShort(int64_t initStep, int64_t numSteps, int rank);
 
 private:
-    void loadParameters(int rank);
-    void loadRestartStateIfNeeded(int64_t step, int rank);
-    void saveRestartState(int64_t step, int rank);
-    int  determineStage(int64_t step) const;
+    void      loadParameters(int rank);
+    void      loadRestartStateIfNeeded(int64_t step, int rank);
+    void      saveRestartState(int64_t step, int rank);
+    GaMDStage determineStage(int64_t step) const;
 
     FILE* reweightFile(int rank);
     FILE* parameterFile(int rank);

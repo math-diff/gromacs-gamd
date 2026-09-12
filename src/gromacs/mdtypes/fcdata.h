@@ -246,9 +246,6 @@ struct t_fcdata
     t_disresdata*                 disres = nullptr;
     std::unique_ptr<t_oriresdata> orires;
 
-    // GaMD listed-force bridge. The regular force evaluation is raw (1.0);
-    // dedicated GaMD diagnostics can select another scale without global state.
-    double gaMDDihedralForceScale = 1.0;
     // 该指针不拥有对象，只把 bonded 热路径接到当前模拟的 GaMD 诊断实例。
     gmx::GaMDDiagnostics* gaMDDiagnostics = nullptr;
 };

@@ -42,6 +42,7 @@
 #include <cstdlib>
 
 #include <algorithm>
+#include <limits>
 
 #include "gromacs/timing/wallcycle.h"
 #include "gromacs/utility/fatalerror.h"
@@ -64,31 +65,31 @@ void GaMDRuntime::setCheckpointingThisStep(bool checkpointingThisStep)
     }
 }
 
-int GaMDRuntime::determineStage(int64_t step) const
+GaMDStage GaMDRuntime::determineStage(int64_t step) const
 {
     if (forceProductionRestart_)
     {
-        return 5;
+        return GaMDStage::Production;
     }
 
     if (step <= parameters_.conventionalPrepEnd)
     {
-        return 1;
+        return GaMDStage::ConventionalPreparation;
     }
     if (step <= parameters_.conventionalEnd)
     {
-        return 2;
+        return GaMDStage::ConventionalStatistics;
     }
     if (step <= parameters_.conventionalEnd + parameters_.boostPrepLength)
     {
-        return 3;
+        return GaMDStage::BoostPreparation;
     }
     if (step <= parameters_.conventionalEnd + parameters_.boostLength)
     {
-        return 4;
+        return GaMDStage::BoostStatistics;
     }
 
-    return 5;
+    return GaMDStage::Production;
 }
 
 const GaMDStepPlan& GaMDRuntime::prepareStep(int64_t step, int rank, bool pressureCouplingThisStep)
@@ -133,10 +134,10 @@ const GaMDStepPlan& GaMDRuntime::prepareStep(int64_t step, int rank, bool pressu
     const bool forcedScale            = diagnostics_.forceOverrides().enabled;
     const bool writesUnbufferedOutput = (stepPlan_.writesParameters || stepPlan_.writesReweight)
                                         && !bufferedProductionOutputEnabled();
-    stepPlan_.requiresHostEnergy = stepPlan_.stage != 5 || checkpointingThisStep_
+    stepPlan_.requiresHostEnergy = stepPlan_.stage != GaMDStage::Production || checkpointingThisStep_
                                    || pressureCouplingThisStep || forcedScale || writesUnbufferedOutput;
-    stepPlan_.gpuGraphEligible =
-            stepPlan_.stage == 5 && !checkpointingThisStep_ && !pressureCouplingThisStep;
+    stepPlan_.gpuGraphEligible = stepPlan_.stage == GaMDStage::Production && !checkpointingThisStep_
+                                 && !pressureCouplingThisStep;
     return stepPlan_;
 }
 
@@ -177,8 +178,12 @@ void GaMDRuntime::warnIfRunTooShort(int64_t initStep, int64_t nsteps, int rank)
         return;
     }
 
-    const int64_t adaptivePhaseEnd = static_cast<int64_t>(parameters_.conventionalEnd)
-                                     + static_cast<int64_t>(parameters_.boostLength);
+    // 阶段长度已在输入时检查；模拟总步数也要在相加之前排除溢出。
+    if (initStep > std::numeric_limits<int64_t>::max() - nsteps)
+    {
+        gmx_fatal(FARGS, "GaMD init_step + nsteps exceeds the signed 64-bit step range.");
+    }
+    const int64_t adaptivePhaseEnd = parameters_.conventionalEnd + parameters_.boostLength;
     const int64_t plannedFinalStep = initStep + nsteps;
     if (adaptivePhaseEnd >= plannedFinalStep)
     {
@@ -280,10 +285,11 @@ void GaMDRuntime::finalizeCurrentStep(int64_t        step,
         return;
     }
 
-    const bool updateStat = (stepPlan_.stage == 2 || stepPlan_.stage == 4);
+    const bool updateStat = (stepPlan_.stage == GaMDStage::ConventionalStatistics
+                             || stepPlan_.stage == GaMDStage::BoostStatistics);
     stepResult_ = evaluateGaMDBias(biasParameters(), totalPotentialEnergy, dihedralEnergy);
 
-    if (stepPlan_.stage >= 3)
+    if (stepPlan_.stage >= GaMDStage::BoostPreparation)
     {
         double totalEnergyForPotentialBoost = totalPotentialEnergy;
         if (parameters_.boostType == 3)
@@ -313,7 +319,7 @@ void GaMDRuntime::finalizeCurrentStep(int64_t        step,
     {
         const bool updateAverageWindow    = (step % parameters_.averagingWindow == 0);
         double     totalPotentialForStats = totalPotentialEnergy;
-        if (stepPlan_.stage == 4)
+        if (stepPlan_.stage == GaMDStage::BoostStatistics)
         {
             // 保留原来的相加顺序，避免改变统计量的浮点舍入结果。
             totalPotentialForStats = totalPotentialEnergy + stepResult_.boostP + stepResult_.boostD;
@@ -337,8 +343,9 @@ void GaMDRuntime::finalizeCurrentStep(int64_t        step,
             }
         }
 
-        const bool updateBiasParameters =
-                (stepPlan_.stage == 2 && step == parameters_.conventionalEnd) || stepPlan_.stage == 4;
+        const bool updateBiasParameters = (stepPlan_.stage == GaMDStage::ConventionalStatistics
+                                           && step == parameters_.conventionalEnd)
+                                          || stepPlan_.stage == GaMDStage::BoostStatistics;
         if (updateBiasParameters)
         {
             if (parameters_.boostType == 1 || parameters_.boostType == 3)
@@ -356,7 +363,7 @@ void GaMDRuntime::finalizeCurrentStep(int64_t        step,
 
     wallcycle_stop(wallCycle, WallCycleCounter::GaMDFinalize);
     wallcycle_start(wallCycle, WallCycleCounter::GaMDOutput);
-    if (!bufferedProductionOutputEnabled() || stepPlan_.stage != 5)
+    if (!bufferedProductionOutputEnabled() || stepPlan_.stage != GaMDStage::Production)
     {
         writeParameterLine(step, rank, true);
         writeReweightLine(step, rank, true);
@@ -376,7 +383,7 @@ void GaMDRuntime::writeBufferedProductionOutput(ArrayRef<const int64_t> deferred
     }
     GMX_RELEASE_ASSERT(deferredSteps.size() == deferredEnergySamples.size(),
                        "Buffered GaMD output steps and energy samples must match");
-    if (stepPlan_.stage != 5)
+    if (stepPlan_.stage != GaMDStage::Production)
     {
         GMX_RELEASE_ASSERT(deferredSteps.empty(),
                            "Buffered GaMD output may defer samples only in production stage 5");

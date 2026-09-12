@@ -97,15 +97,6 @@ const EnumerationArray<BondedKernelFlavor, std::string> c_bondedKernelFlavorStri
 namespace
 {
 
-double gaMDDihedralRatio(const t_fcdata* forceCalculationData)
-{
-    if (forceCalculationData == nullptr)
-    {
-        return 1.0;
-    }
-    return forceCalculationData->gaMDDihedralForceScale;
-}
-
 //! Type of CPU function to compute a bonded interaction.
 using BondedFunction = real (*)(int                       nbonds,
                                 const t_iatom             iatoms[],
@@ -1961,7 +1952,7 @@ real dopdihs_min(real cpA, real cpB, real phiA, real phiB, int mult, real phi, r
     /* That was 40 flops */
 }
 
-template<BondedKernelFlavor flavor, bool applyGaMDRatio>
+template<BondedKernelFlavor flavor, bool collectGaMDDiagnostics>
 std::enable_if_t<flavor != BondedKernelFlavor::ForcesSimdWhenAvailable || !GMX_SIMD_HAVE_REAL, real>
 pdihs(int             nbonds,
       const t_iatom   forceatoms[],
@@ -2014,14 +2005,7 @@ pdihs(int             nbonds,
         } while (i < nbonds && forceatoms[i + 1] == ai && forceatoms[i + 2] == aj
                  && forceatoms[i + 3] == ak && forceatoms[i + 4] == al);
 
-        /* GaMD: Scale the total dihedral derivative for Type 9 / Scalar path */
-        if constexpr (applyGaMDRatio)
-        {
-            const double gamdRatioLocal = gaMDDihedralRatio(fcd);
-            ddphi_tot *= gamdRatioLocal;
-        }
-
-        do_dih_fup<flavor, applyGaMDRatio>(
+        do_dih_fup<flavor, collectGaMDDiagnostics>(
                 ai, aj, ak, al, ddphi_tot, r_ij, r_kj, r_kl, m, n, f, fshift, pbc, x, t1, t2, t3, fcd);
 
 
@@ -2033,7 +2017,7 @@ pdihs(int             nbonds,
 #if GMX_SIMD_HAVE_REAL
 
 /* As pdihs above, but using SIMD to calculate multiple dihedrals at once */
-template<BondedKernelFlavor flavor, bool applyGaMDRatio>
+template<BondedKernelFlavor flavor, bool collectGaMDDiagnostics>
 std::enable_if_t<flavor == BondedKernelFlavor::ForcesSimdWhenAvailable, real>
 pdihs(int              nbonds,
       const t_iatom    forceatoms[],
@@ -2125,13 +2109,7 @@ pdihs(int              nbonds,
 
         /* Calculate GMX_SIMD_REAL_WIDTH sines at once */
         sincos(mdphi_S, &sin_S, &cos_S);
-        // GaMD 拦截：将二面角力常数乘上补偿系数
-        // 注意：必须将 double 转换为 SimdReal 才能进行矢量运算
         mddphi_S = cp_S * mult_S * sin_S;
-        if constexpr (applyGaMDRatio)
-        {
-            mddphi_S = mddphi_S * SimdReal(gaMDDihedralRatio(fcd));
-        }
         sf_i_S  = mddphi_S * nrkj_m2_S;
         msf_l_S = mddphi_S * nrkj_n2_S;
 
@@ -2260,8 +2238,7 @@ rbdihs(int              nbonds,
         /* Note that here we do not use the minus sign which is present
          * in the normal RB code. This is corrected for through (m)sf below.
          */
-        // GaMD 拦截：在此处注入二面角补偿系数
-        ddphi_S = (ddphi_S * sin_S) * SimdReal(gaMDDihedralRatio(fcd));
+        ddphi_S = ddphi_S * sin_S;
 
         sf_i_S  = ddphi_S * nrkj_m2_S;
         msf_l_S = ddphi_S * nrkj_n2_S;
@@ -3047,12 +3024,6 @@ rbdihs(int             nbonds,
         dvdl_term += cosfac * rbpBA;
 
         ddphi = -ddphi * sin_phi; /*  11		*/
-        {
-            const double gamdRatioLocal = gaMDDihedralRatio(fcd);
-
-
-            ddphi *= gamdRatioLocal;
-        }
         do_dih_fup<flavor, true>(
                 ai, aj, ak, al, ddphi, r_ij, r_kj, r_kl, m, n, f, fshift, pbc, x, t1, t2, t3, fcd); /* 112
                                                                                                      */
@@ -3450,14 +3421,6 @@ real cmap_dihs(int                 nbonds,
         const real fac = gmx::c_rad2Deg / dx;
         df1            = df1 * fac;
         df2            = df2 * fac;
-
-        /* GaMD: include CMAP in dihedral-force scaling */
-        const double gamdRatioLocal = gaMDDihedralRatio(fcd);
-
-        const real gamdRatio = static_cast<real>(gamdRatioLocal);
-
-        df1 *= gamdRatio;
-        df2 *= gamdRatio;
 
         /* CMAP energy */
         vtot += e;

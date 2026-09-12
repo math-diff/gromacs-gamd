@@ -114,7 +114,7 @@ void GaMDGpuExecutor::launchEnergyReduction(const GaMDBiasParameters&, const GaM
 {
 }
 
-std::array<double, 6> GaMDGpuExecutor::energyDiagnostics()
+GaMDStepResult GaMDGpuExecutor::energyDiagnostics()
 {
     return {};
 }

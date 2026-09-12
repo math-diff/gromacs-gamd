@@ -40,6 +40,7 @@
 #include <cstdint>
 #include <cstdio>
 
+#include <array>
 #include <vector>
 
 #include "gromacs/math/vectypes.h"
@@ -49,6 +50,12 @@
 
 namespace gmx
 {
+
+//! 对照当前步的主机和设备结果，在比较误差前拒绝非有限数值。
+void validateGaMDGpuShadowEnergy(int64_t step, const GaMDStepResult& reference, const GaMDStepResult& candidate);
+void validateGaMDGpuShadowVirial(int64_t                            step,
+                                 const tensor                       reference,
+                                 const std::array<real, DIM * DIM>& candidate);
 
 //! Compare shadow forces and reject non-finite or out-of-tolerance results.
 void validateGaMDGpuShadowForces(const char*          label,

@@ -300,8 +300,8 @@ __global__ void reduceGamdRawEnergiesKernel(const float* gm_nbLJEnergy,
 
         const float dihedralEnergy = gm_listedEnergies[F_PDIHS] + gm_listedEnergies[F_RBDIHS]
                                      + gm_listedEnergies[F_FOURDIHS] + gm_listedEnergies[F_CMAP];
-        gm_gamdEnergies[0] = totalEnergy;
-        gm_gamdEnergies[1] = dihedralEnergy;
+        gm_gamdEnergies[c_gaMDPotentialEnergy] = totalEnergy;
+        gm_gamdEnergies[c_gaMDDihedralEnergy]  = dihedralEnergy;
     }
 }
 
@@ -343,7 +343,8 @@ __global__ void recordGamdEnergySampleKernel(const float* gm_nbLJEnergy,
             }
             sample[fType] = energy;
         }
-        sample[F_EPOT] = gm_gamdState[0] + gm_gamdState[4] + gm_gamdState[5];
+        sample[F_EPOT] = gm_gamdState[c_gaMDPotentialEnergy] + gm_gamdState[c_gaMDPotentialBoost]
+                         + gm_gamdState[c_gaMDDihedralBoost];
     }
 }
 
@@ -362,8 +363,8 @@ __global__ void recordGamdForceVirialSampleKernel(const float* gm_shortRangeViri
         {
             return;
         }
-        const float scaleP                  = gm_gamdState[2];
-        const float dihedralCorrectionScale = scaleP * (gm_gamdState[3] - 1.0F);
+        const float scaleP                  = gm_gamdState[c_gaMDPotentialScale];
+        const float dihedralCorrectionScale = scaleP * (gm_gamdState[c_gaMDDihedralScale] - 1.0F);
         float*      sample                  = gm_forceVirialHistory + sampleIndex * DIM * DIM;
         for (int component = 0; component < DIM * DIM; ++component)
         {
@@ -374,20 +375,25 @@ __global__ void recordGamdForceVirialSampleKernel(const float* gm_shortRangeViri
     }
 }
 
-__global__ void gamdForceCorrectionShadowKernel(const int     numAtoms,
-                                                const float   totalScale,
-                                                const float   dihedralCorrectionScale,
-                                                const float*  gm_gamdState,
-                                                const bool    useDeviceScale,
-                                                const float3* gm_dihedralForce,
-                                                float3*       gm_force)
+__global__ void gamdForceCorrectionKernel(const int     numAtoms,
+                                          const float   totalScale,
+                                          const float   dihedralCorrectionScale,
+                                          const float*  gm_gamdState,
+                                          const bool    useDeviceScale,
+                                          const float3* gm_dihedralForce,
+                                          float3*       gm_force)
 {
     const int atom = blockIdx.x * blockDim.x + threadIdx.x;
     if (atom < numAtoms)
     {
-        const float appliedTotalScale = useDeviceScale ? gm_gamdState[2] : totalScale;
-        const float appliedDihedralCorrectionScale =
-                useDeviceScale ? gm_gamdState[2] * (gm_gamdState[3] - 1.0F) : dihedralCorrectionScale;
+        float appliedTotalScale              = totalScale;
+        float appliedDihedralCorrectionScale = dihedralCorrectionScale;
+        if (useDeviceScale)
+        {
+            appliedTotalScale = gm_gamdState[c_gaMDPotentialScale];
+            appliedDihedralCorrectionScale =
+                    gm_gamdState[c_gaMDPotentialScale] * (gm_gamdState[c_gaMDDihedralScale] - 1.0F);
+        }
         const float3 rawForce      = gm_force[atom];
         const float3 dihedralForce = gm_dihedralForce[atom];
         gm_force[atom]             = make_float3(
@@ -629,7 +635,7 @@ std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::Impl::takePreviousHalf
 
 void GaMDGpuExecutor::Impl::finishGamdDihedralBuffers()
 {
-    GMX_ASSERT(gamdDihedralBufferEnabled_, "GaMD dihedral buffers requested while disabled");
+    GMX_ASSERT(dihedralBufferEnabled(), "GaMD dihedral buffers requested while disabled");
     GMX_ASSERT(d_gamdDihedralForcesNbnxn_ != nullptr && d_gamdDihedralForcesState_ != nullptr
                        && d_nbnxnAtomOrder_ != nullptr,
                "GaMD dihedral buffers have not been initialized");
@@ -673,26 +679,26 @@ void GaMDGpuExecutor::Impl::finishGamdDihedralBuffers()
 
 DeviceBuffer<float> GaMDGpuExecutor::Impl::gamdPmeEnergyStagingBuffer()
 {
-    GMX_ASSERT(gamdEnergyShadowEnabled_, "GaMD device energy shadow requested while disabled");
+    GMX_ASSERT(energyEnabled(), "GaMD device energy requested while disabled");
     return d_gamdPmeEnergy_;
 }
 
 GpuEventSynchronizer* GaMDGpuExecutor::Impl::gamdPmeEnergyReadyEvent()
 {
     GMX_ASSERT(gamdPmeEnergyReadyEvent_ != nullptr,
-               "GaMD PME energy event requested while device energy shadow is disabled");
+               "GaMD PME energy event requested while device energy is disabled");
     return gamdPmeEnergyReadyEvent_.get();
 }
 
-void GaMDGpuExecutor::Impl::launchGamdEnergyShadowReduction(const GaMDBiasParameters& parameters,
-                                                            const GaMDForceOverrides& forceOverrides,
-                                                            bool recordEnergySample)
+void GaMDGpuExecutor::Impl::launchGamdEnergyReduction(const GaMDBiasParameters& parameters,
+                                                      const GaMDForceOverrides& forceOverrides,
+                                                      bool                      recordEnergySample)
 {
-    GMX_ASSERT(gamdEnergyShadowEnabled_, "GaMD device energy shadow requested while disabled");
+    GMX_ASSERT(energyEnabled(), "GaMD device energy requested while disabled");
     GMX_ASSERT(shortRangeLennardJonesEnergy_ != nullptr && shortRangeElectrostaticEnergy_ != nullptr
                        && listedEnergies_ != nullptr && d_gamdPmeEnergy_ != nullptr
-                       && d_gamdEnergyShadow_ != nullptr,
-               "GaMD device energy shadow buffers have not been initialized");
+                       && d_gamdState_ != nullptr,
+               "GaMD device energy buffers have not been initialized");
 
     gamdPmeEnergyReadyEvent_->enqueueWaitEvent(deviceStream_);
 
@@ -712,12 +718,12 @@ void GaMDGpuExecutor::Impl::launchGamdEnergyShadowReduction(const GaMDBiasParame
                                                       &shortRangeElectrostaticEnergy_,
                                                       &d_gamdPmeEnergy_,
                                                       &listedEnergies_,
-                                                      &d_gamdEnergyShadow_);
+                                                      &d_gamdState_);
     launchGpuKernel(kernel, config, deviceStream_, nullptr, "Reduce GaMD raw energies", kernelArgs);
-    launchGamdProductionScaleKernel(d_gamdEnergyShadow_, parameters, forceOverrides, deviceStream_);
+    launchGamdProductionScaleKernel(d_gamdState_, parameters, forceOverrides, deviceStream_);
     if (recordEnergySample)
     {
-        GMX_RELEASE_ASSERT(gamdEnergyHistoryEnabled_ && d_gamdEnergyHistory_ != nullptr
+        GMX_RELEASE_ASSERT(useGpuResidentGaMD_ && d_gamdEnergyHistory_ != nullptr
                                    && d_gamdEnergyHistoryCount_ != nullptr,
                            "Deferred GaMD energy history requested while disabled");
 
@@ -728,7 +734,7 @@ void GaMDGpuExecutor::Impl::launchGamdEnergyShadowReduction(const GaMDBiasParame
                                                                  &shortRangeElectrostaticEnergy_,
                                                                  &d_gamdPmeEnergy_,
                                                                  &listedEnergies_,
-                                                                 &d_gamdEnergyShadow_,
+                                                                 &d_gamdState_,
                                                                  &d_gamdEnergyHistoryCount_,
                                                                  &c_historyCapacity_,
                                                                  &d_gamdEnergyHistory_);
@@ -737,29 +743,31 @@ void GaMDGpuExecutor::Impl::launchGamdEnergyShadowReduction(const GaMDBiasParame
     }
     if (gamdEnergyShadowDiagnosticsEnabled_)
     {
-        copyFromDeviceBuffer(h_gamdEnergyShadow_.data(),
-                             &d_gamdEnergyShadow_,
+        copyFromDeviceBuffer(h_gamdDiagnosticState_.data(),
+                             &d_gamdState_,
                              0,
-                             6,
+                             c_gaMDStateSize,
                              deviceStream_,
                              GpuApiCallBehavior::Async,
                              nullptr);
     }
 }
 
-std::array<double, 6> GaMDGpuExecutor::Impl::gamdEnergyShadowValues()
+GaMDStepResult GaMDGpuExecutor::Impl::gamdDiagnosticState()
 {
     GMX_ASSERT(gamdEnergyShadowDiagnosticsEnabled_,
                "GaMD device energy diagnostics requested while disabled");
     deviceStream_.synchronize();
-    return { h_gamdEnergyShadow_[0], h_gamdEnergyShadow_[1], h_gamdEnergyShadow_[2],
-             h_gamdEnergyShadow_[3], h_gamdEnergyShadow_[4], h_gamdEnergyShadow_[5] };
+    return {
+        h_gamdDiagnosticState_[c_gaMDPotentialEnergy], h_gamdDiagnosticState_[c_gaMDDihedralEnergy],
+        h_gamdDiagnosticState_[c_gaMDPotentialScale],  h_gamdDiagnosticState_[c_gaMDDihedralScale],
+        h_gamdDiagnosticState_[c_gaMDPotentialBoost],  h_gamdDiagnosticState_[c_gaMDDihedralBoost]
+    };
 }
 
 std::vector<std::array<real, F_NRE>> GaMDGpuExecutor::Impl::takeGamdEnergyHistory()
 {
-    GMX_RELEASE_ASSERT(gamdEnergyHistoryEnabled_,
-                       "Deferred GaMD energy history requested while disabled");
+    GMX_RELEASE_ASSERT(useGpuResidentGaMD_, "Deferred GaMD energy history requested while disabled");
     copyFromDeviceBuffer(h_gamdEnergyHistoryCount_.data(),
                          &d_gamdEnergyHistoryCount_,
                          0,
@@ -794,7 +802,7 @@ std::vector<std::array<real, F_NRE>> GaMDGpuExecutor::Impl::takeGamdEnergyHistor
 
 void GaMDGpuExecutor::Impl::recordGamdForceVirialSample()
 {
-    GMX_RELEASE_ASSERT(gamdEnergyHistoryEnabled_ && d_gamdForceVirialHistory_ != nullptr,
+    GMX_RELEASE_ASSERT(useGpuResidentGaMD_ && d_gamdForceVirialHistory_ != nullptr,
                        "Deferred GaMD force-virial history requested while disabled");
 
     KernelLaunchConfig config;
@@ -812,7 +820,7 @@ void GaMDGpuExecutor::Impl::recordGamdForceVirialSample()
                                                       &d_gamdShortRangeVirial_,
                                                       &d_gamdDihedralVirial_,
                                                       &d_gamdPmeEnergy_,
-                                                      &d_gamdEnergyShadow_,
+                                                      &d_gamdState_,
                                                       &d_gamdEnergyHistoryCount_,
                                                       &c_historyCapacity_,
                                                       &d_gamdForceVirialHistory_);
@@ -821,7 +829,7 @@ void GaMDGpuExecutor::Impl::recordGamdForceVirialSample()
 
 std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::Impl::takeGamdForceVirialHistory(const int numSamples)
 {
-    GMX_RELEASE_ASSERT(gamdEnergyHistoryEnabled_,
+    GMX_RELEASE_ASSERT(useGpuResidentGaMD_,
                        "Deferred GaMD force-virial history requested while disabled");
     GMX_RELEASE_ASSERT(numSamples >= 0 && numSamples <= c_historyCapacity_,
                        "Deferred GaMD force-virial sample count is out of range");
@@ -878,8 +886,7 @@ void GaMDGpuExecutor::Impl::launchGamdVirialReductionKernel(DeviceBuffer<Float3>
 
 void GaMDGpuExecutor::Impl::launchGamdShortRangeVirialReduction()
 {
-    GMX_ASSERT(gamdForceCorrectionEnabled_,
-               "GaMD short-range virial reduction requested while disabled");
+    GMX_ASSERT(useGpuResidentGaMD_, "GaMD short-range virial reduction requested while disabled");
     wallcycle_start_nocount(wallCycleCounters_, WallCycleCounter::LaunchGpuPp);
     wallcycle_sub_start(wallCycleCounters_, WallCycleSubCounter::LaunchGpuBonded);
     launchGamdVirialReductionKernel(
@@ -893,8 +900,8 @@ void GaMDGpuExecutor::Impl::launchGamdForceCorrectionKernel(DeviceBuffer<Float3>
                                                             real dihedralCorrectionScale,
                                                             GpuEventSynchronizer* rawForcesReady)
 {
-    GMX_ASSERT(gamdForceCorrectionEnabled_, "GaMD GPU force correction requested while disabled");
-    GMX_ASSERT(!gamdScaleFromDeviceEnabled_ || d_gamdEnergyShadow_ != nullptr,
+    GMX_ASSERT(useGpuResidentGaMD_, "GaMD GPU force correction requested while disabled");
+    GMX_ASSERT(!useGpuResidentGaMD_ || d_gamdState_ != nullptr,
                "GaMD device scale requested without device state storage");
     rawForcesReady->enqueueWaitEvent(deviceStream_);
 
@@ -908,14 +915,14 @@ void GaMDGpuExecutor::Impl::launchGamdForceCorrectionKernel(DeviceBuffer<Float3>
     config.gridSize[2]      = 1;
     config.sharedMemorySize = 0;
 
-    auto       kernel     = gamdForceCorrectionShadowKernel;
+    auto       kernel     = gamdForceCorrectionKernel;
     const auto kernelArgs = prepareGpuKernelArguments(kernel,
                                                       config,
                                                       &gamdStateForceSize_,
                                                       &totalScale,
                                                       &dihedralCorrectionScale,
-                                                      &d_gamdEnergyShadow_,
-                                                      &gamdScaleFromDeviceEnabled_,
+                                                      &d_gamdState_,
+                                                      &useGpuResidentGaMD_,
                                                       &d_gamdDihedralForcesState_,
                                                       &forces);
     launchGpuKernel(kernel, config, deviceStream_, nullptr, "GaMD in-place force correction", kernelArgs);
@@ -939,14 +946,14 @@ void GaMDGpuExecutor::Impl::launchGamdForceCorrectionShadowKernel(real totalScal
     config.gridSize[2]      = 1;
     config.sharedMemorySize = 0;
 
-    auto       kernel         = gamdForceCorrectionShadowKernel;
+    auto       kernel         = gamdForceCorrectionKernel;
     const bool useDeviceScale = false;
     const auto kernelArgs     = prepareGpuKernelArguments(kernel,
                                                       config,
                                                       &gamdStateForceSize_,
                                                       &totalScale,
                                                       &dihedralCorrectionScale,
-                                                      &d_gamdEnergyShadow_,
+                                                      &d_gamdState_,
                                                       &useDeviceScale,
                                                       &d_gamdDihedralForcesState_,
                                                       &d_gamdCorrectedForcesState_);

@@ -41,6 +41,7 @@
 #include <cstdio>
 
 #include <fstream>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <string>
@@ -63,6 +64,31 @@ void requireParameter(const std::set<std::string>& providedParameters, const cha
 }
 
 } // namespace
+
+std::string gaMDStageParameterError(const GaMDParameters& parameters)
+{
+    // 先保证除数和各阶段长度合法，后面才能安全做取余和边界相加。
+    if (parameters.averagingWindow <= 0 || parameters.conventionalPrepEnd < 0
+        || parameters.conventionalEnd <= parameters.conventionalPrepEnd
+        || parameters.boostPrepLength < 0 || parameters.boostLength <= parameters.boostPrepLength)
+    {
+        return "Invalid GaMD stage parameters: require ntave>0, 0<=ntcmdprep<ntcmd, "
+               "and 0<=ntebprep<nteb.";
+    }
+    if (parameters.conventionalEnd > std::numeric_limits<int64_t>::max() - parameters.boostLength)
+    {
+        return "GaMD stage boundary ntcmd + nteb exceeds the signed 64-bit step range.";
+    }
+    if (parameters.conventionalPrepEnd % parameters.averagingWindow != 0
+        || parameters.conventionalEnd % parameters.averagingWindow != 0
+        || parameters.boostPrepLength % parameters.averagingWindow != 0
+        || parameters.boostLength % parameters.averagingWindow != 0)
+    {
+        return "GaMD requires ntcmdprep, ntcmd, ntebprep, and nteb to be multiples of ntave "
+               "for aligned statistics windows.";
+    }
+    return {};
+}
 
 void GaMDRuntime::loadParameters(int rank)
 {
@@ -258,37 +284,10 @@ void GaMDRuntime::loadParameters(int rank)
         requireParameter(providedParameters, "nteb");
         requireParameter(providedParameters, "ntave");
 
-        if (parameters_.averagingWindow <= 0 || parameters_.conventionalPrepEnd < 0
-            || parameters_.conventionalEnd <= parameters_.conventionalPrepEnd
-            || parameters_.boostPrepLength < 0 || parameters_.boostLength <= parameters_.boostPrepLength)
+        const std::string stageError = gaMDStageParameterError(parameters_);
+        if (!stageError.empty())
         {
-            gmx_fatal(FARGS,
-                      "Invalid GaMD stage parameters: require ntave>0, 0<=ntcmdprep<ntcmd, "
-                      "and 0<=ntebprep<nteb; got %" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64
-                      ", %" PRId64 ".",
-                      parameters_.averagingWindow,
-                      parameters_.conventionalPrepEnd,
-                      parameters_.conventionalEnd,
-                      parameters_.boostPrepLength,
-                      parameters_.boostLength);
-        }
-
-        if (parameters_.conventionalPrepEnd % parameters_.averagingWindow != 0
-            || parameters_.conventionalEnd % parameters_.averagingWindow != 0
-            || parameters_.boostPrepLength % parameters_.averagingWindow != 0
-            || parameters_.boostLength % parameters_.averagingWindow != 0)
-        {
-            gmx_fatal(FARGS,
-                      "GaMD requires ntcmdprep (%" PRId64 "), ntcmd (%" PRId64
-                      "), ntebprep (%" PRId64
-                      "), and nteb "
-                      "(%" PRId64 ") to be multiples of ntave (%" PRId64
-                      ") for aligned statistics windows.",
-                      parameters_.conventionalPrepEnd,
-                      parameters_.conventionalEnd,
-                      parameters_.boostPrepLength,
-                      parameters_.boostLength,
-                      parameters_.averagingWindow);
+            gmx_fatal(FARGS, "%s", stageError.c_str());
         }
     }
 

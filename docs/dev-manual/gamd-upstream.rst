@@ -71,6 +71,20 @@ and the optional GPU executor. Keep that single ownership chain.
 is reused for live and deferred results; no second six-field output record or
 new strategy/factory hierarchy is needed.
 
+``GaMDStage`` names the existing stage numbers. Input and restart candidates
+share ordered/window-aligned stage validation and an overflow check before
+forming ``ntcmd + nteb``. The six-float device bias state uses named indices;
+its diagnostic host copy is returned as ``GaMDStepResult``. The GPU executor
+stores one resident-mode flag and derives buffer/history capabilities from it
+and the independent diagnostic switches.
+
+The current-step correction entry performs common checks and energy accounting,
+then calls the separate CPU or GPU sequence in ``sim_util.cpp``. Numerical
+energy, force, and virial comparisons live in ``gamddiagnostics.cpp`` and reject
+non-finite values before aggregating errors. CPU bonded kernels produce raw
+forces; the GaMD correction owns the final weights. Preserve the distinction
+between single-rank DD-style atom ordering and actual PP domain decomposition.
+
 The raw-energy producers, force/virial ownership, constraints/update, standard
 energy output, and MD scheduling still have necessary integration points.
 Moving those interfaces into a GaMD directory would not remove their coupling.

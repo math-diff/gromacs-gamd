@@ -67,19 +67,30 @@ static GaMDForceComparison compareGaMDForceBuffers(ArrayRef<const RVec> referenc
 
     GaMDForceComparison comparison;
     double              sumSquaredError = 0.0;
-    for (gmx::Index atom = 0; atom < reference.ssize(); ++atom)
+    for (gmx::Index atomIndex = 0; atomIndex < reference.ssize(); ++atomIndex)
     {
-        for (int component = 0; component < DIM; ++component)
+        for (int componentIndex = 0; componentIndex < DIM; ++componentIndex)
         {
-            const double error = static_cast<double>(candidate[atom][component])
-                                 - static_cast<double>(reference[atom][component]);
+            const double referenceValue = reference[atomIndex][componentIndex];
+            const double candidateValue = candidate[atomIndex][componentIndex];
+            const double error          = candidateValue - referenceValue;
+            // 不能依赖最大值聚合发现 NaN；它可能让后面的大小比较全部失效。
+            if (!std::isfinite(referenceValue) || !std::isfinite(candidateValue) || !std::isfinite(error))
+            {
+                gmx_fatal(FARGS,
+                          "Non-finite GaMD shadow force at atom %td component %d: cpu=%g gpu=%g.",
+                          atomIndex,
+                          componentIndex,
+                          referenceValue,
+                          candidateValue);
+            }
             const double absoluteError = std::abs(error);
             sumSquaredError += error * error;
             if (absoluteError > comparison.maxAbsoluteError)
             {
                 comparison.maxAbsoluteError = absoluteError;
-                comparison.worstAtom        = atom;
-                comparison.worstComponent   = component;
+                comparison.worstAtom        = atomIndex;
+                comparison.worstComponent   = componentIndex;
             }
         }
     }
@@ -88,6 +99,103 @@ static GaMDForceComparison compareGaMDForceBuffers(ArrayRef<const RVec> referenc
 }
 
 } // namespace
+
+void validateGaMDGpuShadowEnergy(int64_t step, const GaMDStepResult& reference, const GaMDStepResult& candidate)
+{
+    const std::array<double, 5> referenceValues = { reference.potentialEnergy,
+                                                    reference.dihedralEnergy,
+                                                    reference.scaleP,
+                                                    reference.scaleD,
+                                                    reference.totalBoost() };
+    const std::array<double, 5> candidateValues = { candidate.potentialEnergy,
+                                                    candidate.dihedralEnergy,
+                                                    candidate.scaleP,
+                                                    candidate.scaleD,
+                                                    candidate.totalBoost() };
+    // 保留已有混合精度阈值；TC5b 总势能的 0.25 kJ/mol 对应四个浮点间隔。
+    constexpr std::array<double, 5> tolerances  = { 0.25, 0.001, 2e-5, 2e-5, 0.1 };
+    std::array<double, 5>           differences = {};
+    bool                            mismatch    = false;
+    for (std::size_t quantityIndex = 0; quantityIndex < differences.size(); ++quantityIndex)
+    {
+        differences[quantityIndex] = candidateValues[quantityIndex] - referenceValues[quantityIndex];
+        if (!std::isfinite(referenceValues[quantityIndex]) || !std::isfinite(candidateValues[quantityIndex])
+            || !std::isfinite(differences[quantityIndex]))
+        {
+            gmx_fatal(FARGS,
+                      "Non-finite GaMD GPU energy/state shadow at step %lld, quantity %zu: "
+                      "cpu=%g gpu=%g.",
+                      static_cast<long long>(step),
+                      quantityIndex,
+                      referenceValues[quantityIndex],
+                      candidateValues[quantityIndex]);
+        }
+        if (std::abs(differences[quantityIndex]) > tolerances[quantityIndex])
+        {
+            mismatch = true;
+        }
+    }
+    std::fprintf(stderr,
+                 "[GaMD GPU energy shadow] step=%lld total_diff=%.9g dihedral_diff=%.9g "
+                 "scaleP_diff=%.9g scaleD_diff=%.9g total_boost_diff=%.9g\n",
+                 static_cast<long long>(step),
+                 differences[0],
+                 differences[1],
+                 differences[2],
+                 differences[3],
+                 differences[4]);
+    if (mismatch)
+    {
+        gmx_fatal(FARGS,
+                  "GaMD GPU energy/state shadow mismatch at step %lld: total %.9g, "
+                  "dihedral %.9g, scaleP %.9g, scaleD %.9g, total boost %.9g.",
+                  static_cast<long long>(step),
+                  differences[0],
+                  differences[1],
+                  differences[2],
+                  differences[3],
+                  differences[4]);
+    }
+}
+
+void validateGaMDGpuShadowVirial(int64_t step, const tensor reference, const std::array<real, DIM * DIM>& candidate)
+{
+    double maxAbsoluteError = 0.0;
+    for (int rowIndex = 0; rowIndex < DIM; ++rowIndex)
+    {
+        for (int columnIndex = 0; columnIndex < DIM; ++columnIndex)
+        {
+            const double referenceValue = reference[rowIndex][columnIndex];
+            const double candidateValue = candidate[rowIndex * DIM + columnIndex];
+            const double difference     = candidateValue - referenceValue;
+            // 每个分量都检查，避免 std::max 把 NaN 隐藏在有限的最大误差后面。
+            if (!std::isfinite(referenceValue) || !std::isfinite(candidateValue)
+                || !std::isfinite(difference))
+            {
+                gmx_fatal(FARGS,
+                          "Non-finite GaMD GPU virial shadow at step %lld, component %d,%d: "
+                          "cpu=%g gpu=%g.",
+                          static_cast<long long>(step),
+                          rowIndex,
+                          columnIndex,
+                          referenceValue,
+                          candidateValue);
+            }
+            maxAbsoluteError = std::max(maxAbsoluteError, std::abs(difference));
+        }
+    }
+    std::fprintf(stderr,
+                 "[GaMD GPU shadow] live-dihedral-virial step=%lld max_abs=%.9g\n",
+                 static_cast<long long>(step),
+                 maxAbsoluteError);
+    if (maxAbsoluteError > 0.01)
+    {
+        gmx_fatal(FARGS,
+                  "GaMD GPU dihedral virial exceeds provisional mixed-precision "
+                  "tolerance (max %.9g > 0.01).",
+                  maxAbsoluteError);
+    }
+}
 
 void validateGaMDGpuShadowForces(const char*          label,
                                  int64_t              step,
