@@ -730,6 +730,7 @@ static void applyGaMDCurrentStepCorrection(const t_commrec*             cr,
             fr->stateGpu->waitForcesReadyOnHost(AtomLocality::Local);
             validateGaMDGpuShadowForces(
                     "live-force-correction", step, referenceCorrectedForces, liveGpuCorrectedForces, 0.005, 0.0001);
+            gaMDModule->diagnostics().dumpFinalForces(step, liveGpuCorrectedForces, MAIN(cr));
         }
         return;
     }
@@ -3106,12 +3107,8 @@ void do_force(FILE*                         fplog,
                 runScheduleWork.gaMDModule->gpuExecutor()->pmeEnergyReadyEvent());
         const GaMDBiasParameters gamdParameters = runScheduleWork.gaMDModule->biasParameters();
         runScheduleWork.gaMDModule->gpuExecutor()->launchEnergyReduction(
-                gamdParameters.boostType,
-                gamdParameters.stage,
-                gamdParameters.thresholdP,
-                gamdParameters.kP,
-                gamdParameters.thresholdD,
-                gamdParameters.kD,
+                gamdParameters,
+                runScheduleWork.gaMDModule->diagnostics().forceOverrides(),
                 !stepWork.stageGpuEnergyAndVirialToHost);
         if (useGpuGaMDShortRangeVirial && !stepWork.stageGpuEnergyAndVirialToHost)
         {

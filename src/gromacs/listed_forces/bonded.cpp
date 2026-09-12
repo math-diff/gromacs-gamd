@@ -138,12 +138,6 @@ int pbc_rvec_sub(const t_pbc* pbc, const rvec xi, const rvec xj, rvec dx)
     }
 }
 
-bool getForcedGaMDRatio(const t_fcdata* forceCalculationData, double* ratio)
-{
-    return forceCalculationData != nullptr && forceCalculationData->gaMDDiagnostics != nullptr
-           && forceCalculationData->gaMDDiagnostics->forcedDihedralRatio(ratio);
-}
-
 void addGaMDDihedralDebugForces(const t_fcdata* forceCalculationData,
                                 int             atomIndexI,
                                 const rvec      forceI,
@@ -2023,14 +2017,7 @@ pdihs(int             nbonds,
         /* GaMD: Scale the total dihedral derivative for Type 9 / Scalar path */
         if constexpr (applyGaMDRatio)
         {
-            double gamdRatioLocal = gaMDDihedralRatio(fcd);
-            double forcedRatio    = 1.0;
-            if (getForcedGaMDRatio(fcd, &forcedRatio))
-            {
-                gamdRatioLocal = forcedRatio;
-            }
-
-
+            const double gamdRatioLocal = gaMDDihedralRatio(fcd);
             ddphi_tot *= gamdRatioLocal;
         }
 
@@ -3061,12 +3048,7 @@ rbdihs(int             nbonds,
 
         ddphi = -ddphi * sin_phi; /*  11		*/
         {
-            double gamdRatioLocal = gaMDDihedralRatio(fcd);
-            double forcedRatio    = 1.0;
-            if (getForcedGaMDRatio(fcd, &forcedRatio))
-            {
-                gamdRatioLocal = forcedRatio;
-            }
+            const double gamdRatioLocal = gaMDDihedralRatio(fcd);
 
 
             ddphi *= gamdRatioLocal;
@@ -3470,12 +3452,7 @@ real cmap_dihs(int                 nbonds,
         df2            = df2 * fac;
 
         /* GaMD: include CMAP in dihedral-force scaling */
-        double gamdRatioLocal = gaMDDihedralRatio(fcd);
-        double forcedRatio    = 1.0;
-        if (getForcedGaMDRatio(fcd, &forcedRatio))
-        {
-            gamdRatioLocal = forcedRatio;
-        }
+        const double gamdRatioLocal = gaMDDihedralRatio(fcd);
 
         const real gamdRatio = static_cast<real>(gamdRatioLocal);
 

@@ -45,11 +45,10 @@
 #include "gromacs/math/vectypes.h"
 #include "gromacs/utility/arrayref.h"
 
+#include "gamdtypes.h"
+
 namespace gmx
 {
-
-//! Read an optional finite diagnostic value using the standard strict converter.
-double readGaMDDiagnosticReal(const char* variableName, double defaultValue);
 
 //! Compare shadow forces and reject non-finite or out-of-tolerance results.
 void validateGaMDGpuShadowForces(const char*          label,
@@ -92,8 +91,8 @@ public:
 
     GaMDHostWorkspace& hostWorkspace();
 
-    bool forcedTotalScale(double* scale) const;
-    bool forcedDihedralRatio(double* ratio) const;
+    //! Read once on first GaMD use; ordinary simulations never request overrides.
+    const GaMDForceOverrides& forceOverrides();
 
     void prepareDihedralStep(int64_t step, int numAtoms);
     void addBoostedDihedralForces(int        atomIndexI,
@@ -125,10 +124,8 @@ private:
 
     GaMDHostWorkspace hostWorkspace_;
 
-    bool   totalScaleOverrideEnabled_    = false;
-    double totalScaleOverride_           = 1.0;
-    bool   dihedralRatioOverrideEnabled_ = false;
-    double dihedralRatioOverride_        = 1.0;
+    bool               forceOverridesRead_ = false;
+    GaMDForceOverrides forceOverrides_;
 
     FILE*   rawDihedralFile_        = nullptr;
     int64_t rawDihedralCurrentStep_ = -1;

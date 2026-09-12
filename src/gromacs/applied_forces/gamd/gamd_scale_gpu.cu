@@ -46,19 +46,26 @@ namespace gmx
 namespace
 {
 
-__global__ void gamdProductionScaleKernel(float*       gm_gamdState,
-                                          const int    igamd,
-                                          const int    stage,
-                                          const double thresholdP,
-                                          const double kP,
-                                          const double thresholdD,
-                                          const double kD)
+__global__ void gamdProductionScaleKernel(float*                   gm_gamdState,
+                                          const GaMDBiasParameters parameters,
+                                          const GaMDForceOverrides forceOverrides)
 {
     if (blockIdx.x == 0 && threadIdx.x == 0)
     {
-        const GaMDBiasParameters parameters{ igamd, stage, thresholdP, kP, thresholdD, kD };
-        // 直接在设备端调用同一份公式，保持原有缓冲区和内核启动顺序。
-        const GaMDStepResult result = evaluateGaMDBias(parameters, gm_gamdState[0], gm_gamdState[1]);
+        GaMDStepResult result;
+        if (forceOverrides.enabled && parameters.boostType != 0)
+        {
+            // CPU 和 CUDA 共用诊断配置，让力、维里和输出都读取同一份结果。
+            result.scaleP = forceOverrides.totalScale;
+            result.scaleD = forceOverrides.dihedralScale;
+            result.boostP = forceOverrides.potentialBoost;
+            result.boostD = forceOverrides.dihedralBoost;
+        }
+        else
+        {
+            // 普通 GaMD 继续使用共享公式，保持原有计算顺序。
+            result = evaluateGaMDBias(parameters, gm_gamdState[0], gm_gamdState[1]);
+        }
 
         gm_gamdState[2] = static_cast<float>(fmax(c_gaMDScaleFloor, result.scaleP));
         gm_gamdState[3] = static_cast<float>(fmax(c_gaMDScaleFloor, result.scaleD));
@@ -69,14 +76,10 @@ __global__ void gamdProductionScaleKernel(float*       gm_gamdState,
 
 } // namespace
 
-void launchGamdProductionScaleKernel(DeviceBuffer<float> gamdState,
-                                     int                 igamd,
-                                     int                 stage,
-                                     double              thresholdP,
-                                     double              kP,
-                                     double              thresholdD,
-                                     double              kD,
-                                     const DeviceStream& deviceStream)
+void launchGamdProductionScaleKernel(DeviceBuffer<float>       gamdState,
+                                     const GaMDBiasParameters& parameters,
+                                     const GaMDForceOverrides& forceOverrides,
+                                     const DeviceStream&       deviceStream)
 {
     KernelLaunchConfig config;
     config.blockSize[0]     = 1;
@@ -87,9 +90,9 @@ void launchGamdProductionScaleKernel(DeviceBuffer<float> gamdState,
     config.gridSize[2]      = 1;
     config.sharedMemorySize = 0;
 
-    auto       kernel     = gamdProductionScaleKernel;
-    const auto kernelArgs = prepareGpuKernelArguments(
-            kernel, config, &gamdState, &igamd, &stage, &thresholdP, &kP, &thresholdD, &kD);
+    auto       kernel = gamdProductionScaleKernel;
+    const auto kernelArgs =
+            prepareGpuKernelArguments(kernel, config, &gamdState, &parameters, &forceOverrides);
     launchGpuKernel(kernel, config, deviceStream, nullptr, "Evaluate GaMD production scale", kernelArgs);
 }
 

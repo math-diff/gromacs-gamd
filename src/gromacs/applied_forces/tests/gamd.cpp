@@ -165,18 +165,24 @@ void writeGaMDProductionInput(const std::string& restartContents)
 TEST(GaMDDiagnosticsDeathTest, InvalidForceOverridesAreRejected)
 {
     const std::array<const char*, 5> invalidValues{ "abc", "0.8junk", "nan", "inf", "1e999" };
-    for (size_t valueIndex = 0; valueIndex < invalidValues.size(); valueIndex++)
+    const std::array<const char*, 4> variableNames{ "GMX_GAMD_FORCE_OVERRIDE_SCALEP",
+                                                    "GMX_GAMD_FORCE_OVERRIDE_SCALED",
+                                                    "GMX_GAMD_FORCE_OVERRIDE_BOOSTP",
+                                                    "GMX_GAMD_FORCE_OVERRIDE_BOOSTD" };
+    for (size_t variableIndex = 0; variableIndex < variableNames.size(); variableIndex++)
     {
-        gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP", invalidValues[valueIndex], 1);
-        GMX_EXPECT_DEATH_IF_SUPPORTED(readGaMDDiagnosticReal("GMX_GAMD_FORCE_OVERRIDE_SCALEP", 1.0),
-                                      "diagnostic variable");
-        GMX_EXPECT_DEATH_IF_SUPPORTED(GaMDDiagnostics(), "diagnostic variable");
+        gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP", "0.8", 1);
+        for (size_t valueIndex = 0; valueIndex < invalidValues.size(); valueIndex++)
+        {
+            gmxSetenv(variableNames[variableIndex], invalidValues[valueIndex], 1);
+            GMX_EXPECT_DEATH_IF_SUPPORTED(GaMDDiagnostics().forceOverrides(), "diagnostic variable");
+        }
+        gmxUnsetenv(variableNames[variableIndex]);
     }
 #if !GMX_NATIVE_WINDOWS
     // Windows 的环境变量接口把空值当作未设置，Unix 则应拒绝空字符串。
     gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP", "", 1);
-    GMX_EXPECT_DEATH_IF_SUPPORTED(readGaMDDiagnosticReal("GMX_GAMD_FORCE_OVERRIDE_SCALEP", 1.0),
-                                  "diagnostic variable");
+    GMX_EXPECT_DEATH_IF_SUPPORTED(GaMDDiagnostics().forceOverrides(), "diagnostic variable");
 #endif
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP");
 }
@@ -185,20 +191,64 @@ TEST(GaMDDiagnosticsTest, ValidOverridesAndIntegerValidationUseNativeConverters)
 {
     gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP", "0.8", 1);
     gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_SCALED", "0.6", 1);
+    gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_BOOSTP", "4.0", 1);
+    gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_BOOSTD", "2.0", 1);
     {
-        GaMDDiagnostics diagnostics;
-        double          scale = 0.0;
-        double          ratio = 0.0;
-        EXPECT_TRUE(diagnostics.forcedTotalScale(&scale));
-        EXPECT_TRUE(diagnostics.forcedDihedralRatio(&ratio));
-        EXPECT_DOUBLE_EQ(scale, 0.8);
-        EXPECT_DOUBLE_EQ(ratio, 0.6);
+        GaMDDiagnostics           diagnostics;
+        const GaMDForceOverrides& overrides = diagnostics.forceOverrides();
+        EXPECT_TRUE(overrides.enabled);
+        EXPECT_DOUBLE_EQ(overrides.totalScale, 0.8);
+        EXPECT_DOUBLE_EQ(overrides.dihedralScale, 0.6);
+        EXPECT_DOUBLE_EQ(overrides.potentialBoost, 4.0);
+        EXPECT_DOUBLE_EQ(overrides.dihedralBoost, 2.0);
+
+        // 第一次读取后配置固定；下一个模拟实例才采用新的环境值。
+        gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP", "0.5", 1);
+        EXPECT_DOUBLE_EQ(diagnostics.forceOverrides().totalScale, 0.8);
+        EXPECT_DOUBLE_EQ(GaMDDiagnostics().forceOverrides().totalScale, 0.5);
     }
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP");
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALED");
+    gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_BOOSTP");
+    gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_BOOSTD");
     gmxSetenv("GMX_GAMD_FORCE_DEBUG_BEGIN", "1bad", 1);
     EXPECT_THROW(GaMDDiagnostics(), InvalidInputError);
     gmxUnsetenv("GMX_GAMD_FORCE_DEBUG_BEGIN");
+}
+
+TEST(GaMDDiagnosticsTest, UnusedOverridesDoNotAffectModuleConstruction)
+{
+    gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP", "invalid", 1);
+    EXPECT_NO_THROW(GaMDMDModule());
+    gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP");
+}
+
+TEST_F(GaMDTest, ForceOverrideSnapshotGovernsStagingAndHostResult)
+{
+    TestFileManager fileManager;
+    const auto      directory =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    ScopedWorkingDirectory workingDirectory(directory);
+    writeGaMDProductionInput(c_validGaMDRestart);
+    gaMDModule_.setBufferedProductionOutputEnabled(true);
+    gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP", "0.5", 1);
+    gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_SCALED", "1.0", 1);
+    gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_BOOSTP", "4.0", 1);
+    gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_BOOSTD", "2.0", 1);
+    EXPECT_TRUE(gaMDModule_.prepareStep(0, 0).requiresHostEnergy);
+    EXPECT_FALSE(gaMDModule_.bufferedProductionOutputEnabled());
+
+    gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP");
+    gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALED");
+    gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_BOOSTP");
+    gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_BOOSTD");
+    gaMDModule_.finalizeCurrentStep(0, 0, 1000.0, 200.0);
+    EXPECT_DOUBLE_EQ(gaMDModule_.stepResult().scaleP, 0.5);
+    EXPECT_DOUBLE_EQ(gaMDModule_.stepResult().scaleD, 1.0);
+    EXPECT_DOUBLE_EQ(gaMDModule_.stepResult().totalBoost(), 6.0);
+    EXPECT_DOUBLE_EQ(gaMDModule_.stepResult().potentialEnergy, 1000.0);
+    EXPECT_DOUBLE_EQ(gaMDModule_.stepResult().dihedralEnergy, 200.0);
+    EXPECT_TRUE(gaMDModule_.prepareStep(1, 0).requiresHostEnergy);
 }
 
 TEST(GaMDModuleOwnershipTest, DiagnosticsAndHostWorkspaceAreInstanceOwned)

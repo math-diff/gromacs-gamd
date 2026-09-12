@@ -52,6 +52,8 @@ struct gmx_wallcycle;
 namespace gmx
 {
 
+class GaMDDiagnostics;
+
 struct GaMDParameters
 {
     int     boostType           = 0;
@@ -76,7 +78,7 @@ struct GaMDParameters
 class GaMDRuntime
 {
 public:
-    GaMDRuntime() = default;
+    explicit GaMDRuntime(GaMDDiagnostics& diagnostics) : diagnostics_(diagnostics) {}
     ~GaMDRuntime();
 
     const GaMDStepPlan&   prepareStep(int64_t step, int rank, bool pressureCouplingThisStep);
@@ -122,6 +124,7 @@ private:
                                  int                         rank,
                                  bool*                       warnedAtFloor);
 
+    GaMDDiagnostics&     diagnostics_;
     GaMDParameters       parameters_;
     bool                 parametersLoaded_ = false;
     GaMDEnergyStatistics potentialStatistics_;

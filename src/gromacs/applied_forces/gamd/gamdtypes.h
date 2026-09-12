@@ -91,6 +91,18 @@ struct GaMDBiasParameters
     double kD         = 0;
 };
 
+/*! \internal
+ * \brief Fixed diagnostic inputs shared by the CPU and CUDA execution paths.
+ */
+struct GaMDForceOverrides
+{
+    bool   enabled        = false;
+    double totalScale     = 1;
+    double dihedralScale  = 1;
+    double potentialBoost = 0;
+    double dihedralBoost  = 0;
+};
+
 } // namespace gmx
 
 #endif

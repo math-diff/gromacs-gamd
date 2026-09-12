@@ -45,7 +45,8 @@ namespace gmx
 {
 
 GaMDMDModule::GaMDMDModule() :
-    runtime_(std::make_unique<GaMDRuntime>()), diagnostics_(std::make_unique<GaMDDiagnostics>())
+    diagnostics_(std::make_unique<GaMDDiagnostics>()),
+    runtime_(std::make_unique<GaMDRuntime>(*diagnostics_))
 {
 }
 
@@ -169,8 +170,9 @@ void GaMDMDModule::warnIfRunTooShort(int64_t initStep, int64_t numSteps, int ran
 
 void GaMDMDModule::resetStateForTesting()
 {
-    runtime_     = std::make_unique<GaMDRuntime>();
+    runtime_.reset();
     diagnostics_ = std::make_unique<GaMDDiagnostics>();
+    runtime_     = std::make_unique<GaMDRuntime>(*diagnostics_);
 }
 
 std::unique_ptr<GaMDMDModule> createGaMDModule()

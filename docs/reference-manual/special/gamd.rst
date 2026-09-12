@@ -147,6 +147,14 @@ force override values are errors rather than implicit zeroes. Integer debug
 indices and steps also use checked conversion. Valid diagnostic settings keep
 their existing interpretation; these switches are not production mode selectors.
 
+Force overrides are read once on first GaMD use and shared by CPU and CUDA.
+They only affect GaMD-enabled simulations. The current-step force correction
+applies the requested weights once to forces and virial; the integration loop
+and individual bonded kernels do not apply them again. Forced diagnostics use
+immediate output so a buffered-output flush cannot repeat the current record.
+On CUDA, final-force diagnostic output uses the existing shadow-force transfer
+to read the corrected device forces. These diagnostic transfers can add cost.
+
 Verification
 ------------
 

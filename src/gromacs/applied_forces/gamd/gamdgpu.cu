@@ -684,13 +684,9 @@ GpuEventSynchronizer* GaMDGpuExecutor::Impl::gamdPmeEnergyReadyEvent()
     return gamdPmeEnergyReadyEvent_.get();
 }
 
-void GaMDGpuExecutor::Impl::launchGamdEnergyShadowReduction(int    igamd,
-                                                            int    stage,
-                                                            double thresholdP,
-                                                            double kP,
-                                                            double thresholdD,
-                                                            double kD,
-                                                            bool   recordEnergySample)
+void GaMDGpuExecutor::Impl::launchGamdEnergyShadowReduction(const GaMDBiasParameters& parameters,
+                                                            const GaMDForceOverrides& forceOverrides,
+                                                            bool recordEnergySample)
 {
     GMX_ASSERT(gamdEnergyShadowEnabled_, "GaMD device energy shadow requested while disabled");
     GMX_ASSERT(shortRangeLennardJonesEnergy_ != nullptr && shortRangeElectrostaticEnergy_ != nullptr
@@ -718,8 +714,7 @@ void GaMDGpuExecutor::Impl::launchGamdEnergyShadowReduction(int    igamd,
                                                       &listedEnergies_,
                                                       &d_gamdEnergyShadow_);
     launchGpuKernel(kernel, config, deviceStream_, nullptr, "Reduce GaMD raw energies", kernelArgs);
-    launchGamdProductionScaleKernel(
-            d_gamdEnergyShadow_, igamd, stage, thresholdP, kP, thresholdD, kD, deviceStream_);
+    launchGamdProductionScaleKernel(d_gamdEnergyShadow_, parameters, forceOverrides, deviceStream_);
     if (recordEnergySample)
     {
         GMX_RELEASE_ASSERT(gamdEnergyHistoryEnabled_ && d_gamdEnergyHistory_ != nullptr

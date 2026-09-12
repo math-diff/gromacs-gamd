@@ -1,12 +1,35 @@
 /*
  * This file is part of the GROMACS molecular simulation package.
  *
- * Copyright 2026 The GROMACS Authors
+ * Copyright 2026- The GROMACS Authors
+ * and the project initiators Erik Lindahl, Berk Hess and David van der Spoel.
+ * Consult the AUTHORS/COPYING files and https://www.gromacs.org for details.
  *
  * GROMACS is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
  * as published by the Free Software Foundation; either version 2.1
  * of the License, or (at your option) any later version.
+ *
+ * GROMACS is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with GROMACS; if not, see
+ * https://www.gnu.org/licenses, or write to the Free Software Foundation,
+ * Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA.
+ *
+ * If you want to redistribute modifications to GROMACS, please
+ * consider that scientific software is very special. Version
+ * control is crucial - bugs must be traceable. We will be happy to
+ * consider code for inclusion in the official distribution, but
+ * derived work must not be called official GROMACS. Details are found
+ * in the README & COPYING files - if they are missing, get the
+ * official version at https://www.gromacs.org.
+ *
+ * To help us fund GROMACS development, we humbly ask that you cite
+ * the research papers on the package. Check out https://www.gromacs.org.
  */
 
 #include "gmxpre.h"
@@ -56,7 +79,9 @@ GaMDGpuExecutor::Impl::Impl(const bool           useGpuResidentGaMD,
     matrix box = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } };
     setPbcAiuc(0, box, &pbcAiuc_);
 
-    gamdDihedralShadowEnabled_          = std::getenv("GMX_GAMD_GPU_DIH_SHADOW") != nullptr;
+    // 输出最终 GPU 力时复用影子检查的回传，确保读取已经修正的设备数据。
+    gamdDihedralShadowEnabled_ = std::getenv("GMX_GAMD_GPU_DIH_SHADOW") != nullptr
+                                 || std::getenv("GMX_GAMD_FORCE_DEBUG_FILE") != nullptr;
     gamdEnergyShadowDiagnosticsEnabled_ = std::getenv("GMX_GAMD_GPU_ENERGY_SHADOW") != nullptr;
     gamdForceCorrectionEnabled_         = useGpuResidentGaMD;
     gamdScaleFromDeviceEnabled_         = useGpuResidentGaMD;
@@ -647,16 +672,11 @@ GpuEventSynchronizer* GaMDGpuExecutor::pmeEnergyReadyEvent()
     return impl_->gamdPmeEnergyReadyEvent();
 }
 
-void GaMDGpuExecutor::launchEnergyReduction(const int    boostType,
-                                            const int    stage,
-                                            const double thresholdP,
-                                            const double forceConstantP,
-                                            const double thresholdD,
-                                            const double forceConstantD,
-                                            const bool   recordEnergySample)
+void GaMDGpuExecutor::launchEnergyReduction(const GaMDBiasParameters& parameters,
+                                            const GaMDForceOverrides& forceOverrides,
+                                            const bool                recordEnergySample)
 {
-    impl_->launchGamdEnergyShadowReduction(
-            boostType, stage, thresholdP, forceConstantP, thresholdD, forceConstantD, recordEnergySample);
+    impl_->launchGamdEnergyShadowReduction(parameters, forceOverrides, recordEnergySample);
 }
 
 std::array<double, 6> GaMDGpuExecutor::energyDiagnostics()
@@ -664,19 +684,32 @@ std::array<double, 6> GaMDGpuExecutor::energyDiagnostics()
     return impl_->gamdEnergyShadowValues();
 }
 
-std::vector<std::array<real, F_NRE>> GaMDGpuExecutor::takeEnergyHistory()
+GaMDHistoryBatch GaMDGpuExecutor::Impl::takeHistory()
 {
-    return impl_->takeGamdEnergyHistory();
+    // 保持原来的两条流的读取顺序，在返回之前统一检查四组记录。
+    GaMDHistoryBatch history;
+    history.energySamples         = takeGamdEnergyHistory();
+    history.forceVirials          = takeGamdForceVirialHistory(history.energySamples.size());
+    history.constraintVirials     = takeUpdateConstraintVirialHistory();
+    history.kineticEnergy         = takeUpdateKineticEnergyHistory();
+    const std::size_t sampleCount = history.energySamples.size();
+    GMX_RELEASE_ASSERT(history.forceVirials.size() == sampleCount && history.constraintVirials.size() == sampleCount
+                               && history.kineticEnergy.totalTensors.size() == sampleCount,
+                       "Deferred GaMD energy, virial, and kinetic sample counts must match");
+    GMX_RELEASE_ASSERT(history.kineticEnergy.groupKineticEnergies.size()
+                               == sampleCount * history.kineticEnergy.numGroups,
+                       "Deferred GaMD kinetic samples must include every temperature group");
+    return history;
+}
+
+GaMDHistoryBatch GaMDGpuExecutor::takeHistory()
+{
+    return impl_->takeHistory();
 }
 
 void GaMDGpuExecutor::recordForceVirialSample()
 {
     impl_->recordGamdForceVirialSample();
-}
-
-std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::takeForceVirialHistory(const int numSamples)
-{
-    return impl_->takeGamdForceVirialHistory(numSamples);
 }
 
 void GaMDGpuExecutor::initializeUpdateHistory(const int numTemperatureGroups, const DeviceStream& updateStream)
@@ -703,16 +736,6 @@ void GaMDGpuExecutor::recordConstraintVirial(DeviceBuffer<float> lincsVirial,
 void GaMDGpuExecutor::recordKineticEnergy(const bool recordSample)
 {
     impl_->recordUpdateKineticEnergy(recordSample);
-}
-
-std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::takeConstraintVirialHistory()
-{
-    return impl_->takeUpdateConstraintVirialHistory();
-}
-
-GaMDKineticEnergyHistory GaMDGpuExecutor::takeKineticEnergyHistory()
-{
-    return impl_->takeUpdateKineticEnergyHistory();
 }
 
 std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::previousHalfStepKineticEnergy()

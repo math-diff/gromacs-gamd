@@ -46,8 +46,6 @@
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/strconvert.h"
 
-#include "gamdmath.h"
-
 namespace gmx
 {
 namespace
@@ -125,7 +123,7 @@ void validateGaMDGpuShadowForces(const char*          label,
     }
 }
 
-double readGaMDDiagnosticReal(const char* variableName, double defaultValue)
+static double readGaMDDiagnosticReal(const char* variableName, double defaultValue)
 {
     const char* configuredValue = std::getenv(variableName);
     if (configuredValue == nullptr)
@@ -156,17 +154,6 @@ double readGaMDDiagnosticReal(const char* variableName, double defaultValue)
 
 GaMDDiagnostics::GaMDDiagnostics()
 {
-    // 诊断变量只在模块构造时读取一次，生产热路径不反复查询进程环境。
-    if (std::getenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP") != nullptr)
-    {
-        const double totalScale    = readGaMDDiagnosticReal("GMX_GAMD_FORCE_OVERRIDE_SCALEP", 1.0);
-        totalScaleOverride_        = std::max(c_gaMDScaleFloor, totalScale);
-        totalScaleOverrideEnabled_ = true;
-        const double dihedralRatio = readGaMDDiagnosticReal("GMX_GAMD_FORCE_OVERRIDE_SCALED", totalScale);
-        dihedralRatioOverride_        = std::max(c_gaMDScaleFloor, dihedralRatio);
-        dihedralRatioOverrideEnabled_ = true;
-    }
-
     if (const char* filename = std::getenv("GMX_GAMD_DIH_RAW_DEBUG_FILE"))
     {
         rawDihedralFile_ = std::fopen(filename, "w");
@@ -248,22 +235,24 @@ GaMDHostWorkspace& GaMDDiagnostics::hostWorkspace()
     return hostWorkspace_;
 }
 
-bool GaMDDiagnostics::forcedTotalScale(double* scale) const
+const GaMDForceOverrides& GaMDDiagnostics::forceOverrides()
 {
-    if (totalScaleOverrideEnabled_ && scale != nullptr)
+    if (!forceOverridesRead_)
     {
-        *scale = totalScaleOverride_;
+        // 只有 GaMD 真正使用时才读取，普通模拟不解析这些诊断设置。
+        if (std::getenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP") != nullptr)
+        {
+            forceOverrides_.totalScale = readGaMDDiagnosticReal("GMX_GAMD_FORCE_OVERRIDE_SCALEP", 1.0);
+            forceOverrides_.dihedralScale = readGaMDDiagnosticReal("GMX_GAMD_FORCE_OVERRIDE_SCALED",
+                                                                   forceOverrides_.totalScale);
+            forceOverrides_.potentialBoost =
+                    readGaMDDiagnosticReal("GMX_GAMD_FORCE_OVERRIDE_BOOSTP", 0.0);
+            forceOverrides_.dihedralBoost = readGaMDDiagnosticReal("GMX_GAMD_FORCE_OVERRIDE_BOOSTD", 0.0);
+            forceOverrides_.enabled = true;
+        }
+        forceOverridesRead_ = true;
     }
-    return totalScaleOverrideEnabled_;
-}
-
-bool GaMDDiagnostics::forcedDihedralRatio(double* ratio) const
-{
-    if (dihedralRatioOverrideEnabled_ && ratio != nullptr)
-    {
-        *ratio = dihedralRatioOverride_;
-    }
-    return dihedralRatioOverrideEnabled_;
+    return forceOverrides_;
 }
 
 void GaMDDiagnostics::prepareDihedralStep(const int64_t step, const int numAtoms)

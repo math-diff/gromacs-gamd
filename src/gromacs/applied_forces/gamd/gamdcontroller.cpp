@@ -130,9 +130,9 @@ const GaMDStepPlan& GaMDRuntime::prepareStep(int64_t step, int rank, bool pressu
     stepPlan_.writesReweight =
             step > 0 && parameters_.reweightInterval > 0 && step % parameters_.reweightInterval == 0;
 
-    const bool forcedScale            = std::getenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP") != nullptr;
+    const bool forcedScale            = diagnostics_.forceOverrides().enabled;
     const bool writesUnbufferedOutput = (stepPlan_.writesParameters || stepPlan_.writesReweight)
-                                        && !bufferedProductionOutputEnabled_;
+                                        && !bufferedProductionOutputEnabled();
     stepPlan_.requiresHostEnergy = stepPlan_.stage != 5 || checkpointingThisStep_
                                    || pressureCouplingThisStep || forcedScale || writesUnbufferedOutput;
     stepPlan_.gpuGraphEligible =
@@ -154,7 +154,8 @@ bool GaMDRuntime::requiresHostEnergyThisStep(int64_t step) const
 
 bool GaMDRuntime::bufferedProductionOutputEnabled() const
 {
-    return bufferedProductionOutputEnabled_;
+    // 强制诊断已经即时写出当前步，不能再由缓冲输出重复写一遍。
+    return bufferedProductionOutputEnabled_ && !diagnostics_.forceOverrides().enabled;
 }
 
 void GaMDRuntime::setBufferedProductionOutputEnabled(bool enabled)
@@ -256,28 +257,21 @@ void GaMDRuntime::finalizeCurrentStep(int64_t        step,
     stepResult_.potentialEnergy = totalPotentialEnergy;
     stepResult_.dihedralEnergy  = dihedralEnergy;
 
-    if (std::getenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP") != nullptr)
+    const GaMDForceOverrides& forceOverrides = diagnostics_.forceOverrides();
+    if (forceOverrides.enabled)
     {
-        const double scaleP = readGaMDDiagnosticReal("GMX_GAMD_FORCE_OVERRIDE_SCALEP", 1.0);
-        const double scaleD = readGaMDDiagnosticReal("GMX_GAMD_FORCE_OVERRIDE_SCALED", scaleP);
-        const double boostP = readGaMDDiagnosticReal("GMX_GAMD_FORCE_OVERRIDE_BOOSTP", 0.0);
-        const double boostD = readGaMDDiagnosticReal("GMX_GAMD_FORCE_OVERRIDE_BOOSTD", 0.0);
-
         const GaMDEnergyStatistics overrideStats{};
-        stepResult_.scaleP = validateAndClampScale(
-                "total-potential", scaleP, totalPotentialEnergy, overrideStats, step, rank, &warnedPotentialScaleFloor_);
+        stepResult_.scaleP = validateAndClampScale("total-potential",
+                                                   forceOverrides.totalScale,
+                                                   totalPotentialEnergy,
+                                                   overrideStats,
+                                                   step,
+                                                   rank,
+                                                   &warnedPotentialScaleFloor_);
         stepResult_.scaleD = validateAndClampScale(
-                "dihedral", scaleD, dihedralEnergy, overrideStats, step, rank, &warnedDihedralScaleFloor_);
-        if (!std::isfinite(boostP) || !std::isfinite(boostD))
-        {
-            gmx_fatal(FARGS,
-                      "Non-finite forced GaMD boost at step %" PRId64 ": boostP=%g boostD=%g.",
-                      step,
-                      boostP,
-                      boostD);
-        }
-        stepResult_.boostP = boostP;
-        stepResult_.boostD = boostD;
+                "dihedral", forceOverrides.dihedralScale, dihedralEnergy, overrideStats, step, rank, &warnedDihedralScaleFloor_);
+        stepResult_.boostP = forceOverrides.potentialBoost;
+        stepResult_.boostD = forceOverrides.dihedralBoost;
         wallcycle_stop(wallCycle, WallCycleCounter::GaMDFinalize);
         wallcycle_start(wallCycle, WallCycleCounter::GaMDOutput);
         writeParameterLine(step, rank, true);

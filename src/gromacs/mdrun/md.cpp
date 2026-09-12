@@ -225,7 +225,6 @@ void gmx::LegacySimulator::do_md()
     real                                     last_ekin                = 0;
     t_extmass                                MassQ;
     char                                     sbuf[STEPSTRSIZE], sbuf2[STEPSTRSIZE];
-    std::vector<std::array<real, DIM * DIM>> deferredKineticTensors;
     std::vector<std::array<real, DIM * DIM>> deferredPressureBoxes;
     std::vector<int64_t>                     deferredGamdOutputSteps;
 
@@ -1403,40 +1402,14 @@ void gmx::LegacySimulator::do_md()
                          fr_->longRangeNonbondeds.get(),
                          ddBalanceRegionHandler);
             }
-            /* ==========================================================
-             * GaMD Total Force Interception
-             * ========================================================== */
-            double scalePForScaling = gaMDModule_->stepResult().scaleP;
-            double forcedScaleP     = 1.0;
-            const bool forceScaleOverridden = gaMDModule_->diagnostics().forcedTotalScale(&forcedScaleP);
-            if (forceScaleOverridden)
-            {
-                scalePForScaling = forcedScaleP;
-            }
-
-            if (forceScaleOverridden && scalePForScaling != 1.0)
-            {
-                auto forces = f.view().force();
-                for (size_t i = 0; i < forces.size(); ++i)
-                {
-                    forces[i][0] *= scalePForScaling;
-                    forces[i][1] *= scalePForScaling;
-                    forces[i][2] *= scalePForScaling;
-                }
-                for (int i = 0; i < DIM; i++)
-                {
-                    for (int j = 0; j < DIM; j++)
-                    {
-                        force_vir[i][j] *= scalePForScaling;
-                    }
-                }
-            }
-
-
+            // GaMD 力和维里已在 do_force() 中修正，这里只输出诊断结果。
             gaMDModule_->diagnostics().flushDihedralForces(step);
 
             // 最终总力诊断也由模块实例写出，避免跨模拟共享文件句柄和步号。
-            gaMDModule_->diagnostics().dumpFinalForces(step, f.view().force(), MAIN(cr_));
+            if (!useResidentEnergy)
+            {
+                gaMDModule_->diagnostics().dumpFinalForces(step, f.view().force(), MAIN(cr_));
+            }
             // VV integrators do not need the following velocity half step
             // if it is the first step after starting from a checkpoint.
             // That is, the half step is needed on all other steps, and
@@ -2145,60 +2118,48 @@ void gmx::LegacySimulator::do_md()
                 {
                     if (runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost)
                     {
-                        const auto deferredEnergySamples =
-                                gaMDModule_->gpuExecutor()->takeEnergyHistory();
-                        const auto deferredForceVirials = gaMDModule_->gpuExecutor()->takeForceVirialHistory(
-                                deferredEnergySamples.size());
-                        const auto deferredConstraintVirials =
-                                gaMDModule_->gpuExecutor()->takeConstraintVirialHistory();
+                        const GaMDHistoryBatch deferredHistory =
+                                gaMDModule_->gpuExecutor()->takeHistory();
+                        const auto& deferredEnergySamples     = deferredHistory.energySamples;
+                        const auto& deferredForceVirials      = deferredHistory.forceVirials;
+                        const auto& deferredConstraintVirials = deferredHistory.constraintVirials;
                         GMX_RELEASE_ASSERT(
-                                deferredForceVirials.size() == deferredConstraintVirials.size()
-                                        && deferredForceVirials.size() == deferredPressureBoxes.size(),
+                                deferredForceVirials.size() == deferredPressureBoxes.size(),
                                 "Deferred GaMD force and host pressure sample counts must match");
 
-                        std::vector<std::array<real, DIM * DIM>> pressureKineticTensors;
-                        if (useDeviceGlobals)
+                        const auto& deferredKineticHistory = deferredHistory.kineticEnergy;
+                        GMX_RELEASE_ASSERT(deferredKineticHistory.numGroups == ir->opts.ngtc,
+                                           "Deferred GPU kinetic temperature groups must match");
+                        const auto& pressureKineticTensors = deferredKineticHistory.totalTensors;
+                        std::vector<real> deferredGroupTemperatures(
+                                deferredForceVirials.size() * deferredKineticHistory.numGroups);
+                        std::vector<real> deferredTemperatures(deferredForceVirials.size());
+                        for (std::size_t sample = 0; sample < deferredForceVirials.size(); ++sample)
                         {
-                            const auto deferredKineticHistory =
-                                    gaMDModule_->gpuExecutor()->takeKineticEnergyHistory();
-                            GMX_RELEASE_ASSERT(
-                                    deferredKineticHistory.numSamples()
-                                                    == static_cast<int>(deferredForceVirials.size())
-                                            && deferredKineticHistory.numGroups == ir->opts.ngtc,
-                                    "Deferred GPU kinetic sample counts must match");
-                            pressureKineticTensors = deferredKineticHistory.totalTensors;
-                            std::vector<real> deferredGroupTemperatures(
-                                    deferredForceVirials.size() * deferredKineticHistory.numGroups);
-                            std::vector<real> deferredTemperatures(deferredForceVirials.size());
-                            for (std::size_t sample = 0; sample < deferredForceVirials.size(); ++sample)
+                            real weightedTemperature   = 0;
+                            real totalDegreesOfFreedom = 0;
+                            for (int group = 0; group < deferredKineticHistory.numGroups; ++group)
                             {
-                                real weightedTemperature   = 0;
-                                real totalDegreesOfFreedom = 0;
-                                for (int group = 0; group < deferredKineticHistory.numGroups; ++group)
-                                {
-                                    const real groupTemperature = calc_temp(
-                                            deferredKineticHistory.groupKineticEnergies
-                                                    [sample * deferredKineticHistory.numGroups + group],
-                                            ir->opts.nrdf[group]);
-                                    deferredGroupTemperatures[sample * deferredKineticHistory.numGroups + group] =
-                                            groupTemperature;
-                                    weightedTemperature += ir->opts.nrdf[group] * groupTemperature;
-                                    totalDegreesOfFreedom += ir->opts.nrdf[group];
-                                }
-                                deferredTemperatures[sample] = totalDegreesOfFreedom > 0
-                                                                       ? weightedTemperature / totalDegreesOfFreedom
-                                                                       : 0;
+                                const real groupTemperature = calc_temp(
+                                        deferredKineticHistory.groupKineticEnergies
+                                                [sample * deferredKineticHistory.numGroups + group],
+                                        ir->opts.nrdf[group]);
+                                deferredGroupTemperatures[sample * deferredKineticHistory.numGroups + group] =
+                                        groupTemperature;
+                                weightedTemperature += ir->opts.nrdf[group] * groupTemperature;
+                                totalDegreesOfFreedom += ir->opts.nrdf[group];
                             }
-                            energyOutput.completeDeferredGpuKineticSamples(pressureKineticTensors,
-                                                                           deferredTemperatures,
-                                                                           deferredGroupTemperatures);
+                            if (totalDegreesOfFreedom > 0)
+                            {
+                                deferredTemperatures[sample] = weightedTemperature / totalDegreesOfFreedom;
+                            }
+                            else
+                            {
+                                deferredTemperatures[sample] = 0;
+                            }
                         }
-                        else
-                        {
-                            GMX_RELEASE_ASSERT(deferredKineticTensors.size() == deferredForceVirials.size(),
-                                               "Deferred host kinetic sample counts must match");
-                            pressureKineticTensors = deferredKineticTensors;
-                        }
+                        energyOutput.completeDeferredGpuKineticSamples(
+                                pressureKineticTensors, deferredTemperatures, deferredGroupTemperatures);
 
                         std::vector<std::array<real, DIM * DIM>> deferredTotalVirials(
                                 deferredForceVirials.size());
@@ -2245,23 +2206,13 @@ void gmx::LegacySimulator::do_md()
                                                                        wallCycleCounters_);
                             deferredGamdOutputSteps.clear();
                         }
-                        deferredKineticTensors.clear();
                         deferredPressureBoxes.clear();
                     }
                     else
                     {
                         energyOutput.deferGpuEnergySample(t, *enerd_);
                         energyOutput.deferGpuVirialSample();
-                        if (useDeviceGlobals)
-                        {
-                            energyOutput.deferGpuKineticSample();
-                        }
-                        else
-                        {
-                            std::array<real, DIM * DIM> kineticTensor;
-                            std::copy_n(ekind_->ekin[0], DIM * DIM, kineticTensor.begin());
-                            deferredKineticTensors.push_back(kineticTensor);
-                        }
+                        energyOutput.deferGpuKineticSample();
                         std::array<real, DIM * DIM> pressureBox;
                         std::copy_n(lastbox[0], DIM * DIM, pressureBox.begin());
                         deferredPressureBoxes.push_back(pressureBox);

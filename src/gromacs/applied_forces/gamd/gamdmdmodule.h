@@ -124,8 +124,8 @@ public:
     void resetStateForTesting();
 
 private:
-    std::unique_ptr<GaMDRuntime>     runtime_;
     std::unique_ptr<GaMDDiagnostics> diagnostics_;
+    std::unique_ptr<GaMDRuntime>     runtime_;
     std::unique_ptr<GaMDGpuExecutor> gpuExecutor_;
 };
 
