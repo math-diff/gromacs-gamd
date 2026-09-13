@@ -1368,7 +1368,7 @@ void gmx::LegacySimulator::do_md()
 
                 if (useCurrentStepGaMD)
                 {
-                    gaMDModule_->diagnostics().prepareDihedralStep(step, state_->numAtoms());
+                    gaMDModule_->diagnostics().prepareDihedralStep(step);
                 }
 
                 do_force(fpLog_,
@@ -1402,8 +1402,11 @@ void gmx::LegacySimulator::do_md()
                          fr_->longRangeNonbondeds.get(),
                          ddBalanceRegionHandler);
             }
-            // GaMD 力和维里已在 do_force() 中修正，这里只输出诊断结果。
-            gaMDModule_->diagnostics().flushDihedralForces(step);
+            // 加权二面角快照已在求力流程写出，这里刷出原始调用追踪并核对快照。
+            if (useCurrentStepGaMD)
+            {
+                gaMDModule_->diagnostics().finishDihedralStep(step, MAIN(cr_));
+            }
 
             // 最终总力诊断也由模块实例写出，避免跨模拟共享文件句柄和步号。
             if (!useResidentEnergy)

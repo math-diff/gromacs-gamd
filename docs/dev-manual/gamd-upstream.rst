@@ -85,6 +85,14 @@ non-finite values before aggregating errors. CPU bonded kernels produce raw
 forces; the GaMD correction owns the final weights. Preserve the distinction
 between single-rank DD-style atom ordering and actual PP domain decomposition.
 
+Dihedral snapshots are emitted once from completed CPU/GPU force data through
+``GaMDDiagnostics::dumpDihedralForces``. The CPU caller passes its topology atom
+mapping; the GPU caller reuses ``copyDihedralForces``. Snapshot requests stage
+current host weights at their selected step without enabling the full shadow
+comparison. Bonded callbacks only retain the separately labelled raw CPU trace.
+The diagnostics implementation shares checked stdio output for dihedral and
+final-force snapshots and reports requested-file failures explicitly.
+
 The raw-energy producers, force/virial ownership, constraints/update, standard
 energy output, and MD scheduling still have necessary integration points.
 Moving those interfaces into a GaMD directory would not remove their coupling.

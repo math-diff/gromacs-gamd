@@ -141,7 +141,7 @@ public:
     void                                     recordKineticEnergy(bool recordSample);
     std::vector<std::array<real, DIM * DIM>> previousHalfStepKineticEnergy();
 
-    void copyDihedralShadowForces(ArrayRef<RVec> forces);
+    void copyDihedralForces(ArrayRef<RVec> forces);
     void copyDihedralVirial(std::array<real, DIM * DIM>* virial);
     void launchShortRangeVirialReduction();
     void copyShortRangeVirial(std::array<real, DIM * DIM>* virial);

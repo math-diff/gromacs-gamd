@@ -484,6 +484,26 @@ static void applyGaMDGpuForceCorrection(int64_t                       step,
     std::vector<gmx::RVec>&     gpuShadowDihedralForces = gaMDHostWorkspace.gpuShadowDihedralForces;
     std::array<real, DIM * DIM> gpuDihedralVirial       = {};
 
+    const bool writesDihedralForces =
+            isMainRank && module.diagnostics().dihedralForceOutputRequested(step);
+    if (writesDihedralForces
+        || (validateLiveGpuCorrection && stepWork.stageGpuEnergyAndVirialToHost
+            && dihedralCorrectionScale != 0.0))
+    {
+        gpuShadowDihedralForces.resize(forces.size());
+        gpuExecutor->copyDihedralForces(gpuShadowDihedralForces);
+    }
+    if (writesDihedralForces)
+    {
+        GMX_RELEASE_ASSERT(stepWork.stageGpuEnergyAndVirialToHost,
+                           "GaMD dihedral diagnostics require current host scale values");
+        module.diagnostics().dumpDihedralForces(
+                step,
+                makeConstArrayRef(gpuShadowDihedralForces).subArray(0, numLocalAtoms),
+                stepResult.scaleP * stepResult.scaleD,
+                isMainRank);
+    }
+
     if (stepWork.stageGpuEnergyAndVirialToHost && totalScale != 1.0)
     {
         for (int rowIndex = 0; rowIndex < DIM; ++rowIndex)
@@ -530,8 +550,7 @@ static void applyGaMDGpuForceCorrection(int64_t                       step,
                                               operationCounter,
                                               freeEnergyParameters,
                                               nullptr);
-            gpuShadowDihedralForces.resize(forces.size());
-            gpuExecutor->copyDihedralShadowForces(gpuShadowDihedralForces);
+
             validateGaMDGpuShadowForces(
                     "live-dihedral", step, gamdGpuModeDihedralForces, gpuShadowDihedralForces, 0.005, 0.0001);
 
@@ -653,6 +672,8 @@ static void applyGaMDCpuForceCorrection(const t_commrec&              communicat
         dihedralCorrectionScale = static_cast<real>(stepResult.scaleP * (stepResult.scaleD - 1.0));
     }
 
+    const bool writesDihedralForces =
+            MAIN(&communicationRecord) && module.diagnostics().dihedralForceOutputRequested(step);
     const bool gpuShadowEnabled = (forceRecord->listedForcesGpu != nullptr && gpuExecutor != nullptr
                                    && gpuExecutor->dihedralShadowEnabled());
     const bool usesDomainAtomOrdering = haveDDAtomOrdering(communicationRecord);
@@ -698,7 +719,7 @@ static void applyGaMDCpuForceCorrection(const t_commrec&              communicat
         wallcycle_stop(wallCycle, WallCycleCounter::GaMDForceScale);
     }
 
-    if (dihedralCorrectionScale != 0.0)
+    if (dihedralCorrectionScale != 0.0 || writesDihedralForces)
     {
         wallcycle_start(wallCycle, WallCycleCounter::GaMDDihedral);
 
@@ -740,7 +761,7 @@ static void applyGaMDCpuForceCorrection(const t_commrec&              communicat
             if (!shadowCompared)
             {
                 gpuShadowForces.resize(gamdDihedralForces.size());
-                gpuExecutor->copyDihedralShadowForces(gpuShadowForces);
+                gpuExecutor->copyDihedralForces(gpuShadowForces);
                 validateGaMDGpuShadowForces(
                         "dihedral", step, gamdDihedralForces, gpuShadowForces, 0.1, 0.01);
                 shadowCompared = true;
@@ -767,44 +788,62 @@ static void applyGaMDCpuForceCorrection(const t_commrec&              communicat
 
         wallcycle_stop(wallCycle, WallCycleCounter::GaMDDihedral);
 
-        wallcycle_start(wallCycle, WallCycleCounter::GaMDForceScale);
-        const int numThreads =
-                gmx_omp_nthreads_get_simple_rvec_task(ModuleMultiThread::Default, forces.ssize());
-#pragma omp parallel for num_threads(numThreads) schedule(static)
-        for (gmx::Index atomIndex = 0; atomIndex < forces.ssize(); ++atomIndex)
+        if (writesDihedralForces)
         {
-            forces[atomIndex] += dihedralCorrectionScale * gamdDihedralForces[atomIndex];
+            ArrayRef<const int> outputAtomIndices;
+            if (usesDomainAtomOrdering)
+            {
+                outputAtomIndices = arrayRefFromArray(globalAtomIndices, numLocalAtoms);
+            }
+            module.diagnostics().dumpDihedralForces(
+                    step,
+                    makeConstArrayRef(gamdDihedralForces).subArray(0, numLocalAtoms),
+                    stepResult.scaleP * stepResult.scaleD,
+                    MAIN(&communicationRecord),
+                    outputAtomIndices);
         }
 
-        if (stepWork.computeVirial)
+        if (dihedralCorrectionScale != 0.0)
         {
-            tensor dihedralVirial = { { 0 } };
-            calc_vir(c_numShiftVectors,
-                     as_rvec_array(forceRecord->shift_vec.data()),
-                     as_rvec_array(gamdDihedralShiftForces.data()),
-                     dihedralVirial,
-                     forceRecord->pbcType == PbcType::Screw,
-                     box);
-            inc_nrnb(operationCounter, eNR_VIRIAL, c_numShiftVectors);
-
-            f_calc_vir(0,
-                       numLocalAtoms,
-                       as_rvec_array(coordinates.unpaddedArrayRef().data()),
-                       as_rvec_array(gamdDihedralForces.data()),
-                       dihedralVirial,
-                       box);
-            inc_nrnb(operationCounter, eNR_VIRIAL, numLocalAtoms);
-
-            for (int rowIndex = 0; rowIndex < DIM; ++rowIndex)
+            wallcycle_start(wallCycle, WallCycleCounter::GaMDForceScale);
+            const int numThreads =
+                    gmx_omp_nthreads_get_simple_rvec_task(ModuleMultiThread::Default, forces.ssize());
+#pragma omp parallel for num_threads(numThreads) schedule(static)
+            for (gmx::Index atomIndex = 0; atomIndex < forces.ssize(); ++atomIndex)
             {
-                for (int columnIndex = 0; columnIndex < DIM; ++columnIndex)
+                forces[atomIndex] += dihedralCorrectionScale * gamdDihedralForces[atomIndex];
+            }
+
+            if (stepWork.computeVirial)
+            {
+                tensor dihedralVirial = { { 0 } };
+                calc_vir(c_numShiftVectors,
+                         as_rvec_array(forceRecord->shift_vec.data()),
+                         as_rvec_array(gamdDihedralShiftForces.data()),
+                         dihedralVirial,
+                         forceRecord->pbcType == PbcType::Screw,
+                         box);
+                inc_nrnb(operationCounter, eNR_VIRIAL, c_numShiftVectors);
+
+                f_calc_vir(0,
+                           numLocalAtoms,
+                           as_rvec_array(coordinates.unpaddedArrayRef().data()),
+                           as_rvec_array(gamdDihedralForces.data()),
+                           dihedralVirial,
+                           box);
+                inc_nrnb(operationCounter, eNR_VIRIAL, numLocalAtoms);
+
+                for (int rowIndex = 0; rowIndex < DIM; ++rowIndex)
                 {
-                    forceVirial[rowIndex][columnIndex] +=
-                            dihedralCorrectionScale * dihedralVirial[rowIndex][columnIndex];
+                    for (int columnIndex = 0; columnIndex < DIM; ++columnIndex)
+                    {
+                        forceVirial[rowIndex][columnIndex] +=
+                                dihedralCorrectionScale * dihedralVirial[rowIndex][columnIndex];
+                    }
                 }
             }
+            wallcycle_stop(wallCycle, WallCycleCounter::GaMDForceScale);
         }
-        wallcycle_stop(wallCycle, WallCycleCounter::GaMDForceScale);
     }
 
     if (gpuShadowEnabled && !correctionShadowCompared)

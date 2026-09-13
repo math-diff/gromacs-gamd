@@ -91,7 +91,7 @@ public:
     void recordUpdateKineticEnergy(bool recordSample);
     std::vector<std::array<real, DIM * DIM>> takePreviousHalfStepKineticEnergy();
 
-    void copyGamdDihedralShadowForces(ArrayRef<RVec> forces);
+    void copyGamdDihedralForces(ArrayRef<RVec> forces);
     void copyGamdDihedralVirial(std::array<real, DIM * DIM>* virial);
     void launchGamdShortRangeVirialReduction();
     void copyGamdShortRangeVirial(std::array<real, DIM * DIM>* virial);

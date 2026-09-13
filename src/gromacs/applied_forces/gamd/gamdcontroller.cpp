@@ -132,12 +132,14 @@ const GaMDStepPlan& GaMDRuntime::prepareStep(int64_t step, int rank, bool pressu
             step > 0 && parameters_.reweightInterval > 0 && step % parameters_.reweightInterval == 0;
 
     const bool forcedScale            = diagnostics_.forceOverrides().enabled;
+    const bool writesDihedralForces   = diagnostics_.dihedralForceOutputRequested(step);
     const bool writesUnbufferedOutput = (stepPlan_.writesParameters || stepPlan_.writesReweight)
                                         && !bufferedProductionOutputEnabled();
-    stepPlan_.requiresHostEnergy = stepPlan_.stage != GaMDStage::Production || checkpointingThisStep_
-                                   || pressureCouplingThisStep || forcedScale || writesUnbufferedOutput;
+    stepPlan_.requiresHostEnergy = stepPlan_.stage != GaMDStage::Production
+                                   || checkpointingThisStep_ || pressureCouplingThisStep
+                                   || forcedScale || writesUnbufferedOutput || writesDihedralForces;
     stepPlan_.gpuGraphEligible = stepPlan_.stage == GaMDStage::Production && !checkpointingThisStep_
-                                 && !pressureCouplingThisStep;
+                                 && !pressureCouplingThisStep && !writesDihedralForces;
     return stepPlan_;
 }
 

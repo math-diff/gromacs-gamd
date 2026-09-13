@@ -41,6 +41,7 @@
 #include <cstdio>
 
 #include <array>
+#include <string>
 #include <vector>
 
 #include "gromacs/math/vectypes.h"
@@ -101,15 +102,14 @@ public:
     //! Read once on first GaMD use; ordinary simulations never request overrides.
     const GaMDForceOverrides& forceOverrides();
 
-    void prepareDihedralStep(int64_t step, int numAtoms);
-    void addBoostedDihedralForces(int        atomIndexI,
-                                  const rvec forceI,
-                                  int        atomIndexJ,
-                                  const rvec forceJ,
-                                  int        atomIndexK,
-                                  const rvec forceK,
-                                  int        atomIndexL,
-                                  const rvec forceL);
+    void prepareDihedralStep(int64_t step);
+    bool dihedralForceOutputRequested(int64_t step) const;
+    //! 写出同一步的加权二面角力；有原子重排序时使用拓扑编号。
+    void dumpDihedralForces(int64_t              step,
+                            ArrayRef<const RVec> rawForces,
+                            double               forceWeight,
+                            bool                 isMainRank,
+                            ArrayRef<const int>  globalAtomIndices = {});
     void addRawDihedralForces(int        atomIndexI,
                               const rvec forceI,
                               int        atomIndexJ,
@@ -118,7 +118,7 @@ public:
                               const rvec forceK,
                               int        atomIndexL,
                               const rvec forceL);
-    void flushDihedralForces(int64_t step);
+    void finishDihedralStep(int64_t step, bool isMainRank);
     void dumpFinalForces(int64_t step, ArrayRef<const RVec> forces, bool isMainRank);
 
     bool shouldPrintNstcalcenergyMessage();
@@ -126,7 +126,6 @@ public:
     bool shouldPrintGpuWorkloadDiagnostics();
 
 private:
-    void addBoostedDihedralForce(int atomIndex, const rvec force);
     void addRawDihedralForce(int atomIndex, const rvec force);
 
     GaMDHostWorkspace hostWorkspace_;
@@ -134,22 +133,22 @@ private:
     bool               forceOverridesRead_ = false;
     GaMDForceOverrides forceOverrides_;
 
-    FILE*   rawDihedralFile_        = nullptr;
-    int64_t rawDihedralCurrentStep_ = -1;
+    FILE*       rawDihedralFile_ = nullptr;
+    std::string rawDihedralFilename_;
+    int64_t     rawDihedralCurrentStep_ = -1;
 
-    FILE*             boostedDihedralFile_         = nullptr;
-    int64_t           boostedDihedralStep_         = -1;
-    int64_t           boostedDihedralCurrentStep_  = -1;
-    int64_t           boostedDihedralPreparedStep_ = -1;
-    int64_t           boostedDihedralFlushedStep_  = -1;
-    int               boostedDihedralBegin_        = 0;
-    int               boostedDihedralCount_        = -1;
-    std::vector<RVec> boostedDihedralForces_;
+    FILE*       dihedralForceFile_ = nullptr;
+    std::string dihedralForceFilename_;
+    int64_t     dihedralForceStep_        = -1;
+    int64_t     dihedralForceWrittenStep_ = -1;
+    int         dihedralForceBegin_       = 0;
+    int         dihedralForceCount_       = -1;
 
-    FILE*   finalForceFile_  = nullptr;
-    int64_t finalForceStep_  = -1;
-    int     finalForceBegin_ = 0;
-    int     finalForceCount_ = -1;
+    FILE*       finalForceFile_ = nullptr;
+    std::string finalForceFilename_;
+    int64_t     finalForceStep_  = -1;
+    int         finalForceBegin_ = 0;
+    int         finalForceCount_ = -1;
 
     bool nstcalcenergyMessagePrinted_   = false;
     bool residentEnergyMessagePrinted_  = false;

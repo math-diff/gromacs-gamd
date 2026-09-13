@@ -509,12 +509,12 @@ GaMDBondedDeviceBuffers GaMDGpuExecutor::Impl::prepareBondedForceAccumulation()
     return buffers;
 }
 
-void GaMDGpuExecutor::Impl::copyGamdDihedralShadowForces(ArrayRef<RVec> forces)
+void GaMDGpuExecutor::Impl::copyGamdDihedralForces(ArrayRef<RVec> forces)
 {
-    GMX_RELEASE_ASSERT(gamdDihedralShadowEnabled_,
-                       "GaMD GPU dihedral shadow-force copy requested while disabled");
+    GMX_RELEASE_ASSERT(dihedralBufferEnabled(),
+                       "GaMD GPU dihedral-force copy requested without a force buffer");
     GMX_RELEASE_ASSERT(forces.ssize() == gamdStateForceSize_,
-                       "GaMD GPU dihedral shadow-force host buffer has the wrong size");
+                       "GaMD GPU dihedral-force host buffer has the wrong size");
     copyFromDeviceBuffer(reinterpret_cast<Float3*>(forces.data()),
                          &d_gamdDihedralForcesState_,
                          0,
@@ -741,9 +741,9 @@ std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::previousHalfStepKineti
     return impl_->takePreviousHalfStepKineticEnergy();
 }
 
-void GaMDGpuExecutor::copyDihedralShadowForces(ArrayRef<RVec> forces)
+void GaMDGpuExecutor::copyDihedralForces(ArrayRef<RVec> forces)
 {
-    impl_->copyGamdDihedralShadowForces(forces);
+    impl_->copyGamdDihedralForces(forces);
 }
 
 void GaMDGpuExecutor::copyDihedralVirial(std::array<real, DIM * DIM>* virial)

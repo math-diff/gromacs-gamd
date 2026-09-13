@@ -129,7 +129,8 @@ int pbc_rvec_sub(const t_pbc* pbc, const rvec xi, const rvec xj, rvec dx)
     }
 }
 
-void addGaMDDihedralDebugForces(const t_fcdata* forceCalculationData,
+// 这里只追踪 CPU 求力调用；加权快照在总力修正流程统一写出。
+void traceGaMDRawDihedralForces(const t_fcdata* forceCalculationData,
                                 int             atomIndexI,
                                 const rvec      forceI,
                                 int             atomIndexJ,
@@ -143,8 +144,6 @@ void addGaMDDihedralDebugForces(const t_fcdata* forceCalculationData,
     {
         return;
     }
-    forceCalculationData->gaMDDiagnostics->addBoostedDihedralForces(
-            atomIndexI, forceI, atomIndexJ, forceJ, atomIndexK, forceK, atomIndexL, forceL);
     forceCalculationData->gaMDDiagnostics->addRawDihedralForces(
             atomIndexI, forceI, atomIndexJ, forceJ, atomIndexK, forceK, atomIndexL, forceL);
 }
@@ -1840,7 +1839,7 @@ void do_dih_fup(int          i,
             rvec f_j_applied, f_k_applied;
             svmul(-1.0, f_j, f_j_applied);
             svmul(-1.0, f_k, f_k_applied);
-            addGaMDDihedralDebugForces(
+            traceGaMDRawDihedralForces(
                     forceCalculationData, i, f_i, j, f_j_applied, k, f_k_applied, l, f_l);
         }
 
@@ -1952,7 +1951,7 @@ real dopdihs_min(real cpA, real cpB, real phiA, real phiB, int mult, real phi, r
     /* That was 40 flops */
 }
 
-template<BondedKernelFlavor flavor, bool collectGaMDDiagnostics>
+template<BondedKernelFlavor flavor, bool collectGaMDRawDiagnostics>
 std::enable_if_t<flavor != BondedKernelFlavor::ForcesSimdWhenAvailable || !GMX_SIMD_HAVE_REAL, real>
 pdihs(int             nbonds,
       const t_iatom   forceatoms[],
@@ -2005,7 +2004,7 @@ pdihs(int             nbonds,
         } while (i < nbonds && forceatoms[i + 1] == ai && forceatoms[i + 2] == aj
                  && forceatoms[i + 3] == ak && forceatoms[i + 4] == al);
 
-        do_dih_fup<flavor, collectGaMDDiagnostics>(
+        do_dih_fup<flavor, collectGaMDRawDiagnostics>(
                 ai, aj, ak, al, ddphi_tot, r_ij, r_kj, r_kl, m, n, f, fshift, pbc, x, t1, t2, t3, fcd);
 
 
@@ -2017,7 +2016,7 @@ pdihs(int             nbonds,
 #if GMX_SIMD_HAVE_REAL
 
 /* As pdihs above, but using SIMD to calculate multiple dihedrals at once */
-template<BondedKernelFlavor flavor, bool collectGaMDDiagnostics>
+template<BondedKernelFlavor flavor, bool collectGaMDRawDiagnostics>
 std::enable_if_t<flavor == BondedKernelFlavor::ForcesSimdWhenAvailable, real>
 pdihs(int              nbonds,
       const t_iatom    forceatoms[],
@@ -3149,7 +3148,7 @@ void accumulateCmapForces(const rvec      x[],
     rvec_inc(f[aj], f_j);
     rvec_inc(f[ak], f_k);
     rvec_inc(f[al], f_l);
-    addGaMDDihedralDebugForces(forceCalculationData, ai, f_i, aj, f_j, ak, f_k, al, f_l);
+    traceGaMDRawDihedralForces(forceCalculationData, ai, f_i, aj, f_j, ak, f_k, al, f_l);
 
     /* Shift forces */
     if (fshift != nullptr)

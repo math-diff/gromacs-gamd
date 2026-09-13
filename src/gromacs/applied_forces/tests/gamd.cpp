@@ -164,6 +164,165 @@ void writeGaMDProductionInput(const std::string& restartContents)
     restart << restartContents;
 }
 
+TEST(GaMDDiagnosticsDeathTest, RequestedOutputOpenErrorsAreReported)
+{
+    TestFileManager fileManager;
+    const auto      directory =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    ScopedWorkingDirectory           workingDirectory(directory);
+    const std::array<const char*, 3> fileVariables = { "GMX_GAMD_DIH_RAW_DEBUG_FILE",
+                                                       "GMX_GAMD_DIH_FORCE_DEBUG_FILE",
+                                                       "GMX_GAMD_FORCE_DEBUG_FILE" };
+    for (std::size_t fileIndex = 0; fileIndex < fileVariables.size(); ++fileIndex)
+    {
+        gmxSetenv(fileVariables[fileIndex], "missing-directory/diagnostic.dat", 1);
+        GMX_EXPECT_DEATH_IF_SUPPORTED(GaMDDiagnostics(), "Cannot open GaMD diagnostic file");
+        gmxUnsetenv(fileVariables[fileIndex]);
+    }
+}
+
+TEST(GaMDDiagnosticsDeathTest, RequestedOutputWriteErrorsAreReported)
+{
+#if GMX_NATIVE_WINDOWS
+    GTEST_SKIP() << "The /dev/full write-error check requires a POSIX device.";
+#else
+    if (!std::filesystem::exists("/dev/full"))
+    {
+        GTEST_SKIP() << "The /dev/full device is unavailable.";
+    }
+    const std::array<const char*, 3> fileVariables = { "GMX_GAMD_DIH_RAW_DEBUG_FILE",
+                                                       "GMX_GAMD_DIH_FORCE_DEBUG_FILE",
+                                                       "GMX_GAMD_FORCE_DEBUG_FILE" };
+    for (std::size_t fileIndex = 0; fileIndex < fileVariables.size(); ++fileIndex)
+    {
+        gmxSetenv(fileVariables[fileIndex], "/dev/full", 1);
+        GMX_EXPECT_DEATH_IF_SUPPORTED(GaMDDiagnostics(), "Failed to write GaMD diagnostic file");
+        gmxUnsetenv(fileVariables[fileIndex]);
+    }
+#endif
+}
+
+TEST(GaMDDiagnosticsTest, DihedralSnapshotIsWeightedOrderedAndWrittenOnce)
+{
+    TestFileManager fileManager;
+    const auto      directory =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    ScopedWorkingDirectory workingDirectory(directory);
+    gmxSetenv("GMX_GAMD_DIH_FORCE_DEBUG_FILE", "dihedral.dat", 1);
+    gmxSetenv("GMX_GAMD_DIH_FORCE_DEBUG_STEP", "7", 1);
+    gmxSetenv("GMX_GAMD_DIH_FORCE_DEBUG_BEGIN", "1", 1);
+    gmxSetenv("GMX_GAMD_DIH_FORCE_DEBUG_COUNT", "2147483647", 1);
+    gmxSetenv("GMX_GAMD_DIH_RAW_DEBUG_FILE", "raw-calls.dat", 1);
+    {
+        GaMDDiagnostics           diagnostics;
+        const std::array<RVec, 3> rawForces = { RVec(4, 0, 0), RVec(0, 8, 0), RVec(0, 0, 12) };
+        const std::array<int, 3>  topologyIndices = { 2, 0, 1 };
+        diagnostics.prepareDihedralStep(7);
+        // 原始调用可以出现多次，但不能再改变加权快照的数值。
+        diagnostics.addRawDihedralForces(
+                0, rawForces[0], 1, rawForces[1], 2, rawForces[2], 0, rawForces[0]);
+        diagnostics.addRawDihedralForces(
+                0, rawForces[0], 1, rawForces[1], 2, rawForces[2], 0, rawForces[0]);
+        EXPECT_FALSE(diagnostics.dihedralForceOutputRequested(6));
+        EXPECT_TRUE(diagnostics.dihedralForceOutputRequested(7));
+        diagnostics.dumpDihedralForces(7, rawForces, 0.25, false, topologyIndices);
+        EXPECT_TRUE(diagnostics.dihedralForceOutputRequested(7));
+        diagnostics.dumpDihedralForces(6, rawForces, 0.25, true, topologyIndices);
+        diagnostics.dumpDihedralForces(7, rawForces, 0.25, true, topologyIndices);
+        EXPECT_FALSE(diagnostics.dihedralForceOutputRequested(7));
+        diagnostics.dumpDihedralForces(7, rawForces, 0.5, true, topologyIndices);
+        diagnostics.finishDihedralStep(7, true);
+        EXPECT_EQ(rawForces[0][XX], 4);
+        EXPECT_EQ(rawForces[2][ZZ], 12);
+    }
+    gmxUnsetenv("GMX_GAMD_DIH_FORCE_DEBUG_FILE");
+    gmxUnsetenv("GMX_GAMD_DIH_FORCE_DEBUG_STEP");
+    gmxUnsetenv("GMX_GAMD_DIH_FORCE_DEBUG_BEGIN");
+    gmxUnsetenv("GMX_GAMD_DIH_FORCE_DEBUG_COUNT");
+    gmxUnsetenv("GMX_GAMD_DIH_RAW_DEBUG_FILE");
+    const auto rows = readNumericRows("dihedral.dat");
+    ASSERT_EQ(rows.size(), 2U);
+    ASSERT_EQ(rows[0].size(), 6U);
+    ASSERT_EQ(rows[1].size(), 6U);
+    EXPECT_EQ(rows[0][0], 7);
+    EXPECT_EQ(rows[0][1], 1);
+    EXPECT_EQ(rows[0][4], 3);
+    EXPECT_EQ(rows[0][5], 3);
+    EXPECT_EQ(rows[1][1], 2);
+    EXPECT_EQ(rows[1][2], 1);
+    EXPECT_EQ(rows[1][5], 1);
+    EXPECT_EQ(readNumericRows("raw-calls.dat").size(), 8U);
+}
+
+TEST(GaMDDiagnosticsDeathTest, MissingRequestedDihedralSnapshotIsRejected)
+{
+    TestFileManager fileManager;
+    const auto      directory =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    ScopedWorkingDirectory workingDirectory(directory);
+    gmxSetenv("GMX_GAMD_DIH_FORCE_DEBUG_FILE", "dihedral.dat", 1);
+    gmxSetenv("GMX_GAMD_DIH_FORCE_DEBUG_STEP", "7", 1);
+    {
+        GaMDDiagnostics diagnostics;
+        GMX_EXPECT_DEATH_IF_SUPPORTED(diagnostics.finishDihedralStep(7, true),
+                                      "No GaMD dihedral force snapshot");
+    }
+    gmxUnsetenv("GMX_GAMD_DIH_FORCE_DEBUG_FILE");
+    gmxUnsetenv("GMX_GAMD_DIH_FORCE_DEBUG_STEP");
+}
+
+TEST(GaMDDiagnosticsTest, DihedralOutputStagesOnlyTheRequestedStep)
+{
+    TestFileManager fileManager;
+    const auto      directory =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    ScopedWorkingDirectory workingDirectory(directory);
+    writeGaMDProductionInput(c_validGaMDRestart);
+    gmxSetenv("GMX_GAMD_DIH_FORCE_DEBUG_FILE", "dihedral.dat", 1);
+    gmxSetenv("GMX_GAMD_DIH_FORCE_DEBUG_STEP", "7", 1);
+    {
+        GaMDMDModule module;
+        module.setBufferedProductionOutputEnabled(true);
+        EXPECT_FALSE(module.prepareStep(6, 0).requiresHostEnergy);
+        EXPECT_TRUE(module.stepPlan().gpuGraphEligible);
+        EXPECT_TRUE(module.prepareStep(7, 0).requiresHostEnergy);
+        EXPECT_FALSE(module.stepPlan().gpuGraphEligible);
+        const std::array<RVec, 1> forces = { RVec(1, 2, 3) };
+        module.diagnostics().dumpDihedralForces(7, forces, 1.0, true);
+        EXPECT_FALSE(module.prepareStep(8, 0).requiresHostEnergy);
+        EXPECT_TRUE(module.stepPlan().gpuGraphEligible);
+    }
+    gmxUnsetenv("GMX_GAMD_DIH_FORCE_DEBUG_FILE");
+    gmxUnsetenv("GMX_GAMD_DIH_FORCE_DEBUG_STEP");
+}
+
+TEST(GaMDDiagnosticsTest, FinalForceSnapshotKeepsValuesAndClampsCount)
+{
+    TestFileManager fileManager;
+    const auto      directory =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    ScopedWorkingDirectory workingDirectory(directory);
+    gmxSetenv("GMX_GAMD_FORCE_DEBUG_FILE", "final.dat", 1);
+    gmxSetenv("GMX_GAMD_FORCE_DEBUG_STEP", "7", 1);
+    gmxSetenv("GMX_GAMD_FORCE_DEBUG_BEGIN", "1", 1);
+    gmxSetenv("GMX_GAMD_FORCE_DEBUG_COUNT", "2147483647", 1);
+    {
+        GaMDDiagnostics           diagnostics;
+        const std::array<RVec, 3> forces = { RVec(4, 0, 0), RVec(0, 8, 0), RVec(0, 0, 12) };
+        diagnostics.dumpFinalForces(7, forces, true);
+    }
+    gmxUnsetenv("GMX_GAMD_FORCE_DEBUG_FILE");
+    gmxUnsetenv("GMX_GAMD_FORCE_DEBUG_STEP");
+    gmxUnsetenv("GMX_GAMD_FORCE_DEBUG_BEGIN");
+    gmxUnsetenv("GMX_GAMD_FORCE_DEBUG_COUNT");
+    const auto rows = readNumericRows("final.dat");
+    ASSERT_EQ(rows.size(), 2U);
+    EXPECT_EQ(rows[0][1], 1);
+    EXPECT_EQ(rows[0][3], 8);
+    EXPECT_EQ(rows[1][1], 2);
+    EXPECT_EQ(rows[1][4], 12);
+}
+
 TEST(GaMDDiagnosticsDeathTest, NonFiniteEnergyStateIsRejected)
 {
     const GaMDStepResult        reference;

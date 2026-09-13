@@ -151,8 +151,8 @@ Diagnostic configuration
 Explicit numeric diagnostic environment variables use the existing GROMACS
 strict converters. Empty, non-numeric, trailing-text, overflow, and non-finite
 force override values are errors rather than implicit zeroes. Integer debug
-indices and steps also use checked conversion. Valid diagnostic settings keep
-their existing interpretation; these switches are not production mode selectors.
+indices and steps also use checked conversion. These switches select optional
+diagnostics; production mode selection remains automatic.
 
 Force overrides are read once on first GaMD use and shared by CPU and CUDA.
 They only affect GaMD-enabled simulations. The current-step force correction
@@ -161,6 +161,24 @@ and individual bonded kernels do not apply them again. Forced diagnostics use
 immediate output so a buffered-output flush cannot repeat the current record.
 On CUDA, final-force diagnostic output uses the existing shadow-force transfer
 to read the corrected device forces. These diagnostic transfers can add cost.
+
+``GMX_GAMD_DIH_FORCE_DEBUG_FILE`` and ``GMX_GAMD_DIH_FORCE_DEBUG_STEP`` request
+one dihedral force snapshot. Its value is ``scaleP * scaleD * F_dihedral``, the
+dihedral contribution to the corrected total force. ``F_dihedral`` uses the
+dihedral/CMAP partition defined above. Rows are written once in ascending,
+zero-based topology atom order on both CPU and GPU. The optional
+``GMX_GAMD_DIH_FORCE_DEBUG_BEGIN`` and ``GMX_GAMD_DIH_FORCE_DEBUG_COUNT`` select
+that topology range; the defaults are zero and all remaining atoms.
+
+GPU snapshots read the existing device dihedral-force buffer at the selected
+step. They work without enabling the full GPU shadow comparison. Host staging
+is requested for that step so the snapshot uses its current force weights.
+
+``GMX_GAMD_DIH_RAW_DEBUG_FILE`` retains a trace of raw CPU bonded evaluations.
+Repeated correction or shadow evaluations therefore appear as separate rows.
+``GMX_GAMD_FORCE_DEBUG_FILE`` retains the final-force dump in its current force
+buffer's atom order. Explicit requests for any of these three files report
+open, write, flush, or close errors instead of silently disabling output.
 
 Verification
 ------------

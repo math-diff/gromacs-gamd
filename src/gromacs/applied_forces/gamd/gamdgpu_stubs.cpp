@@ -145,7 +145,7 @@ std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::previousHalfStepKineti
     return {};
 }
 
-void GaMDGpuExecutor::copyDihedralShadowForces(ArrayRef<RVec>) {}
+void GaMDGpuExecutor::copyDihedralForces(ArrayRef<RVec>) {}
 
 void GaMDGpuExecutor::copyDihedralVirial(std::array<real, DIM * DIM>*) {}
 

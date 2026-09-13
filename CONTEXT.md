@@ -21,3 +21,6 @@ Conventional preparation, conventional statistics, boost preparation, boost stat
 **Device bias state**:
 The fixed six-float layout containing potential/dihedral energies, their force weights, and their boosts. Named indices describe the device layout; host diagnostics receive a `GaMDStepResult` copied from that state.
 _Avoid_: Energy shadow when referring to the production device buffer
+
+**Dihedral force snapshot**:
+One selected step's dihedral contribution to the corrected total force: `scaleP * scaleD * F_dihedral`. The file uses zero-based topology atom indices on CPU and GPU. Raw CPU evaluation traces are a separate record and may contain repeated evaluations.
