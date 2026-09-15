@@ -122,8 +122,6 @@ private:
     std::vector<std::array<real, DIM * DIM>> takeUpdateConstraintVirialHistory();
     GaMDKineticEnergyHistory                 takeUpdateKineticEnergyHistory();
 
-    static constexpr int c_historyCapacity_ = 4096;
-
     const bool           useGpuResidentGaMD_;
     const DeviceContext& deviceContext_;
     const DeviceStream&  deviceStream_;

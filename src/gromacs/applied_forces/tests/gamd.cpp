@@ -39,6 +39,7 @@
  */
 #include "gmxpre.h"
 
+#include <csignal>
 #include <cstdlib>
 
 #include <array>
@@ -52,11 +53,17 @@
 
 #include <gtest/gtest.h>
 
+#if defined(__linux__)
+#    include <sys/resource.h>
+#endif
+
 #include "gromacs/applied_forces/gamd/gamddiagnostics.h"
 #include "gromacs/applied_forces/gamd/gamdexecution.h"
 #include "gromacs/applied_forces/gamd/gamdmdmodule.h"
 #include "gromacs/applied_forces/gamd/gamdruntime.h"
 #include "gromacs/utility/exceptions.h"
+#include "gromacs/utility/gmxassert.h"
+#include "gromacs/utility/textreader.h"
 
 #include "testutils/setenv.h"
 #include "testutils/testasserts.h"
@@ -1081,6 +1088,48 @@ TEST_F(GaMDTest, IrestProductionCheckpointCanContinueWithoutDuplicateRows)
 
     EXPECT_EQ(countNumericRows("gamd-para.dat"), paraRowsAtCheckpoint);
     EXPECT_EQ(countNumericRows("gamd-reweight.dat"), reweightRowsAtCheckpoint);
+}
+
+TEST_F(GaMDTest, RestartReconciliationPreservesOriginalAfterWriteFailure)
+{
+#if defined(__linux__) && GTEST_HAS_DEATH_TEST
+    TestFileManager fileManager;
+    const auto      directory =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    ScopedWorkingDirectory workingDirectory(directory);
+    std::string            restart = c_validGaMDRestart;
+    restart.replace(
+            restart.find("saved_step 10"), std::string("saved_step 10").size(), "saved_step 65");
+    writeGaMDProductionInput(restart);
+
+    // 每行固定为 128 字节，让写入在刷新之前就触发文件大小限制。
+    std::string originalOutput;
+    for (int step = 1; step <= 65; ++step)
+    {
+        std::string row = "1 " + std::to_string(step) + " 0 0 1 1 1 0 0";
+        row.resize(127, ' ');
+        originalOutput += row + '\n';
+    }
+    const std::filesystem::path reweightPath = "gamd-reweight.dat";
+    {
+        std::ofstream output(reweightPath);
+        output << originalOutput;
+    }
+
+    // 限制只作用于 death test 子进程，不改变其余测试的文件写入。
+    const struct rlimit fileSizeLimit = { 4096, 4096 };
+    GMX_EXPECT_DEATH_IF_SUPPORTED(
+            {
+                std::signal(SIGXFSZ, SIG_IGN);
+                GMX_RELEASE_ASSERT(setrlimit(RLIMIT_FSIZE, &fileSizeLimit) == 0,
+                                   "Could not configure the test file-size limit");
+                gaMDModule_.prepareStep(65, 0);
+            },
+            "Failed to flush and synchronize GaMD file");
+    EXPECT_EQ(TextReader::readFileToString(reweightPath), originalOutput);
+#else
+    GTEST_SKIP() << "This test requires Linux file-size limits and death tests.";
+#endif
 }
 
 TEST_F(GaMDTest, RestartRejectsMalformedRecordsBeforeRestoringState)

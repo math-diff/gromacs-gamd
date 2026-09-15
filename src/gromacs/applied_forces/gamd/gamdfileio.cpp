@@ -72,7 +72,8 @@ static void flushAndSyncFileOrFatal(FILE* fp, const char* filename)
     {
         return;
     }
-    if (std::fflush(fp) != 0 || gmx_fsync(fp) != 0)
+    // 刷新成功也不能抹去此前的写入失败，否则会提交不完整的重整文件。
+    if (std::fflush(fp) != 0 || std::ferror(fp) != 0 || gmx_fsync(fp) != 0)
     {
         gmx_fatal(FARGS, "Failed to flush and synchronize GaMD file '%s'.", filename);
     }

@@ -1238,7 +1238,10 @@ void gmx::LegacySimulator::do_md()
 
             const bool diagnosticHostState = gaMDModule_->gpuExecutor()->energyDiagnosticsEnabled()
                                              || gaMDModule_->gpuExecutor()->dihedralShadowEnabled();
-            const bool needHostEnergy = needEnergyAndVirial || diagnosticHostState
+            // 此列表在普通步和图重放时都会逐步增长，无需回传 GPU 计数来判断容量。
+            const bool historyBufferIsFull =
+                    deferredPressureBoxes.size() >= GaMDGpuExecutor::c_historyCapacity;
+            const bool needHostEnergy = needEnergyAndVirial || diagnosticHostState || historyBufferIsFull
                                         || gaMDModule_->requiresHostEnergyThisStep(step);
             runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost = needHostEnergy;
 
@@ -1247,8 +1250,8 @@ void gmx::LegacySimulator::do_md()
                 std::fprintf(
                         stderr,
                         "[GaMD GPU INFO] Device-resident production energy enabled; host staging "
-                        "is retained for %slog, checkpoint, adaptive-stage, and diagnostic "
-                        "steps.\n",
+                        "is retained for %slog, checkpoint, adaptive-stage, diagnostic, and "
+                        "full-history steps.\n",
                         useBufferedOutput ? "standard energy/" : "GaMD output, ");
             }
         }

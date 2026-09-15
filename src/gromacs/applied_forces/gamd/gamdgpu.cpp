@@ -114,12 +114,12 @@ GaMDGpuExecutor::Impl::Impl(const bool           useGpuResidentGaMD,
         allocateDeviceBuffer(&d_gamdState_, c_gaMDStateSize, deviceContext_);
         if (useGpuResidentGaMD_)
         {
-            allocateDeviceBuffer(&d_gamdEnergyHistory_, c_historyCapacity_ * F_NRE, deviceContext_);
-            allocateDeviceBuffer(&d_gamdForceVirialHistory_, c_historyCapacity_ * DIM * DIM, deviceContext_);
+            allocateDeviceBuffer(&d_gamdEnergyHistory_, c_historyCapacity * F_NRE, deviceContext_);
+            allocateDeviceBuffer(&d_gamdForceVirialHistory_, c_historyCapacity * DIM * DIM, deviceContext_);
             allocateDeviceBuffer(&d_gamdEnergyHistoryCount_, 1, deviceContext_);
             clearDeviceBufferAsync(&d_gamdEnergyHistoryCount_, 0, 1, deviceStream_);
-            h_gamdEnergyHistory_.resize(c_historyCapacity_ * F_NRE);
-            h_gamdForceVirialHistory_.resize(c_historyCapacity_ * DIM * DIM);
+            h_gamdEnergyHistory_.resize(c_historyCapacity * F_NRE);
+            h_gamdForceVirialHistory_.resize(c_historyCapacity * DIM * DIM);
             h_gamdEnergyHistoryCount_.resize(1);
         }
         if (gamdEnergyShadowDiagnosticsEnabled_)
@@ -243,14 +243,14 @@ void GaMDGpuExecutor::Impl::initializeUpdateHistory(const int           numTempe
     updateNumTemperatureGroups_ = numTemperatureGroups;
 
     // 固定容量覆盖两次 host staging 之间的生产步，避免普通步重新分配和同步。
-    allocateDeviceBuffer(&d_updateConstraintVirialHistory_, c_historyCapacity_ * DIM * DIM, deviceContext_);
+    allocateDeviceBuffer(&d_updateConstraintVirialHistory_, c_historyCapacity * DIM * DIM, deviceContext_);
     allocateDeviceBuffer(&d_updateConstraintVirialHistoryCount_, 1, deviceContext_);
     allocateDeviceBuffer(&d_updateCurrentHalfKinetic_, 6 + updateNumTemperatureGroups_, deviceContext_);
     allocateDeviceBuffer(&d_updatePreviousHalfKinetic_, 6 + updateNumTemperatureGroups_, deviceContext_);
     allocateDeviceBuffer(
             &d_updateGroupHalfKineticTensor_, updateNumTemperatureGroups_ * DIM * DIM, deviceContext_);
     allocateDeviceBuffer(&d_updateKineticHistory_,
-                         c_historyCapacity_ * (DIM * DIM + updateNumTemperatureGroups_),
+                         c_historyCapacity * (DIM * DIM + updateNumTemperatureGroups_),
                          deviceContext_);
     allocateDeviceBuffer(&d_updateKineticHistoryCount_, 1, deviceContext_);
 
@@ -258,9 +258,9 @@ void GaMDGpuExecutor::Impl::initializeUpdateHistory(const int           numTempe
     clearDeviceBufferAsync(&d_updatePreviousHalfKinetic_, 0, 6 + updateNumTemperatureGroups_, *updateStream_);
     clearDeviceBufferAsync(&d_updateKineticHistoryCount_, 0, 1, *updateStream_);
 
-    h_updateConstraintVirialHistory_.resize(c_historyCapacity_ * DIM * DIM);
+    h_updateConstraintVirialHistory_.resize(c_historyCapacity * DIM * DIM);
     h_updateConstraintVirialHistoryCount_.resize(1);
-    h_updateKineticHistory_.resize(c_historyCapacity_ * (DIM * DIM + updateNumTemperatureGroups_));
+    h_updateKineticHistory_.resize(c_historyCapacity * (DIM * DIM + updateNumTemperatureGroups_));
     h_updatePreviousHalfKinetic_.resize(updateNumTemperatureGroups_ * DIM * DIM);
     h_updateKineticHistoryCount_.resize(1);
 }
@@ -324,7 +324,7 @@ std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::Impl::takeUpdateConstr
                          GpuApiCallBehavior::Sync,
                          nullptr);
     const int sampleCount = h_updateConstraintVirialHistoryCount_[0];
-    GMX_RELEASE_ASSERT(sampleCount <= c_historyCapacity_,
+    GMX_RELEASE_ASSERT(sampleCount <= c_historyCapacity,
                        "GaMD deferred constraint-virial history exceeded its fixed capacity");
     if (sampleCount == 0)
     {
@@ -361,7 +361,7 @@ GaMDKineticEnergyHistory GaMDGpuExecutor::Impl::takeUpdateKineticEnergyHistory()
                          GpuApiCallBehavior::Sync,
                          nullptr);
     const int sampleCount = h_updateKineticHistoryCount_[0];
-    GMX_RELEASE_ASSERT(sampleCount <= c_historyCapacity_,
+    GMX_RELEASE_ASSERT(sampleCount <= c_historyCapacity,
                        "GaMD deferred kinetic history exceeded its fixed capacity");
     GaMDKineticEnergyHistory history;
     history.numGroups = updateNumTemperatureGroups_;

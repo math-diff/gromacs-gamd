@@ -512,7 +512,7 @@ void GaMDGpuExecutor::Impl::recordUpdateConstraintVirial(DeviceBuffer<float> lin
                                                       &haveSettles,
                                                       &scaleFactor,
                                                       &d_updateConstraintVirialHistoryCount_,
-                                                      &c_historyCapacity_,
+                                                      &c_historyCapacity,
                                                       &d_updateConstraintVirialHistory_);
     launchGpuKernel(kernel, config, *updateStream_, nullptr, "Record deferred constraint virial", kernelArgs);
 }
@@ -572,7 +572,7 @@ void GaMDGpuExecutor::Impl::recordUpdateKineticEnergy(const bool recordSample)
                                                         &d_updateCurrentHalfKinetic_,
                                                         &d_updatePreviousHalfKinetic_,
                                                         &d_updateKineticHistoryCount_,
-                                                        &c_historyCapacity_,
+                                                        &c_historyCapacity,
                                                         &d_updateKineticHistory_);
     launchGpuKernel(finalizeKernel,
                     finalizeConfig,
@@ -736,7 +736,7 @@ void GaMDGpuExecutor::Impl::launchGamdEnergyReduction(const GaMDBiasParameters& 
                                                                  &listedEnergies_,
                                                                  &d_gamdState_,
                                                                  &d_gamdEnergyHistoryCount_,
-                                                                 &c_historyCapacity_,
+                                                                 &c_historyCapacity,
                                                                  &d_gamdEnergyHistory_);
         launchGpuKernel(
                 historyKernel, config, deviceStream_, nullptr, "Record deferred GaMD energy sample", historyKernelArgs);
@@ -776,7 +776,7 @@ std::vector<std::array<real, F_NRE>> GaMDGpuExecutor::Impl::takeGamdEnergyHistor
                          GpuApiCallBehavior::Sync,
                          nullptr);
     const int sampleCount = h_gamdEnergyHistoryCount_[0];
-    GMX_RELEASE_ASSERT(sampleCount <= c_historyCapacity_,
+    GMX_RELEASE_ASSERT(sampleCount <= c_historyCapacity,
                        "Deferred GaMD energy history exceeded its fixed capacity");
     if (sampleCount == 0)
     {
@@ -822,7 +822,7 @@ void GaMDGpuExecutor::Impl::recordGamdForceVirialSample()
                                                       &d_gamdPmeEnergy_,
                                                       &d_gamdState_,
                                                       &d_gamdEnergyHistoryCount_,
-                                                      &c_historyCapacity_,
+                                                      &c_historyCapacity,
                                                       &d_gamdForceVirialHistory_);
     launchGpuKernel(kernel, config, deviceStream_, nullptr, "Record deferred GaMD force virial", kernelArgs);
 }
@@ -831,7 +831,7 @@ std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::Impl::takeGamdForceVir
 {
     GMX_RELEASE_ASSERT(useGpuResidentGaMD_,
                        "Deferred GaMD force-virial history requested while disabled");
-    GMX_RELEASE_ASSERT(numSamples >= 0 && numSamples <= c_historyCapacity_,
+    GMX_RELEASE_ASSERT(numSamples >= 0 && numSamples <= c_historyCapacity,
                        "Deferred GaMD force-virial sample count is out of range");
     if (numSamples == 0)
     {

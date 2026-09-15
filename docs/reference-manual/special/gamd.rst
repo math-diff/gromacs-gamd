@@ -125,10 +125,15 @@ current file can only be replaced by a validated backup matching the checkpoint.
 A valid matching current file does not depend on an unused older backup.
 Parameters, statistics, window state, and saved step are validated before use. Text output is reconciled to the checkpoint without
 replaying duplicate rows. Counters and their text formatting are 64 bit.
+Reconciliation checks the stream error state as well as flushing and syncing;
+a failed write stops replacement and preserves the original output file.
 
 GPU production can buffer text/energy histories until a host consumer needs
 them. This changes when rows are physically written, not their logical step
 numbers or configured ``reweight_nst`` / ``para_nst`` cadence.
+The fixed batch capacity is 4096 samples. A full batch forces host staging
+before another deferred sample is recorded, including during CUDA Graph replay.
+This also applies when ``nstenergy`` and ``nstlog`` exceed the batch capacity.
 
 Supported execution
 -------------------

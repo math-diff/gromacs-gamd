@@ -78,6 +78,19 @@ its diagnostic host copy is returned as ``GaMDStepResult``. The GPU executor
 stores one resident-mode flag and derives buffer/history capabilities from it
 and the independent diagnostic switches.
 
+``GaMDGpuExecutor::c_historyCapacity`` is the single limit for device history
+allocation and host scheduling. The MD loop checks its existing
+``deferredPressureBoxes`` count before selecting host staging or graph replay;
+a full batch is drained through ``takeHistory`` before appending another sample.
+The host list advances on graph replay too, so this needs no additional counter
+or per-step device readback.
+
+The legacy output synchronization helper checks ``ferror`` before treating a
+file as committed. An earlier failed write can leave no pending buffer, making
+the last ``fflush`` succeed; reconciliation must still stop before replacing
+the original output. The regression test injects a file-size-limit failure
+through the normal restart-loading entry and checks the original bytes.
+
 The current-step correction entry performs common checks and energy accounting,
 then calls the separate CPU or GPU sequence in ``sim_util.cpp``. Numerical
 energy, force, and virial comparisons live in ``gamddiagnostics.cpp`` and reject

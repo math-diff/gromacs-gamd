@@ -85,6 +85,9 @@ struct GaMDHistoryBatch
 class GaMDGpuExecutor final
 {
 public:
+    //! 主机调度和所有设备历史缓冲共用此容量，满后必须先回传整批记录。
+    static constexpr int c_historyCapacity = 4096;
+
     GaMDGpuExecutor(bool                 useGpuResidentGaMD,
                     const DeviceContext& deviceContext,
                     const DeviceStream&  deviceStream,
