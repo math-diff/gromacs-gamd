@@ -1137,33 +1137,7 @@ void gmx::LegacySimulator::do_md()
 
         if (useCurrentStepGaMD)
         {
-            // Current-step GaMD requires raw energies every MD step.
-            if (gaMDModule_->diagnostics().shouldPrintNstcalcenergyMessage())
-            {
-                if (cr_->nodeid == 0)
-                {
-                    if (ir->nstcalcenergy > 1)
-                    {
-                        GMX_LOG(mdLog_.warning)
-                                .asParagraph()
-                                .appendTextFormatted(
-                                        "\n[GaMD WARNING] nstcalcenergy = %d > 1.\n"
-                                        "Current-step GaMD requires raw energies every step.\n"
-                                        "Set nstcalcenergy = 1 for a supported production "
-                                        "path.\n\n",
-                                        ir->nstcalcenergy);
-                    }
-                    else
-                    {
-                        GMX_LOG(mdLog_.info)
-                                .asParagraph()
-                                .appendTextFormatted(
-                                        "\n[GaMD INFO] nstcalcenergy = %d.\n"
-                                        "GaMD is using current-step energies.\n\n",
-                                        ir->nstcalcenergy);
-                    }
-                }
-            }
+            gaMDModule_->diagnostics().logEnergyCadence(ir->nstcalcenergy, cr_->nodeid == 0);
 
             const bool pressureCouplingThisStep = doCRescalePressureCouplingThisStep(*ir, step);
             gaMDModule_->prepareStep(step, cr_->nodeid, pressureCouplingThisStep);
@@ -1251,23 +1225,7 @@ void gmx::LegacySimulator::do_md()
                                         || gaMDModule_->requiresHostEnergyThisStep(step);
             runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost = needHostEnergy;
 
-            if (cr_->nodeid == 0 && gaMDModule_->diagnostics().shouldPrintResidentEnergyMessage())
-            {
-                const char* hostStagingOutputs = "GaMD output, ";
-                if (useBufferedOutput)
-                {
-                    hostStagingOutputs = "standard energy/";
-                }
-                GMX_LOG(mdLog_.info)
-                        .asParagraph()
-                        .appendTextFormatted(
-                                "[GaMD GPU INFO] Device-resident production energy enabled; host "
-                                "staging "
-                                "is retained for %slog, checkpoint, adaptive-stage, diagnostic, "
-                                "and "
-                                "full-history steps.\n",
-                                hostStagingOutputs);
-            }
+            gaMDModule_->diagnostics().logResidentEnergy(useBufferedOutput, cr_->nodeid == 0);
         }
 
         const bool useResidentOrdinaryStep = useCurrentStepGaMD && useResidentEnergy
@@ -2235,9 +2193,7 @@ void gmx::LegacySimulator::do_md()
                     }
                     else
                     {
-                        energyOutput.deferGpuEnergySample(t, *enerd_);
-                        energyOutput.deferGpuVirialSample();
-                        energyOutput.deferGpuKineticSample();
+                        energyOutput.deferGpuSamples(t, *enerd_);
                         std::array<real, DIM * DIM> pressureBox;
                         std::copy_n(lastbox[0], DIM * DIM, pressureBox.begin());
                         deferredPressureBoxes.push_back(pressureBox);

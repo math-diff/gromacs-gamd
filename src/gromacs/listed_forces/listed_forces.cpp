@@ -50,7 +50,6 @@
 #include <iterator>
 #include <numeric>
 #include <string>
-#include <vector>
 
 #include "gromacs/gmxlib/nrnb.h"
 #include "gromacs/listed_forces/bonded.h"
@@ -748,93 +747,6 @@ void calc_listed_lambda(const InteractionDefinitions&       idef,
 }
 
 } // namespace
-
-void calculateGaMDDihedralListedForces(const InteractionDefinitions&             idef,
-                                       gmx::ArrayRefWithPadding<const gmx::RVec> coordinates,
-                                       gmx::ArrayRef<gmx::RVec>                  forces,
-                                       gmx::ArrayRef<gmx::RVec>                  shiftForces,
-                                       const t_forcerec*                         fr,
-                                       const struct t_pbc*                       pbc,
-                                       t_fcdata*                                 fcdata,
-                                       t_nrnb*                                   nrnb,
-                                       gmx::ArrayRef<const real>                 lambda,
-                                       int*                                      global_atom_index)
-{
-    const rvec* x = as_rvec_array(coordinates.paddedArrayRef().data());
-
-    GMX_RELEASE_ASSERT(fcdata != nullptr,
-                       "GaMD dihedral force calculation requires force calculation data");
-    std::fill(forces.begin(), forces.end(), gmx::RVec(0.0_real, 0.0_real, 0.0_real));
-    std::fill(shiftForces.begin(), shiftForces.end(), gmx::RVec(0.0_real, 0.0_real, 0.0_real));
-
-    thread_local static std::vector<real> scratchForceBuffer;
-    scratchForceBuffer.resize(forces.size() * sizeof(rvec4) / sizeof(real));
-    std::fill(scratchForceBuffer.begin(), scratchForceBuffer.end(), 0.0_real);
-
-    rvec4*     scratchForces = reinterpret_cast<rvec4*>(scratchForceBuffer.data());
-    rvec*      scratchShift  = as_rvec_array(shiftForces.data());
-    real       dvdl          = 0.0_real;
-    const real lambdaBonded  = lambda[static_cast<int>(FreeEnergyPerturbationCouplingType::Bonded)];
-    const t_pbc* pbcOrNull   = (fr->bMolPBC ? pbc : nullptr);
-
-    const std::array<int, 4> gamdDihedralForceTypes = { F_PDIHS, F_RBDIHS, F_FOURDIHS, F_CMAP };
-
-    for (const int ftype : gamdDihedralForceTypes)
-    {
-        const InteractionList& ilist = idef.il[ftype];
-        if (ilist.empty())
-        {
-            continue;
-        }
-
-        if (ftype == F_CMAP)
-        {
-            cmap_dihs(ilist.size(),
-                      ilist.iatoms.data(),
-                      idef.iparams.data(),
-                      &idef.cmap_grid,
-                      x,
-                      scratchForces,
-                      scratchShift,
-                      pbcOrNull,
-                      lambdaBonded,
-                      &dvdl,
-                      {},
-                      fcdata,
-                      nullptr,
-                      nullptr,
-                      global_atom_index);
-        }
-        else
-        {
-            calculateSimpleBond(ftype,
-                                ilist.size(),
-                                ilist.iatoms.data(),
-                                idef.iparams.data(),
-                                x,
-                                scratchForces,
-                                scratchShift,
-                                pbcOrNull,
-                                lambdaBonded,
-                                &dvdl,
-                                {},
-                                fcdata,
-                                fcdata->disres,
-                                fcdata->orires.get(),
-                                global_atom_index,
-                                BondedKernelFlavor::ForcesNoSimd);
-        }
-
-        inc_nrnb(nrnb, nrnbIndex(ftype), ilist.size() / (interaction_function[ftype].nratoms + 1));
-    }
-
-    for (gmx::Index i = 0; i < forces.ssize(); ++i)
-    {
-        forces[i][XX] = scratchForces[i][XX];
-        forces[i][YY] = scratchForces[i][YY];
-        forces[i][ZZ] = scratchForces[i][ZZ];
-    }
-}
 
 void ListedForces::calculate(struct gmx_wallcycle*                     wcycle,
                              const matrix                              box,

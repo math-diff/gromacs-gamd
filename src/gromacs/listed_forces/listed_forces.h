@@ -232,21 +232,4 @@ private:
     GMX_DISALLOW_COPY_AND_ASSIGN(ListedForces);
 };
 
-/*! \brief Re-evaluate only the GaMD dihedral-like listed interactions into scratch buffers.
- *
- * This helper computes raw force contributions for the listed interaction terms used by GaMD
- * dihedral boosting: proper periodic dihedrals, RB/Fourier dihedrals, and CMAP.
- * The output buffers are cleared before accumulation.
- */
-void calculateGaMDDihedralListedForces(const InteractionDefinitions&                 idef,
-                                       gmx::ArrayRefWithPadding<const gmx::RVec>     coordinates,
-                                       gmx::ArrayRef<gmx::RVec>                      forces,
-                                       gmx::ArrayRef<gmx::RVec>                      shiftForces,
-                                       const t_forcerec*                             fr,
-                                       const struct t_pbc*                           pbc,
-                                       t_fcdata*                                     fcdata,
-                                       t_nrnb*                                       nrnb,
-                                       gmx::ArrayRef<const real>                     lambda,
-                                       int*                                          global_atom_index);
-
 #endif

@@ -64,6 +64,9 @@ and the optional GPU executor. Keep that single ownership chain.
        checkpoint migration need not change scientific mathematics.
    * - ``gamd_scale_gpu.cu``
      - Existing device-state layout and launch wrapper around the shared math.
+   * - ``gamdexecution.h/.cpp``
+     - Execution selection and the legacy current-step correction entry. The
+       CPU dihedral recomputation and CPU/GPU force sequences are private here.
    * - ``gamdgpu.*`` and ``gamddiagnostics.*``
      - Device buffers/events/launches and instance-owned diagnostics.
 
@@ -133,7 +136,11 @@ the original output. The regression test injects a file-size-limit failure
 through the normal restart-loading entry and checks the original bytes.
 
 The current-step correction entry performs common checks and energy accounting,
-then calls the separate CPU or GPU sequence in ``sim_util.cpp``. Numerical
+then calls the separate CPU or GPU sequence in ``gamdexecution.cpp``.
+``sim_util.cpp`` retains the call at the original force-processing boundary.
+The private CPU dihedral helper reuses the native bonded kernels and overwrites
+its output buffer completely; only its accumulation buffers need clearing.
+Numerical
 energy, force, and virial comparisons live in ``gamddiagnostics.cpp`` and reject
 non-finite values before aggregating errors. CPU bonded kernels produce raw
 forces; the GaMD correction owns the final weights. Preserve the distinction
@@ -146,6 +153,16 @@ current host weights at their selected step without enabling the full shadow
 comparison. Bonded callbacks only retain the separately labelled raw CPU trace.
 The diagnostics implementation shares checked stdio output for dihedral and
 final-force snapshots and reports requested-file failures explicitly.
+
+``EnergyOutput::deferGpuSamples`` marks energy, virial and kinetic bins together.
+The completion routines retain independent sample-count checks, and replay
+kinetic data, virials and energy in the original order. Native ``msmul`` handles
+the host-side 3x3 virial scaling without additional allocation or transfer.
+
+PME supplies its private energy buffer and producer stream to
+``launchGaMDPmeEnergyStaging`` in ``gamdgpu.cu``. The existing kernel launch and
+readiness event stay on that same stream. Execution announcements are emitted
+once by ``GaMDDiagnostics`` through the simulation logger.
 
 The raw-energy producers, force/virial ownership, constraints/update, standard
 energy output, and MD scheduling still have necessary integration points.

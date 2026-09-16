@@ -72,6 +72,7 @@
 #include "gromacs/mdrunutility/mdmodulesnotifiers.h"
 #include "gromacs/mdtypes/commrec.h"
 #include "gromacs/mdtypes/enerdata.h"
+#include "gromacs/mdtypes/energyhistory.h"
 #include "gromacs/mdtypes/fcdata.h"
 #include "gromacs/mdtypes/group.h"
 #include "gromacs/mdtypes/inputrec.h"
@@ -208,18 +209,13 @@ public:
     FILE* log_;
     //! Log file wrapper
     unique_cptr<FILE, fcloseWrapper> logFileGuard_;
-    //! Reference data
-    TestReferenceData refData_;
-    //! Checker for reference data
-    TestReferenceChecker checker_;
 
     EnergyOutputTest() :
         ekindata_(tcgInit_, EnsembleTemperatureSetting::NotAvailable, -1.0_real, false, cosAccel_, 1),
         logFilename_(fileManager_.getTemporaryFilePath(".log").string()),
         edrFilename_(fileManager_.getTemporaryFilePath(".edr").string()),
         log_(std::fopen(logFilename_.c_str(), "w")),
-        logFileGuard_(log_),
-        checker_(refData_.rootChecker())
+        logFileGuard_(log_)
     {
         // Input record
         inputrec_.delta_t = 0.001;
@@ -539,8 +535,9 @@ public:
      *
      * \param[in] fileName    Name of the file to check.
      * \param[in] frameCount  Number of frames to check.
+     * \param[in] checker     Reference data for this output comparison.
      */
-    void checkEdrFile(const char* fileName, int frameCount)
+    void checkEdrFile(const char* fileName, int frameCount, TestReferenceChecker* checker)
     {
         ener_file_t  edrFile;
         gmx_enxnm_t* energyTermsEdr = nullptr;
@@ -551,7 +548,7 @@ public:
         assert(energyTermsEdr);
 
         // Check header
-        TestReferenceChecker edrFileRef(checker_.checkCompound("File", "EnergyFile"));
+        TestReferenceChecker edrFileRef(checker->checkCompound("File", "EnergyFile"));
         TestReferenceChecker energyTermsRef(
                 edrFileRef.checkSequenceCompound("EnergyTerms", numEnergyTermsEdr));
         for (int i = 0; i < numEnergyTermsEdr; i++)
@@ -599,6 +596,8 @@ public:
 
 TEST_P(EnergyOutputTest, CheckOutput)
 {
+    TestReferenceData    refData;
+    TestReferenceChecker checker = refData.rootChecker();
     ASSERT_NE(log_, nullptr);
     // Binary output will be written to the temporary location
     energyFile_ = open_enx(edrFilename_.c_str(), "w");
@@ -665,17 +664,119 @@ TEST_P(EnergyOutputTest, CheckOutput)
     done_ener_file(energyFile_);
 
     // Set tolerance
-    checker_.setDefaultTolerance(relativeToleranceAsFloatingPoint(testValue, 1.0e-5));
+    checker.setDefaultTolerance(relativeToleranceAsFloatingPoint(testValue, 1.0e-5));
 
     if (parameters.numFrames > 0)
     {
         // Test binary output
-        checkEdrFile(edrFilename_.c_str(), parameters.numFrames);
+        checkEdrFile(edrFilename_.c_str(), parameters.numFrames, &checker);
     }
 
     // Test printed values
-    checker_.checkInteger(energyOutput->numEnergyTerms(), "Number of Energy Terms");
-    checker_.checkString(TextReader::readFileToString(logFilename_), "log");
+    checker.checkInteger(energyOutput->numEnergyTerms(), "Number of Energy Terms");
+    checker.checkString(TextReader::readFileToString(logFilename_), "log");
+}
+
+TEST_P(EnergyOutputTest, DeferredGpuSamplesPreserveEnergyHistory)
+{
+    const auto parameters                 = GetParam();
+    inputrec_.etc                         = parameters.temperatureCouplingScheme;
+    inputrec_.pressureCouplingOptions.epc = parameters.pressureCouplingScheme;
+    inputrec_.eI                          = parameters.integrator;
+    MDModulesNotifiers immediateNotifiers;
+    MDModulesNotifiers deferredNotifiers;
+    EnergyOutput       immediate(
+            nullptr, mtop_, inputrec_, nullptr, nullptr, false, StartingBehavior::NewSimulation, false, immediateNotifiers);
+    EnergyOutput deferred(
+            nullptr, mtop_, inputrec_, nullptr, nullptr, false, StartingBehavior::NewSimulation, false, deferredNotifiers);
+    const std::array<EnergyOutput*, 2> outputs{ &immediate, &deferred };
+    double                             testValue = 10.0;
+
+    // 连续回放两个批次，确认统一标记不会重复记账，也能正确复位。
+    for (int batchIndex = 0; batchIndex < 2; ++batchIndex)
+    {
+        std::vector<std::array<real, F_NRE>>     energySamples;
+        std::vector<std::array<real, DIM * DIM>> virialSamples;
+        std::vector<std::array<real, DIM * DIM>> pressureSamples;
+        std::vector<std::array<real, DIM * DIM>> kineticSamples;
+        std::vector<real>                        scalarPressures;
+        std::vector<real>                        surfaceTensions;
+        std::vector<real>                        temperatures;
+        std::vector<real>                        groupTemperatures;
+        for (int sampleIndex = 0; sampleIndex < 3; ++sampleIndex)
+        {
+            setStepData(&testValue);
+            // 整数能量可精确表示，让这里检查批次记账，不混入两种旧累加路径的精度差异。
+            for (int termIndex = 0; termIndex < F_NRE; ++termIndex)
+            {
+                enerdata_->term[termIndex] = 100 * batchIndex + 10 * sampleIndex + termIndex;
+            }
+            std::array<real, F_NRE> energy;
+            std::copy(enerdata_->term.begin(), enerdata_->term.end(), energy.begin());
+            energySamples.push_back(energy);
+            std::array<real, DIM * DIM> virial;
+            std::array<real, DIM * DIM> pressure;
+            std::copy_n(totalVirial_[0], DIM * DIM, virial.begin());
+            std::copy_n(pressure_[0], DIM * DIM, pressure.begin());
+            virialSamples.push_back(virial);
+            pressureSamples.push_back(pressure);
+            std::array<real, DIM * DIM> kinetic = {};
+            kinetic[XX * DIM + XX]              = enerdata_->term[F_EKIN];
+            kineticSamples.push_back(kinetic);
+            scalarPressures.push_back(enerdata_->term[F_PRES]);
+            surfaceTensions.push_back((pressure_[ZZ][ZZ] - (pressure_[XX][XX] + pressure_[YY][YY]) * 0.5)
+                                      * box_[ZZ][ZZ]);
+            temperatures.push_back(enerdata_->term[F_TEMP]);
+            for (const auto& group : ekindata_.tcstat)
+            {
+                groupTemperatures.push_back(group.T);
+            }
+            deferred.deferGpuSamples(time_, *enerdata_);
+            for (EnergyOutput* output : outputs)
+            {
+                output->addDataAtEnergyStep(false,
+                                            true,
+                                            time_,
+                                            tmass_,
+                                            enerdata_.get(),
+                                            nullptr,
+                                            box_,
+                                            PTCouplingArrays({ state_.boxv,
+                                                               state_.nosehoover_xi,
+                                                               state_.nosehoover_vxi,
+                                                               state_.nhpres_xi,
+                                                               state_.nhpres_vxi }),
+                                            state_.fep_state,
+                                            totalVirial_,
+                                            pressure_,
+                                            &ekindata_,
+                                            muTotal_,
+                                            constraints_.get());
+            }
+        }
+        deferred.completeDeferredGpuKineticSamples(kineticSamples, temperatures, groupTemperatures);
+        deferred.completeDeferredGpuVirialSamples(
+                virialSamples, pressureSamples, scalarPressures, surfaceTensions);
+        deferred.completeDeferredGpuEnergySamples(energySamples);
+    }
+
+    // 使用正常逐步记账作为独立参照，逐项比较写入 checkpoint 的统计数据。
+    energyhistory_t immediateHistory;
+    energyhistory_t deferredHistory;
+    immediate.fillEnergyHistory(&immediateHistory);
+    deferred.fillEnergyHistory(&deferredHistory);
+    EXPECT_EQ(immediateHistory.nsteps, deferredHistory.nsteps);
+    EXPECT_EQ(immediateHistory.nsum, deferredHistory.nsum);
+    EXPECT_EQ(immediateHistory.nsteps_sim, deferredHistory.nsteps_sim);
+    EXPECT_EQ(immediateHistory.nsum_sim, deferredHistory.nsum_sim);
+    ASSERT_EQ(immediateHistory.ener_sum.size(), deferredHistory.ener_sum.size());
+    for (Index entryIndex = 0; entryIndex < ssize(immediateHistory.ener_sum); ++entryIndex)
+    {
+        EXPECT_DOUBLE_EQ(immediateHistory.ener_sum[entryIndex], deferredHistory.ener_sum[entryIndex]);
+        EXPECT_DOUBLE_EQ(immediateHistory.ener_sum_sim[entryIndex],
+                         deferredHistory.ener_sum_sim[entryIndex]);
+        EXPECT_NEAR(immediateHistory.ener_ave[entryIndex], deferredHistory.ener_ave[entryIndex], 1e-9);
+    }
 }
 
 INSTANTIATE_TEST_SUITE_P(WithParameters, EnergyOutputTest, ::testing::ValuesIn(parametersSets));

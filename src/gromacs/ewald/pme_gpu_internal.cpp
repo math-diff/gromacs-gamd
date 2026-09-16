@@ -54,6 +54,7 @@
 #include <memory>
 #include <string>
 
+#include "gromacs/applied_forces/gamd/gamdgpu.h"
 #include "gromacs/ewald/ewald_utils.h"
 #include "gromacs/fft/gpu_3dfft.h"
 #include "gromacs/gpu_utils/device_context.h"
@@ -2551,51 +2552,16 @@ DeviceBuffer<gmx::RVec> pme_gpu_get_kernelparam_forces(const PmeGpu* pmeGpu)
     }
 }
 
-__global__ void stageGamdReciprocalEnergyKernel(const float* gm_virialAndEnergy, float* gm_destination)
-{
-    if (blockIdx.x == 0 && threadIdx.x == 0)
-    {
-        gm_destination[0]                 = 0.5F * gm_virialAndEnergy[6];
-        gm_destination[1 + XX * DIM + XX] = 0.25F * gm_virialAndEnergy[0];
-        gm_destination[1 + YY * DIM + YY] = 0.25F * gm_virialAndEnergy[1];
-        gm_destination[1 + ZZ * DIM + ZZ] = 0.25F * gm_virialAndEnergy[2];
-        gm_destination[1 + XX * DIM + YY] = 0.25F * gm_virialAndEnergy[3];
-        gm_destination[1 + YY * DIM + XX] = 0.25F * gm_virialAndEnergy[3];
-        gm_destination[1 + XX * DIM + ZZ] = 0.25F * gm_virialAndEnergy[4];
-        gm_destination[1 + ZZ * DIM + XX] = 0.25F * gm_virialAndEnergy[4];
-        gm_destination[1 + YY * DIM + ZZ] = 0.25F * gm_virialAndEnergy[5];
-        gm_destination[1 + ZZ * DIM + YY] = 0.25F * gm_virialAndEnergy[5];
-    }
-}
-
 void pme_gpu_stage_gamd_reciprocal_energy(const PmeGpu*         pmeGpu,
                                           DeviceBuffer<float>   destination,
                                           GpuEventSynchronizer* readyEvent)
 {
     GMX_ASSERT(pmeGpu != nullptr && pmeGpu->kernelParams != nullptr,
                "GaMD reciprocal-energy staging requires initialized GPU PME");
-    GMX_ASSERT(destination != nullptr && readyEvent != nullptr,
-               "GaMD reciprocal-energy staging requires output storage and an event");
-
-    KernelLaunchConfig config;
-    config.blockSize[0]     = 1;
-    config.blockSize[1]     = 1;
-    config.blockSize[2]     = 1;
-    config.gridSize[0]      = 1;
-    config.gridSize[1]      = 1;
-    config.gridSize[2]      = 1;
-    config.sharedMemorySize = 0;
-
-    auto       source     = pmeGpu->kernelParams->constants.d_virialAndEnergy[FEP_STATE_A];
-    auto       kernel     = stageGamdReciprocalEnergyKernel;
-    const auto kernelArgs = prepareGpuKernelArguments(kernel, config, &source, &destination);
-    launchGpuKernel(kernel,
-                    config,
-                    pmeGpu->archSpecific->pmeStream_,
-                    nullptr,
-                    "Stage GaMD reciprocal energy",
-                    kernelArgs);
-    readyEvent->markEvent(pmeGpu->archSpecific->pmeStream_);
+    gmx::launchGaMDPmeEnergyStaging(pmeGpu->kernelParams->constants.d_virialAndEnergy[FEP_STATE_A],
+                                    destination,
+                                    pmeGpu->archSpecific->pmeStream_,
+                                    readyEvent);
 }
 
 void pme_gpu_set_kernelparam_useNvshmem(const PmeGpu* pmeGpu, bool useNvshmem)

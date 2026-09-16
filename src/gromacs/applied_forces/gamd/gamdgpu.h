@@ -217,6 +217,12 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+//! Stages PME energy/virial on its producer stream and records readiness without host copies.
+void launchGaMDPmeEnergyStaging(DeviceBuffer<float>   source,
+                                DeviceBuffer<float>   destination,
+                                const DeviceStream&   pmeStream,
+                                GpuEventSynchronizer* readyEvent);
+
 //! \}
 //! \endcond
 

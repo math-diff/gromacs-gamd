@@ -581,24 +581,58 @@ void GaMDDiagnostics::dumpFinalForces(const int64_t step, const ArrayRef<const R
             finalForceFile_.get(), finalForceFilename_, step, forces, finalForceBegin_, finalForceCount_, 1.0, {});
 }
 
-bool GaMDDiagnostics::shouldPrintNstcalcenergyMessage()
+void GaMDDiagnostics::logEnergyCadence(const int nstcalcenergy, const bool isMainRank)
 {
     if (nstcalcenergyMessagePrinted_)
     {
-        return false;
+        return;
     }
     nstcalcenergyMessagePrinted_ = true;
-    return true;
+    if (!isMainRank)
+    {
+        return;
+    }
+
+    if (nstcalcenergy > 1)
+    {
+        GMX_LOG(logger_.warning)
+                .asParagraph()
+                .appendTextFormatted(
+                        "\n[GaMD WARNING] nstcalcenergy = %d > 1.\n"
+                        "Current-step GaMD requires raw energies every step.\n"
+                        "Set nstcalcenergy = 1 for a supported production path.\n\n",
+                        nstcalcenergy);
+    }
+    else
+    {
+        GMX_LOG(logger_.info)
+                .asParagraph()
+                .appendTextFormatted(
+                        "\n[GaMD INFO] nstcalcenergy = %d.\n"
+                        "GaMD is using current-step energies.\n\n",
+                        nstcalcenergy);
+    }
 }
 
-bool GaMDDiagnostics::shouldPrintResidentEnergyMessage()
+void GaMDDiagnostics::logResidentEnergy(const bool useBufferedOutput, const bool isMainRank)
 {
-    if (residentEnergyMessagePrinted_)
+    if (!isMainRank || residentEnergyMessagePrinted_)
     {
-        return false;
+        return;
     }
-    residentEnergyMessagePrinted_ = true;
-    return true;
+    residentEnergyMessagePrinted_  = true;
+    const char* hostStagingOutputs = "GaMD output, ";
+    if (useBufferedOutput)
+    {
+        hostStagingOutputs = "standard energy/";
+    }
+    GMX_LOG(logger_.info)
+            .asParagraph()
+            .appendTextFormatted(
+                    "[GaMD GPU INFO] Device-resident production energy enabled; host staging "
+                    "is retained for %slog, checkpoint, adaptive-stage, diagnostic, and "
+                    "full-history steps.\n",
+                    hostStagingOutputs);
 }
 
 bool GaMDDiagnostics::shouldPrintGpuWorkloadDiagnostics()

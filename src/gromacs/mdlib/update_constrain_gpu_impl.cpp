@@ -147,13 +147,7 @@ void UpdateConstrainGpu::Impl::copyConstraintVirialToHost(const real dt, tensor 
 
     // scaledVirial -> virial (methods above return scaled values)
     const float scaleFactor = 0.5F / (dt * dt);
-    for (int i = 0; i < DIM; i++)
-    {
-        for (int j = 0; j < DIM; j++)
-        {
-            virial[i][j] *= scaleFactor;
-        }
-    }
+    msmul(virial, scaleFactor, virial);
 }
 
 void UpdateConstrainGpu::Impl::scaleCoordinates(const Matrix3x3& scalingMatrix)

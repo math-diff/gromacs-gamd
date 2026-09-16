@@ -687,12 +687,23 @@ TEST_F(GaMDTest, ForceOverrideSnapshotGovernsStagingAndHostResult)
 
 TEST(GaMDModuleOwnershipTest, DiagnosticsAndHostWorkspaceAreInstanceOwned)
 {
+    LoggerTestHelper firstLog;
+    LoggerTestHelper secondLog;
+    firstLog.expectEntryMatchingRegex(MDLogger::LogLevel::Info, "nstcalcenergy = 1");
+    firstLog.expectEntryMatchingRegex(MDLogger::LogLevel::Info, "GaMD output, log");
+    secondLog.expectEntryMatchingRegex(MDLogger::LogLevel::Info, "nstcalcenergy = 1");
+    secondLog.expectEntryMatchingRegex(MDLogger::LogLevel::Info, "standard energy/log");
     GaMDMDModule firstModule;
     GaMDMDModule secondModule;
 
-    EXPECT_TRUE(firstModule.diagnostics().shouldPrintNstcalcenergyMessage());
-    EXPECT_FALSE(firstModule.diagnostics().shouldPrintNstcalcenergyMessage());
-    EXPECT_TRUE(secondModule.diagnostics().shouldPrintNstcalcenergyMessage());
+    firstModule.diagnostics().setLogger(firstLog.logger());
+    secondModule.diagnostics().setLogger(secondLog.logger());
+    firstModule.diagnostics().logEnergyCadence(1, true);
+    firstModule.diagnostics().logEnergyCadence(1, true);
+    secondModule.diagnostics().logEnergyCadence(1, true);
+    firstModule.diagnostics().logResidentEnergy(false, true);
+    firstModule.diagnostics().logResidentEnergy(false, true);
+    secondModule.diagnostics().logResidentEnergy(true, true);
 
     firstModule.diagnostics().hostWorkspace().cpuDihedralForces.resize(1);
     EXPECT_TRUE(secondModule.diagnostics().hostWorkspace().cpuDihedralForces.empty());

@@ -32,7 +32,7 @@
  * the research papers on the package. Check out https://www.gromacs.org.
  */
 /*! \libinternal \file
- * \brief Declares GaMD execution selection for the simulation workload.
+ * \brief Declares GaMD execution selection and the legacy force-correction entry point.
  *
  * \inlibraryapi
  * \ingroup module_applied_forces
@@ -40,11 +40,24 @@
 #ifndef GMX_APPLIED_FORCES_GAMD_GAMDEXECUTION_H
 #define GMX_APPLIED_FORCES_GAMD_GAMDEXECUTION_H
 
+#include <cstdint>
+
+#include "gromacs/math/arrayrefwithpadding.h"
+#include "gromacs/math/vectypes.h"
 #include "gromacs/mdtypes/inputrec.h"
 #include "gromacs/mdtypes/simulation_workload.h"
 
+class InteractionDefinitions;
+struct gmx_enerdata_t;
+struct gmx_wallcycle;
+struct t_commrec;
+struct t_forcerec;
+struct t_nrnb;
+
 namespace gmx
 {
+
+class VirtualSitesHandler;
 
 //! \cond libapi
 //! \addtogroup module_applied_forces
@@ -65,6 +78,23 @@ GaMDExecutionMode selectGaMDExecutionMode(bool                 useGaMD,
 
 //! Returns a stable descriptive name for a GaMD execution mode.
 const char* gaMDExecutionModeName(GaMDExecutionMode mode);
+
+//! Applies current-step bias after ordinary force processing, preserving device event order.
+void applyGaMDCurrentStepCorrection(const t_commrec&              communicationRecord,
+                                    int64_t                       step,
+                                    const InteractionDefinitions& interactionDefinitions,
+                                    const matrix                  box,
+                                    ArrayRefWithPadding<RVec>     coordinates,
+                                    ArrayRef<RVec>                forces,
+                                    tensor                        forceVirial,
+                                    int                           numLocalAtoms,
+                                    gmx_enerdata_t*               energyData,
+                                    ArrayRef<const real>          freeEnergyParameters,
+                                    t_forcerec*                   forceRecord,
+                                    VirtualSitesHandler*          virtualSites,
+                                    t_nrnb*                       operationCounter,
+                                    gmx_wallcycle*                wallCycle,
+                                    const MdrunScheduleWorkload&  runScheduleWork);
 
 //! \}
 //! \endcond

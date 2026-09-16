@@ -170,5 +170,11 @@ GpuEventSynchronizer* GaMDGpuExecutor::forcesReadyEvent()
     return nullptr;
 }
 
+void launchGaMDPmeEnergyStaging(DeviceBuffer<float>, DeviceBuffer<float>, const DeviceStream&, GpuEventSynchronizer*)
+{
+    GMX_THROW(
+            NotImplementedError("GaMD reciprocal-energy staging currently requires a CUDA build."));
+}
+
 } // namespace gmx
 //! \endcond

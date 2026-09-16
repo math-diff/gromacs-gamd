@@ -56,6 +56,7 @@
 #include "gromacs/applied_forces/gamd/gamdgpu_impl.h"
 #include "gromacs/gpu_utils/cuda_arch_utils.cuh"
 #include "gromacs/gpu_utils/cudautils.cuh"
+#include "gromacs/gpu_utils/device_stream.h"
 #include "gromacs/gpu_utils/devicebuffer.h"
 #include "gromacs/gpu_utils/gpueventsynchronizer.h"
 #include "gromacs/gpu_utils/typecasts_cuda_hip.h"
@@ -74,6 +75,25 @@ namespace gmx
 {
 namespace
 {
+
+//! Copies PME energy and the symmetric virial into the GaMD staging layout.
+__global__ void stageGamdReciprocalEnergyKernel(const float* gm_virialAndEnergy, float* gm_destination)
+{
+    if (blockIdx.x == 0 && threadIdx.x == 0)
+    {
+        gm_destination[0]                 = 0.5F * gm_virialAndEnergy[6];
+        gm_destination[1 + XX * DIM + XX] = 0.25F * gm_virialAndEnergy[0];
+        gm_destination[1 + YY * DIM + YY] = 0.25F * gm_virialAndEnergy[1];
+        gm_destination[1 + ZZ * DIM + ZZ] = 0.25F * gm_virialAndEnergy[2];
+        gm_destination[1 + XX * DIM + YY] = 0.25F * gm_virialAndEnergy[3];
+        gm_destination[1 + YY * DIM + XX] = 0.25F * gm_virialAndEnergy[3];
+        gm_destination[1 + XX * DIM + ZZ] = 0.25F * gm_virialAndEnergy[4];
+        gm_destination[1 + ZZ * DIM + XX] = 0.25F * gm_virialAndEnergy[4];
+        gm_destination[1 + YY * DIM + ZZ] = 0.25F * gm_virialAndEnergy[5];
+        gm_destination[1 + ZZ * DIM + YY] = 0.25F * gm_virialAndEnergy[5];
+    }
+}
+
 
 // 这些核在 update stream 上记录约束维里和动能历史，避免 GaMD 状态散落在 update 模块中。
 /*! \internal \brief Appends a constraint-virial sample using the device-side slot counter. */
@@ -498,6 +518,30 @@ __global__ void reduceGamdDihedralVirialKernel(const int     numAtoms,
 /*-------------------------------- End CUDA kernels-----------------------------*/
 
 } // namespace
+
+void launchGaMDPmeEnergyStaging(DeviceBuffer<float>   source,
+                                DeviceBuffer<float>   destination,
+                                const DeviceStream&   pmeStream,
+                                GpuEventSynchronizer* readyEvent)
+{
+    GMX_ASSERT(destination != nullptr && readyEvent != nullptr,
+               "GaMD reciprocal-energy staging requires output storage and an event");
+
+    KernelLaunchConfig config;
+    config.blockSize[0]     = 1;
+    config.blockSize[1]     = 1;
+    config.blockSize[2]     = 1;
+    config.gridSize[0]      = 1;
+    config.gridSize[1]      = 1;
+    config.gridSize[2]      = 1;
+    config.sharedMemorySize = 0;
+
+    auto       kernel     = stageGamdReciprocalEnergyKernel;
+    const auto kernelArgs = prepareGpuKernelArguments(kernel, config, &source, &destination);
+    launchGpuKernel(kernel, config, pmeStream, nullptr, "Stage GaMD reciprocal energy", kernelArgs);
+    readyEvent->markEvent(pmeStream);
+}
+
 
 void GaMDGpuExecutor::Impl::recordUpdateConstraintVirial(DeviceBuffer<float> lincsVirial,
                                                          const bool          haveLincs,
