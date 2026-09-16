@@ -39,6 +39,8 @@
  */
 #include "gmxpre.h"
 
+#include "config.h"
+
 #include <csignal>
 #include <cstdlib>
 
@@ -61,10 +63,12 @@
 #include "gromacs/applied_forces/gamd/gamdexecution.h"
 #include "gromacs/applied_forces/gamd/gamdmdmodule.h"
 #include "gromacs/applied_forces/gamd/gamdruntime.h"
+#include "gromacs/mdrunutility/mdmodulesnotifiers.h"
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/textreader.h"
 
+#include "testutils/loggertest.h"
 #include "testutils/setenv.h"
 #include "testutils/testasserts.h"
 #include "testutils/testfilemanager.h"
@@ -145,9 +149,9 @@ std::vector<double> readLastNumericColumns(const std::filesystem::path& path)
     return rows.back();
 }
 
-size_t countNumericRows(const std::filesystem::path& path)
+Index countNumericRows(const std::filesystem::path& path)
 {
-    return readNumericRows(path).size();
+    return ssize(readNumericRows(path));
 }
 
 class GaMDTest : public ::testing::Test
@@ -171,7 +175,65 @@ void writeGaMDProductionInput(const std::string& restartContents)
     restart << restartContents;
 }
 
-TEST(GaMDDiagnosticsDeathTest, RequestedOutputOpenErrorsAreReported)
+TEST(GaMDParameterTest, LegacyInputCommentsUseNativeTokenization)
+{
+    const std::vector<std::string> expected{ "ntcmd", "200" };
+    EXPECT_EQ(splitGaMDInputLine("ntcmd 200#comment"), expected);
+    EXPECT_EQ(splitGaMDInputLine("  ntcmd 200 ; comment\r\n"), expected);
+    EXPECT_TRUE(splitGaMDInputLine("; comment only").empty());
+    EXPECT_TRUE(splitGaMDInputLine("  # comment only").empty());
+}
+
+TEST(GaMDModuleOwnershipTest, LoggerComesFromSimulationSetup)
+{
+    LoggerTestHelper log;
+    log.expectEntryMatchingRegex(MDLogger::LogLevel::Info, "GaMD GPU energy shadow");
+    GaMDMDModule       module;
+    MDModulesNotifiers notifiers;
+    module.subscribeToSimulationSetupNotifications(&notifiers);
+    notifiers.simulationSetupNotifier_.notify(log.logger());
+    validateGaMDGpuShadowEnergy(module.diagnostics().logger(), 1, GaMDStepResult{}, GaMDStepResult{});
+}
+
+TEST_F(GaMDTest, NativeReaderPreservesAttachedRestartComments)
+{
+    TestFileManager fileManager;
+    const auto      directory =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    ScopedWorkingDirectory workingDirectory(directory);
+    std::string            restart = c_validGaMDRestart;
+    restart.replace(restart.find("version 3\n"),
+                    std::string("version 3\n").size(),
+                    "version 3#version comment\r\n");
+    restart.replace(restart.find("saved_step 10\n"),
+                    std::string("saved_step 10\n").size(),
+                    "saved_step 10;saved-step comment\n");
+    writeGaMDProductionInput(restart);
+    {
+        std::ofstream input("gamd.in", std::ios::app);
+        input << "debug 0#input comment\n";
+    }
+    const GaMDStepPlan& plan = gaMDModule_.prepareStep(0, 0);
+    EXPECT_EQ(plan.stage, GaMDStage::Production);
+    EXPECT_DOUBLE_EQ(plan.thresholdP, 10.0);
+}
+
+TEST_F(GaMDTest, RuntimeInputErrorsUseProjectExceptions)
+{
+    TestFileManager fileManager;
+    const auto      directory =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    ScopedWorkingDirectory workingDirectory(directory);
+    {
+        std::ofstream input("gamd.in");
+        input << "igamd invalid\n";
+    }
+    GaMDDiagnostics diagnostics;
+    GaMDRuntime     runtime(diagnostics);
+    EXPECT_THROW_GMX(runtime.prepareStep(0, 0, false), InvalidInputError);
+}
+
+TEST(GaMDDiagnosticsTest, RequestedOutputOpenErrorsAreReported)
 {
     TestFileManager fileManager;
     const auto      directory =
@@ -180,15 +242,15 @@ TEST(GaMDDiagnosticsDeathTest, RequestedOutputOpenErrorsAreReported)
     const std::array<const char*, 3> fileVariables = { "GMX_GAMD_DIH_RAW_DEBUG_FILE",
                                                        "GMX_GAMD_DIH_FORCE_DEBUG_FILE",
                                                        "GMX_GAMD_FORCE_DEBUG_FILE" };
-    for (std::size_t fileIndex = 0; fileIndex < fileVariables.size(); ++fileIndex)
+    for (Index fileIndex = 0; fileIndex < ssize(fileVariables); ++fileIndex)
     {
         gmxSetenv(fileVariables[fileIndex], "missing-directory/diagnostic.dat", 1);
-        GMX_EXPECT_DEATH_IF_SUPPORTED(GaMDDiagnostics(), "Cannot open GaMD diagnostic file");
+        EXPECT_THROW_GMX(GaMDDiagnostics(), FileIOError);
         gmxUnsetenv(fileVariables[fileIndex]);
     }
 }
 
-TEST(GaMDDiagnosticsDeathTest, RequestedOutputWriteErrorsAreReported)
+TEST(GaMDDiagnosticsTest, RequestedOutputWriteErrorsAreReported)
 {
 #if GMX_NATIVE_WINDOWS
     GTEST_SKIP() << "The /dev/full write-error check requires a POSIX device.";
@@ -200,10 +262,10 @@ TEST(GaMDDiagnosticsDeathTest, RequestedOutputWriteErrorsAreReported)
     const std::array<const char*, 3> fileVariables = { "GMX_GAMD_DIH_RAW_DEBUG_FILE",
                                                        "GMX_GAMD_DIH_FORCE_DEBUG_FILE",
                                                        "GMX_GAMD_FORCE_DEBUG_FILE" };
-    for (std::size_t fileIndex = 0; fileIndex < fileVariables.size(); ++fileIndex)
+    for (Index fileIndex = 0; fileIndex < ssize(fileVariables); ++fileIndex)
     {
         gmxSetenv(fileVariables[fileIndex], "/dev/full", 1);
-        GMX_EXPECT_DEATH_IF_SUPPORTED(GaMDDiagnostics(), "Failed to write GaMD diagnostic file");
+        EXPECT_THROW_GMX(GaMDDiagnostics(), FileIOError);
         gmxUnsetenv(fileVariables[fileIndex]);
     }
 #endif
@@ -261,7 +323,7 @@ TEST(GaMDDiagnosticsTest, DihedralSnapshotIsWeightedOrderedAndWrittenOnce)
     EXPECT_EQ(readNumericRows("raw-calls.dat").size(), 8U);
 }
 
-TEST(GaMDDiagnosticsDeathTest, MissingRequestedDihedralSnapshotIsRejected)
+TEST(GaMDDiagnosticsTest, MissingRequestedDihedralSnapshotIsRejected)
 {
     TestFileManager fileManager;
     const auto      directory =
@@ -271,8 +333,7 @@ TEST(GaMDDiagnosticsDeathTest, MissingRequestedDihedralSnapshotIsRejected)
     gmxSetenv("GMX_GAMD_DIH_FORCE_DEBUG_STEP", "7", 1);
     {
         GaMDDiagnostics diagnostics;
-        GMX_EXPECT_DEATH_IF_SUPPORTED(diagnostics.finishDihedralStep(7, true),
-                                      "No GaMD dihedral force snapshot");
+        EXPECT_THROW_GMX(diagnostics.finishDihedralStep(7, true), InternalError);
     }
     gmxUnsetenv("GMX_GAMD_DIH_FORCE_DEBUG_FILE");
     gmxUnsetenv("GMX_GAMD_DIH_FORCE_DEBUG_STEP");
@@ -330,13 +391,13 @@ TEST(GaMDDiagnosticsTest, FinalForceSnapshotKeepsValuesAndClampsCount)
     EXPECT_EQ(rows[1][4], 12);
 }
 
-TEST(GaMDDiagnosticsDeathTest, NonFiniteEnergyStateIsRejected)
+TEST(GaMDDiagnosticsTest, NonFiniteEnergyStateIsRejected)
 {
     const GaMDStepResult        reference;
     const std::array<double, 3> invalidValues = { std::numeric_limits<double>::quiet_NaN(),
                                                   std::numeric_limits<double>::infinity(),
                                                   -std::numeric_limits<double>::infinity() };
-    for (std::size_t valueIndex = 0; valueIndex < invalidValues.size(); ++valueIndex)
+    for (Index valueIndex = 0; valueIndex < ssize(invalidValues); ++valueIndex)
     {
         // 六种物理量分别破坏一次，主机和设备两侧都必须拒绝。
         std::array<GaMDStepResult, 6> invalidStates = {};
@@ -346,66 +407,65 @@ TEST(GaMDDiagnosticsDeathTest, NonFiniteEnergyStateIsRejected)
         invalidStates[3].scaleD                     = invalidValues[valueIndex];
         invalidStates[4].boostP                     = invalidValues[valueIndex];
         invalidStates[5].boostD                     = invalidValues[valueIndex];
-        for (std::size_t stateIndex = 0; stateIndex < invalidStates.size(); ++stateIndex)
+        for (Index stateIndex = 0; stateIndex < ssize(invalidStates); ++stateIndex)
         {
-            GMX_EXPECT_DEATH_IF_SUPPORTED(
-                    validateGaMDGpuShadowEnergy(1, reference, invalidStates[stateIndex]),
-                    "Non-finite");
-            GMX_EXPECT_DEATH_IF_SUPPORTED(
-                    validateGaMDGpuShadowEnergy(1, invalidStates[stateIndex], reference),
-                    "Non-finite");
+            EXPECT_THROW_GMX(
+                    validateGaMDGpuShadowEnergy(MDLogger{}, 1, reference, invalidStates[stateIndex]),
+                    SimulationInstabilityError);
+            EXPECT_THROW_GMX(validateGaMDGpuShadowEnergy(MDLogger{}, 1, invalidStates[stateIndex], reference),
+                             SimulationInstabilityError);
         }
     }
 }
 
-TEST(GaMDDiagnosticsDeathTest, NonFiniteVirialComponentsAreRejected)
+TEST(GaMDDiagnosticsTest, NonFiniteVirialComponentsAreRejected)
 {
     tensor                      reference     = {};
     std::array<real, DIM * DIM> candidate     = {};
     const std::array<real, 3>   invalidValues = { std::numeric_limits<real>::quiet_NaN(),
                                                   std::numeric_limits<real>::infinity(),
                                                   -std::numeric_limits<real>::infinity() };
-    for (std::size_t valueIndex = 0; valueIndex < invalidValues.size(); ++valueIndex)
+    for (Index valueIndex = 0; valueIndex < ssize(invalidValues); ++valueIndex)
     {
         for (int componentIndex = 0; componentIndex < DIM * DIM; ++componentIndex)
         {
             candidate[componentIndex] = invalidValues[valueIndex];
-            GMX_EXPECT_DEATH_IF_SUPPORTED(validateGaMDGpuShadowVirial(1, reference, candidate),
-                                          "Non-finite");
+            EXPECT_THROW_GMX(validateGaMDGpuShadowVirial(MDLogger{}, 1, reference, candidate),
+                             SimulationInstabilityError);
             candidate[componentIndex]                             = 0;
             reference[componentIndex / DIM][componentIndex % DIM] = invalidValues[valueIndex];
-            GMX_EXPECT_DEATH_IF_SUPPORTED(validateGaMDGpuShadowVirial(1, reference, candidate),
-                                          "Non-finite");
+            EXPECT_THROW_GMX(validateGaMDGpuShadowVirial(MDLogger{}, 1, reference, candidate),
+                             SimulationInstabilityError);
             reference[componentIndex / DIM][componentIndex % DIM] = 0;
         }
     }
 }
 
-TEST(GaMDDiagnosticsDeathTest, NonFiniteForcesAndExcessiveDifferencesAreRejected)
+TEST(GaMDDiagnosticsTest, NonFiniteForcesAndExcessiveDifferencesAreRejected)
 {
     const std::array<RVec, 1> referenceForces = { RVec(0, 0, 0) };
     std::array<RVec, 1>       candidateForces = { RVec(0, 0, 0) };
     candidateForces[0][ZZ]                    = std::numeric_limits<real>::quiet_NaN();
-    GMX_EXPECT_DEATH_IF_SUPPORTED(
-            validateGaMDGpuShadowForces("test", 1, referenceForces, candidateForces, 0.005, 0.0001),
-            "Non-finite");
-    GMX_EXPECT_DEATH_IF_SUPPORTED(
-            validateGaMDGpuShadowForces("test", 1, candidateForces, referenceForces, 0.005, 0.0001),
-            "Non-finite");
+    EXPECT_THROW_GMX(validateGaMDGpuShadowForces(
+                             MDLogger{}, "test", 1, referenceForces, candidateForces, 0.005, 0.0001),
+                     SimulationInstabilityError);
+    EXPECT_THROW_GMX(validateGaMDGpuShadowForces(
+                             MDLogger{}, "test", 1, candidateForces, referenceForces, 0.005, 0.0001),
+                     SimulationInstabilityError);
     candidateForces[0][ZZ] = 1;
-    GMX_EXPECT_DEATH_IF_SUPPORTED(
-            validateGaMDGpuShadowForces("test", 1, referenceForces, candidateForces, 0.005, 0.0001),
-            "exceed provisional");
+    EXPECT_THROW_GMX(validateGaMDGpuShadowForces(
+                             MDLogger{}, "test", 1, referenceForces, candidateForces, 0.005, 0.0001),
+                     SimulationInstabilityError);
 
     GaMDStepResult candidateEnergy;
     candidateEnergy.potentialEnergy = 1;
-    GMX_EXPECT_DEATH_IF_SUPPORTED(validateGaMDGpuShadowEnergy(1, GaMDStepResult{}, candidateEnergy),
-                                  "shadow mismatch");
+    EXPECT_THROW_GMX(validateGaMDGpuShadowEnergy(MDLogger{}, 1, GaMDStepResult{}, candidateEnergy),
+                     SimulationInstabilityError);
     tensor                      referenceVirial = {};
     std::array<real, DIM * DIM> candidateVirial = {};
     candidateVirial.back()                      = 1;
-    GMX_EXPECT_DEATH_IF_SUPPORTED(validateGaMDGpuShadowVirial(1, referenceVirial, candidateVirial),
-                                  "exceeds provisional");
+    EXPECT_THROW_GMX(validateGaMDGpuShadowVirial(MDLogger{}, 1, referenceVirial, candidateVirial),
+                     SimulationInstabilityError);
 }
 
 TEST(GaMDDiagnosticsTest, FiniteShadowsWithinExistingTolerancesAreAccepted)
@@ -416,14 +476,14 @@ TEST(GaMDDiagnosticsTest, FiniteShadowsWithinExistingTolerancesAreAccepted)
     candidateEnergy.scaleP += 0.00001;
     candidateEnergy.scaleD -= 0.00001;
     candidateEnergy.boostP = 0.05;
-    validateGaMDGpuShadowEnergy(1, GaMDStepResult{}, candidateEnergy);
+    validateGaMDGpuShadowEnergy(MDLogger{}, 1, GaMDStepResult{}, candidateEnergy);
     tensor                      referenceVirial = {};
     std::array<real, DIM * DIM> candidateVirial = {};
     candidateVirial.back()                      = 0.005_real;
-    validateGaMDGpuShadowVirial(1, referenceVirial, candidateVirial);
+    validateGaMDGpuShadowVirial(MDLogger{}, 1, referenceVirial, candidateVirial);
     const std::array<RVec, 1> referenceForces = { RVec(0, 0, 0) };
     const std::array<RVec, 1> candidateForces = { RVec(0.0001_real, 0, 0) };
-    validateGaMDGpuShadowForces("test", 1, referenceForces, candidateForces, 0.005, 0.0001);
+    validateGaMDGpuShadowForces(MDLogger{}, "test", 1, referenceForces, candidateForces, 0.005, 0.0001);
 }
 
 TEST(GaMDParameterTest, StageBoundariesAreCheckedBeforeAdding)
@@ -479,7 +539,7 @@ TEST_F(GaMDTest, RestartRejectsInvalidStageCounters)
         "params 1 1 1 1 0 9223372036854775806 0 2 1 50 25.104 25.104",
         "params 1 1 1 1 10 20 10 20 3 50 25.104 25.104"
     };
-    for (std::size_t caseIndex = 0; caseIndex < invalidParameters.size(); ++caseIndex)
+    for (Index caseIndex = 0; caseIndex < ssize(invalidParameters); ++caseIndex)
     {
         std::string restart        = c_validGaMDRestart;
         const auto  parameterStart = restart.find("params ");
@@ -519,7 +579,7 @@ TEST_F(GaMDTest, StageTransitionsPreserveNumericOutput)
     }
     // 固定旧协议的阶段数字，同时覆盖每个边界的前后两侧。
     const std::array<int, 10> expectedStages = { 1, 1, 1, 2, 2, 3, 3, 4, 4, 5 };
-    for (std::size_t stepIndex = 0; stepIndex < expectedStages.size(); ++stepIndex)
+    for (Index stepIndex = 0; stepIndex < ssize(expectedStages); ++stepIndex)
     {
         const GaMDStepPlan& plan = gaMDModule_.prepareStep(stepIndex, 0);
         EXPECT_EQ(static_cast<int>(plan.stage), expectedStages[stepIndex]);
@@ -527,36 +587,36 @@ TEST_F(GaMDTest, StageTransitionsPreserveNumericOutput)
     }
     const auto rows = readNumericRows("gamd-para.dat");
     ASSERT_EQ(rows.size(), 7U);
-    for (std::size_t rowIndex = 0; rowIndex < rows.size(); ++rowIndex)
+    for (Index rowIndex = 0; rowIndex < ssize(rows); ++rowIndex)
     {
         ASSERT_GE(rows[rowIndex].size(), 3U);
-        const auto stepIndex = static_cast<std::size_t>(rows[rowIndex][1]);
+        const auto stepIndex = static_cast<Index>(rows[rowIndex][1]);
         ASSERT_LT(stepIndex, expectedStages.size());
         EXPECT_EQ(rows[rowIndex][2], expectedStages[stepIndex]);
     }
 }
 
-TEST(GaMDDiagnosticsDeathTest, InvalidForceOverridesAreRejected)
+TEST(GaMDDiagnosticsTest, InvalidForceOverridesAreRejected)
 {
     const std::array<const char*, 5> invalidValues{ "abc", "0.8junk", "nan", "inf", "1e999" };
     const std::array<const char*, 4> variableNames{ "GMX_GAMD_FORCE_OVERRIDE_SCALEP",
                                                     "GMX_GAMD_FORCE_OVERRIDE_SCALED",
                                                     "GMX_GAMD_FORCE_OVERRIDE_BOOSTP",
                                                     "GMX_GAMD_FORCE_OVERRIDE_BOOSTD" };
-    for (size_t variableIndex = 0; variableIndex < variableNames.size(); variableIndex++)
+    for (Index variableIndex = 0; variableIndex < ssize(variableNames); variableIndex++)
     {
         gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP", "0.8", 1);
-        for (size_t valueIndex = 0; valueIndex < invalidValues.size(); valueIndex++)
+        for (Index valueIndex = 0; valueIndex < ssize(invalidValues); valueIndex++)
         {
             gmxSetenv(variableNames[variableIndex], invalidValues[valueIndex], 1);
-            GMX_EXPECT_DEATH_IF_SUPPORTED(GaMDDiagnostics().forceOverrides(), "diagnostic variable");
+            EXPECT_THROW_GMX(GaMDDiagnostics().forceOverrides(), InvalidInputError);
         }
         gmxUnsetenv(variableNames[variableIndex]);
     }
 #if !GMX_NATIVE_WINDOWS
     // Windows 的环境变量接口把空值当作未设置，Unix 则应拒绝空字符串。
     gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP", "", 1);
-    GMX_EXPECT_DEATH_IF_SUPPORTED(GaMDDiagnostics().forceOverrides(), "diagnostic variable");
+    EXPECT_THROW_GMX(GaMDDiagnostics().forceOverrides(), InvalidInputError);
 #endif
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP");
 }
@@ -740,8 +800,8 @@ TEST_F(GaMDTest, CheckpointReplayDoesNotDuplicateTextOutputForSavedStep)
     gaMDModule_.finalizeCurrentStep(4, 0, 0.0, c_dihedralEnergy);
     gaMDModule_.setCheckpointingThisStep(false);
 
-    const size_t paraRowsAfterCheckpoint     = countNumericRows("gamd-para.dat");
-    const size_t reweightRowsAfterCheckpoint = countNumericRows("gamd-reweight.dat");
+    const Index paraRowsAfterCheckpoint     = countNumericRows("gamd-para.dat");
+    const Index reweightRowsAfterCheckpoint = countNumericRows("gamd-reweight.dat");
     ASSERT_GT(paraRowsAfterCheckpoint, 0U);
     ASSERT_GT(reweightRowsAfterCheckpoint, 0U);
 
@@ -925,14 +985,14 @@ TEST_F(GaMDTest, GaMDCpuUpdateSelectsCpuReference)
 
 TEST_F(GaMDTest, CpuGaMDRejectsDomainDecompositionAndMts)
 {
-    GMX_EXPECT_DEATH_IF_SUPPORTED(
+    EXPECT_THROW_GMX(
             selectGaMDExecutionMode(
                     true, false, false, false, false, true, false, false, PressureCoupling::No, PressureCouplingType::Isotropic, 0),
-            "one PP rank without domain decomposition");
-    GMX_EXPECT_DEATH_IF_SUPPORTED(
+            InconsistentInputError);
+    EXPECT_THROW_GMX(
             selectGaMDExecutionMode(
                     true, false, false, false, false, false, false, true, PressureCoupling::No, PressureCouplingType::Isotropic, 0),
-            "does not support MTS");
+            InconsistentInputError);
 }
 
 TEST_F(GaMDTest, NonGaMDGpuUpdateRetainsNormalExecutionMode)
@@ -960,46 +1020,46 @@ TEST_F(GaMDTest, GaMDGpuExecutionModeSelectsResidentPathAutomatically)
 
 TEST_F(GaMDTest, GaMDGpuExecutionModeRejectsUnsupportedWorkloads)
 {
-    GMX_EXPECT_DEATH_IF_SUPPORTED(
+    EXPECT_THROW_GMX(
             selectGaMDExecutionMode(
                     true, false, true, true, true, false, false, false, PressureCoupling::No, PressureCouplingType::Isotropic, 0),
-            "requires -nb gpu");
-    GMX_EXPECT_DEATH_IF_SUPPORTED(
+            InconsistentInputError);
+    EXPECT_THROW_GMX(
             selectGaMDExecutionMode(
                     true, true, false, true, true, false, false, false, PressureCoupling::No, PressureCouplingType::Isotropic, 0),
-            "requires -pme gpu");
-    GMX_EXPECT_DEATH_IF_SUPPORTED(
+            InconsistentInputError);
+    EXPECT_THROW_GMX(
             selectGaMDExecutionMode(
                     true, true, true, false, true, false, false, false, PressureCoupling::No, PressureCouplingType::Isotropic, 0),
-            "requires -bonded gpu");
-    GMX_EXPECT_DEATH_IF_SUPPORTED(
+            InconsistentInputError);
+    EXPECT_THROW_GMX(
             selectGaMDExecutionMode(
                     true, true, true, true, true, true, false, false, PressureCoupling::No, PressureCouplingType::Isotropic, 0),
-            "without domain decomposition");
-    GMX_EXPECT_DEATH_IF_SUPPORTED(
+            InconsistentInputError);
+    EXPECT_THROW_GMX(
             selectGaMDExecutionMode(
                     true, true, true, true, true, false, false, true, PressureCoupling::No, PressureCouplingType::Isotropic, 0),
-            "does not support MTS");
-    GMX_EXPECT_DEATH_IF_SUPPORTED(selectGaMDExecutionMode(true,
-                                                          true,
-                                                          true,
-                                                          true,
-                                                          true,
-                                                          false,
-                                                          false,
-                                                          false,
-                                                          PressureCoupling::ParrinelloRahman,
-                                                          PressureCouplingType::Isotropic,
-                                                          0),
-                                  "supports only no pressure coupling or C-rescale");
-    GMX_EXPECT_DEATH_IF_SUPPORTED(
+            InconsistentInputError);
+    EXPECT_THROW_GMX(selectGaMDExecutionMode(true,
+                                             true,
+                                             true,
+                                             true,
+                                             true,
+                                             false,
+                                             false,
+                                             false,
+                                             PressureCoupling::ParrinelloRahman,
+                                             PressureCouplingType::Isotropic,
+                                             0),
+                     InconsistentInputError);
+    EXPECT_THROW_GMX(
             selectGaMDExecutionMode(
                     true, true, true, true, true, false, false, false, PressureCoupling::CRescale, PressureCouplingType::Anisotropic, 0),
-            "supports only isotropic or semiisotropic");
-    GMX_EXPECT_DEATH_IF_SUPPORTED(
+            InconsistentInputError);
+    EXPECT_THROW_GMX(
             selectGaMDExecutionMode(
                     true, true, true, true, true, false, false, false, PressureCoupling::No, PressureCouplingType::Isotropic, 10),
-            "requires nstfout=0");
+            InconsistentInputError);
 }
 
 TEST_F(GaMDTest, GaMDGpuExecutionModeAcceptsSupportedCRescaleTypes)
@@ -1014,7 +1074,7 @@ TEST_F(GaMDTest, GaMDGpuExecutionModeAcceptsSupportedCRescaleTypes)
 #else
 TEST_F(GaMDTest, GaMDGpuExecutionModeRejectsNonCudaBuild)
 {
-    GMX_EXPECT_DEATH_IF_SUPPORTED(selectSupportedGaMDExecutionMode(), "requires a CUDA build");
+    EXPECT_THROW_GMX(selectSupportedGaMDExecutionMode(), InconsistentInputError);
 }
 #endif
 
@@ -1077,8 +1137,8 @@ TEST_F(GaMDTest, IrestProductionCheckpointCanContinueWithoutDuplicateRows)
     gaMDModule_.finalizeCurrentStep(1, 0, 0.0, 0.0);
     gaMDModule_.setCheckpointingThisStep(false);
 
-    const size_t paraRowsAtCheckpoint     = countNumericRows("gamd-para.dat");
-    const size_t reweightRowsAtCheckpoint = countNumericRows("gamd-reweight.dat");
+    const Index paraRowsAtCheckpoint     = countNumericRows("gamd-para.dat");
+    const Index reweightRowsAtCheckpoint = countNumericRows("gamd-reweight.dat");
     ASSERT_EQ(paraRowsAtCheckpoint, 1U);
     ASSERT_EQ(reweightRowsAtCheckpoint, 1U);
 
@@ -1143,7 +1203,7 @@ TEST_F(GaMDTest, RestartRejectsMalformedRecordsBeforeRestoringState)
                                                "statP 10 0 5 2 0 2 10 1 0.1\n",
                                                "version 3 trailing\n" };
     const std::array<const char*, 4> errors{ "Duplicate", "Unknown", "Duplicate", "Duplicate" };
-    for (size_t suffixIndex = 0; suffixIndex < suffixes.size(); suffixIndex++)
+    for (Index suffixIndex = 0; suffixIndex < ssize(suffixes); suffixIndex++)
     {
         writeGaMDProductionInput(c_validGaMDRestart + suffixes[suffixIndex]);
         GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0), errors[suffixIndex]);

@@ -7,7 +7,7 @@ Scope and current status
 ------------------------
 
 This is a maintainability refactor of a downstream GROMACS 2025.4 extension,
-not an upstream merge approval. The baseline is ``5ff664c`` in the local
+not an upstream merge approval. The initial refactor used ``5ff664c`` in the local
 ``gromacs-2025.4-guanfang`` repository. The production input/restart contract
 and GPU schedule are intentionally preserved. Validation evidence belongs to
 ``.trellis/tasks/archive/2026-09/09-10-gamd-upstream-maintainability/validation.md`` in the
@@ -18,8 +18,8 @@ GROMACS main was inspected on 2026-09-10 at
 exposes ``initMdpTransform``, ``initMdpOptions``, and ``buildMdpOutput``. This
 inspection is not a build or test of the full extension against that commit.
 
-Local verification summary
---------------------------
+Initial refactor verification
+-----------------------------
 
 The refactor was checked on an RTX 4080 with CUDA 12.4, GCC 12.3, mixed
 precision, one rank, and 28 OpenMP threads. The CUDA build passed six regression
@@ -71,6 +71,47 @@ and the optional GPU executor. Keep that single ownership chain.
 is reused for live and deferred results; no second six-field output record or
 new strategy/factory hierarchy is needed.
 
+Resource ownership, errors and documentation
+---------------------------------------------
+
+``GaMDRuntime`` and ``GaMDDiagnostics`` explicitly disable copying and own their
+output streams through the existing ``FilePtr`` type. This also closes streams
+if construction or input preparation fails partway through. The three shared
+statistics functions use ``compat::not_null`` output pointers; their formulas
+and population-variance convention are unchanged.
+
+Legacy input and restart parsing use ``TextReader``, ``splitString``, and the
+native strict numeric converters. Attached ``#``/``;`` comments, 64-bit
+counters, restart versions 1--3, and NaN placeholder columns in parameter
+history remain supported. Reconciliation preserves row whitespace and checks
+write, flush, synchronization and close errors before replacing an output file.
+
+Simulation-setup notifications supply ``MDLogger`` to the diagnostics owner.
+Parameter summaries, execution messages and successful shadow comparisons use
+its information target; warnings use its warning target. Verification tools
+must inspect the configured simulation log, normally ``run.log`` with
+``-deffnm run``, for the successful comparison records.
+
+Internal parsing, I/O and numerical checks use the native input, file and
+simulation-instability exception types. The module's legacy MD entry points,
+the force-correction entry, diagnostic output callbacks and the GPU buffer
+binding entry contain exceptions with the existing fatal-error adapter. GPU
+buffer binding can be called after asynchronous interaction-list uploads, and
+raw bonded diagnostics can execute inside OpenMP; neither may unwind its caller.
+Destructors also contain close errors. Reinitialize an internal runtime after
+failed input preparation; retrying a partially prepared instance is unsupported.
+
+Doxygen files belong to the existing ``module_applied_forces`` group. Headers
+used across modules declare library visibility, while implementation details
+use the internal documentation section in both declarations and definitions.
+The source-convention validation record is
+``benchmarks/gamd-upstream-maintainability/gromacs-style-validation.md`` in the
+parent workspace. Its scoped documentation checks do not certify a full
+GROMACS documentation build or compatibility with current upstream main.
+
+Scheduling and integration contracts
+------------------------------------
+
 ``GaMDStage`` names the existing stage numbers. Input and restart candidates
 share ordered/window-aligned stage validation and an overflow check before
 forming ``ntcmd + nteb``. The six-float device bias state uses named indices;
@@ -78,7 +119,7 @@ its diagnostic host copy is returned as ``GaMDStepResult``. The GPU executor
 stores one resident-mode flag and derives buffer/history capabilities from it
 and the independent diagnostic switches.
 
-``GaMDGpuExecutor::c_historyCapacity`` is the single limit for device history
+``GaMDGpuExecutor::sc_historyCapacity`` is the single limit for device history
 allocation and host scheduling. The MD loop checks its existing
 ``deferredPressureBoxes`` count before selecting host staging or graph replay;
 a full batch is drained through ``takeHistory`` before appending another sample.

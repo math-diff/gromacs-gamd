@@ -31,6 +31,11 @@
  * To help us fund GROMACS development, we humbly ask that you cite
  * the research papers on the package. Check out https://www.gromacs.org.
  */
+/*! \internal \file
+ * \brief Instance-owned diagnostic output and CPU/GPU comparisons.
+ *
+ * \ingroup module_applied_forces
+ */
 #include "gmxpre.h"
 
 #include "gamddiagnostics.h"
@@ -44,60 +49,65 @@
 
 #include "gromacs/math/vec.h"
 #include "gromacs/utility/exceptions.h"
-#include "gromacs/utility/fatalerror.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/strconvert.h"
+#include "gromacs/utility/stringutil.h"
 
+//! \cond internal
 namespace gmx
 {
 namespace
 {
 
+/*! \internal \brief Flushes a diagnostic stream and reports any previous or current write failure. */
 void flushGaMDDiagnosticFile(FILE* output, const std::string& filename)
 {
     if (std::fflush(output) != 0 || std::ferror(output) != 0)
     {
-        gmx_fatal(FARGS, "Failed to write GaMD diagnostic file '%s': %s.", filename.c_str(), std::strerror(errno));
+        GMX_THROW(FileIOError(formatString(
+                "Failed to write GaMD diagnostic file '%s': %s.", filename.c_str(), std::strerror(errno))));
     }
 }
 
-FILE* openGaMDDiagnosticFile(const char* variableName, const char* header, std::string* filename)
+/*! \internal \brief Opens a requested diagnostic stream with ownership and a checked header. */
+FilePtr openGaMDDiagnosticFile(const char* variableName, const char* header, std::string* filename)
 {
     const char* configuredName = std::getenv(variableName);
     if (configuredName == nullptr)
     {
         return nullptr;
     }
-    *filename    = configuredName;
-    FILE* output = std::fopen(filename->c_str(), "w");
+    *filename = configuredName;
+    FilePtr output(std::fopen(filename->c_str(), "w"));
     if (output == nullptr)
     {
-        gmx_fatal(FARGS,
-                  "Cannot open GaMD diagnostic file '%s' requested by %s: %s.",
-                  filename->c_str(),
-                  variableName,
-                  std::strerror(errno));
+        GMX_THROW(FileIOError(
+                formatString("Cannot open GaMD diagnostic file '%s' requested by %s: %s.",
+                             filename->c_str(),
+                             variableName,
+                             std::strerror(errno))));
     }
     // 用户明确请求了文件，连表头都写不进去时就立即报告。
-    if (std::fprintf(output, "%s", header) < 0)
+    if (std::fprintf(output.get(), "%s", header) < 0)
     {
-        gmx_fatal(FARGS,
-                  "Failed to write GaMD diagnostic file '%s': %s.",
-                  filename->c_str(),
-                  std::strerror(errno));
+        GMX_THROW(FileIOError(formatString(
+                "Failed to write GaMD diagnostic file '%s': %s.", filename->c_str(), std::strerror(errno))));
     }
-    flushGaMDDiagnosticFile(output, *filename);
+    flushGaMDDiagnosticFile(output.get(), *filename);
     return output;
 }
 
+/*! \internal \brief Closes a released diagnostic handle and reports a close failure. */
 void closeGaMDDiagnosticFile(FILE* output, const std::string& filename)
 {
     if (output != nullptr && std::fclose(output) != 0)
     {
-        gmx_fatal(FARGS, "Failed to close GaMD diagnostic file '%s': %s.", filename.c_str(), std::strerror(errno));
+        GMX_THROW(FileIOError(formatString(
+                "Failed to close GaMD diagnostic file '%s': %s.", filename.c_str(), std::strerror(errno))));
     }
 }
 
+/*! \internal \brief Writes a weighted force snapshot in the requested atom order. */
 void writeGaMDForceSnapshot(FILE*                output,
                             const std::string&   filename,
                             int64_t              step,
@@ -135,7 +145,8 @@ void writeGaMDForceSnapshot(FILE*                output,
                 output, "# dump step %lld nAtoms %d begin %d end %d\n", static_cast<long long>(step), numAtoms, begin, end)
         < 0)
     {
-        gmx_fatal(FARGS, "Failed to write GaMD diagnostic file '%s': %s.", filename.c_str(), std::strerror(errno));
+        GMX_THROW(FileIOError(formatString(
+                "Failed to write GaMD diagnostic file '%s': %s.", filename.c_str(), std::strerror(errno))));
     }
     for (int atomIndex = begin; atomIndex < end; ++atomIndex)
     {
@@ -154,25 +165,29 @@ void writeGaMDForceSnapshot(FILE*                output,
                     output, "%lld %d %.9e %.9e %.9e %.9e\n", static_cast<long long>(step), atomIndex, forceX, forceY, forceZ, forceNorm)
             < 0)
         {
-            gmx_fatal(FARGS,
-                      "Failed to write GaMD diagnostic file '%s': %s.",
-                      filename.c_str(),
-                      std::strerror(errno));
+            GMX_THROW(FileIOError(formatString("Failed to write GaMD diagnostic file '%s': %s.",
+                                               filename.c_str(),
+                                               std::strerror(errno))));
         }
     }
     flushGaMDDiagnosticFile(output, filename);
 }
 
+/*! \internal \brief Finite error summary for a CPU/GPU force comparison. */
 struct GaMDForceComparison
 {
-    double     maxAbsoluteError = 0.0;
-    double     rmsError         = 0.0;
-    gmx::Index worstAtom        = 0;
-    int        worstComponent   = 0;
+    //! Largest absolute component error.
+    double maxAbsoluteError = 0.0;
+    //! Root-mean-square error over all force components.
+    double rmsError = 0.0;
+    //! Atom index of the largest component error.
+    gmx::Index worstAtom = 0;
+    //! Cartesian component of the largest error.
+    int worstComponent = 0;
 };
 
-static GaMDForceComparison compareGaMDForceBuffers(ArrayRef<const RVec> reference,
-                                                   ArrayRef<const RVec> candidate)
+/*! \internal \brief Calculates finite maximum/RMS errors and the worst force component. */
+GaMDForceComparison compareGaMDForceBuffers(ArrayRef<const RVec> reference, ArrayRef<const RVec> candidate)
 {
     GMX_RELEASE_ASSERT(reference.size() == candidate.size() && !reference.empty(),
                        "GaMD GPU shadow-force comparison requires equally sized non-empty buffers");
@@ -189,12 +204,12 @@ static GaMDForceComparison compareGaMDForceBuffers(ArrayRef<const RVec> referenc
             // 不能依赖最大值聚合发现 NaN；它可能让后面的大小比较全部失效。
             if (!std::isfinite(referenceValue) || !std::isfinite(candidateValue) || !std::isfinite(error))
             {
-                gmx_fatal(FARGS,
-                          "Non-finite GaMD shadow force at atom %td component %d: cpu=%g gpu=%g.",
-                          atomIndex,
-                          componentIndex,
-                          referenceValue,
-                          candidateValue);
+                GMX_THROW(SimulationInstabilityError(formatString(
+                        "Non-finite GaMD shadow force at atom %td component %d: cpu=%g gpu=%g.",
+                        atomIndex,
+                        componentIndex,
+                        referenceValue,
+                        candidateValue)));
             }
             const double absoluteError = std::abs(error);
             sumSquaredError += error * error;
@@ -206,13 +221,16 @@ static GaMDForceComparison compareGaMDForceBuffers(ArrayRef<const RVec> referenc
             }
         }
     }
-    comparison.rmsError = std::sqrt(sumSquaredError / (DIM * reference.size()));
+    comparison.rmsError = std::sqrt(sumSquaredError / (DIM * reference.ssize()));
     return comparison;
 }
 
 } // namespace
 
-void validateGaMDGpuShadowEnergy(int64_t step, const GaMDStepResult& reference, const GaMDStepResult& candidate)
+void validateGaMDGpuShadowEnergy(const MDLogger&       logger,
+                                 int64_t               step,
+                                 const GaMDStepResult& reference,
+                                 const GaMDStepResult& candidate)
 {
     const std::array<double, 5> referenceValues = { reference.potentialEnergy,
                                                     reference.dihedralEnergy,
@@ -228,49 +246,54 @@ void validateGaMDGpuShadowEnergy(int64_t step, const GaMDStepResult& reference, 
     constexpr std::array<double, 5> tolerances  = { 0.25, 0.001, 2e-5, 2e-5, 0.1 };
     std::array<double, 5>           differences = {};
     bool                            mismatch    = false;
-    for (std::size_t quantityIndex = 0; quantityIndex < differences.size(); ++quantityIndex)
+    for (Index quantityIndex = 0; quantityIndex < ssize(differences); ++quantityIndex)
     {
         differences[quantityIndex] = candidateValues[quantityIndex] - referenceValues[quantityIndex];
         if (!std::isfinite(referenceValues[quantityIndex]) || !std::isfinite(candidateValues[quantityIndex])
             || !std::isfinite(differences[quantityIndex]))
         {
-            gmx_fatal(FARGS,
-                      "Non-finite GaMD GPU energy/state shadow at step %lld, quantity %zu: "
-                      "cpu=%g gpu=%g.",
-                      static_cast<long long>(step),
-                      quantityIndex,
-                      referenceValues[quantityIndex],
-                      candidateValues[quantityIndex]);
+            GMX_THROW(SimulationInstabilityError(formatString(
+                    "Non-finite GaMD GPU energy/state shadow at step %lld, quantity %td: "
+                    "cpu=%g gpu=%g.",
+                    static_cast<long long>(step),
+                    quantityIndex,
+                    referenceValues[quantityIndex],
+                    candidateValues[quantityIndex])));
         }
         if (std::abs(differences[quantityIndex]) > tolerances[quantityIndex])
         {
             mismatch = true;
         }
     }
-    std::fprintf(stderr,
-                 "[GaMD GPU energy shadow] step=%lld total_diff=%.9g dihedral_diff=%.9g "
-                 "scaleP_diff=%.9g scaleD_diff=%.9g total_boost_diff=%.9g\n",
-                 static_cast<long long>(step),
-                 differences[0],
-                 differences[1],
-                 differences[2],
-                 differences[3],
-                 differences[4]);
+    GMX_LOG(logger.info)
+            .asParagraph()
+            .appendTextFormatted(
+                    "[GaMD GPU energy shadow] step=%lld total_diff=%.9g dihedral_diff=%.9g "
+                    "scaleP_diff=%.9g scaleD_diff=%.9g total_boost_diff=%.9g\n",
+                    static_cast<long long>(step),
+                    differences[0],
+                    differences[1],
+                    differences[2],
+                    differences[3],
+                    differences[4]);
     if (mismatch)
     {
-        gmx_fatal(FARGS,
-                  "GaMD GPU energy/state shadow mismatch at step %lld: total %.9g, "
-                  "dihedral %.9g, scaleP %.9g, scaleD %.9g, total boost %.9g.",
-                  static_cast<long long>(step),
-                  differences[0],
-                  differences[1],
-                  differences[2],
-                  differences[3],
-                  differences[4]);
+        GMX_THROW(SimulationInstabilityError(
+                formatString("GaMD GPU energy/state shadow mismatch at step %lld: total %.9g, "
+                             "dihedral %.9g, scaleP %.9g, scaleD %.9g, total boost %.9g.",
+                             static_cast<long long>(step),
+                             differences[0],
+                             differences[1],
+                             differences[2],
+                             differences[3],
+                             differences[4])));
     }
 }
 
-void validateGaMDGpuShadowVirial(int64_t step, const tensor reference, const std::array<real, DIM * DIM>& candidate)
+void validateGaMDGpuShadowVirial(const MDLogger&                    logger,
+                                 int64_t                            step,
+                                 const tensor                       reference,
+                                 const std::array<real, DIM * DIM>& candidate)
 {
     double maxAbsoluteError = 0.0;
     for (int rowIndex = 0; rowIndex < DIM; ++rowIndex)
@@ -284,32 +307,34 @@ void validateGaMDGpuShadowVirial(int64_t step, const tensor reference, const std
             if (!std::isfinite(referenceValue) || !std::isfinite(candidateValue)
                 || !std::isfinite(difference))
             {
-                gmx_fatal(FARGS,
-                          "Non-finite GaMD GPU virial shadow at step %lld, component %d,%d: "
-                          "cpu=%g gpu=%g.",
-                          static_cast<long long>(step),
-                          rowIndex,
-                          columnIndex,
-                          referenceValue,
-                          candidateValue);
+                GMX_THROW(SimulationInstabilityError(formatString(
+                        "Non-finite GaMD GPU virial shadow at step %lld, component %d,%d: "
+                        "cpu=%g gpu=%g.",
+                        static_cast<long long>(step),
+                        rowIndex,
+                        columnIndex,
+                        referenceValue,
+                        candidateValue)));
             }
             maxAbsoluteError = std::max(maxAbsoluteError, std::abs(difference));
         }
     }
-    std::fprintf(stderr,
-                 "[GaMD GPU shadow] live-dihedral-virial step=%lld max_abs=%.9g\n",
-                 static_cast<long long>(step),
-                 maxAbsoluteError);
+    GMX_LOG(logger.info)
+            .asParagraph()
+            .appendTextFormatted("[GaMD GPU shadow] live-dihedral-virial step=%lld max_abs=%.9g\n",
+                                 static_cast<long long>(step),
+                                 maxAbsoluteError);
     if (maxAbsoluteError > 0.01)
     {
-        gmx_fatal(FARGS,
-                  "GaMD GPU dihedral virial exceeds provisional mixed-precision "
-                  "tolerance (max %.9g > 0.01).",
-                  maxAbsoluteError);
+        GMX_THROW(SimulationInstabilityError(
+                formatString("GaMD GPU dihedral virial exceeds provisional mixed-precision "
+                             "tolerance (max %.9g > 0.01).",
+                             maxAbsoluteError)));
     }
 }
 
-void validateGaMDGpuShadowForces(const char*          label,
+void validateGaMDGpuShadowForces(const MDLogger&      logger,
+                                 const char*          label,
                                  int64_t              step,
                                  ArrayRef<const RVec> reference,
                                  ArrayRef<const RVec> candidate,
@@ -317,33 +342,39 @@ void validateGaMDGpuShadowForces(const char*          label,
                                  double               rmsTolerance)
 {
     const GaMDForceComparison comparison = compareGaMDForceBuffers(reference, candidate);
-    std::fprintf(stderr,
-                 "[GaMD GPU shadow] %s step=%lld max_abs=%.9g rms=%.9g "
-                 "worst_atom=%td component=%d cpu=%.9g gpu=%.9g\n",
-                 label,
-                 static_cast<long long>(step),
-                 comparison.maxAbsoluteError,
-                 comparison.rmsError,
-                 comparison.worstAtom,
-                 comparison.worstComponent,
-                 static_cast<double>(reference[comparison.worstAtom][comparison.worstComponent]),
-                 static_cast<double>(candidate[comparison.worstAtom][comparison.worstComponent]));
+    GMX_LOG(logger.info)
+            .asParagraph()
+            .appendTextFormatted(
+                    "[GaMD GPU shadow] %s step=%lld max_abs=%.9g rms=%.9g "
+                    "worst_atom=%td component=%d cpu=%.9g gpu=%.9g\n",
+                    label,
+                    static_cast<long long>(step),
+                    comparison.maxAbsoluteError,
+                    comparison.rmsError,
+                    comparison.worstAtom,
+                    comparison.worstComponent,
+                    static_cast<double>(reference[comparison.worstAtom][comparison.worstComponent]),
+                    static_cast<double>(candidate[comparison.worstAtom][comparison.worstComponent]));
 
     if (!std::isfinite(comparison.maxAbsoluteError) || !std::isfinite(comparison.rmsError)
         || comparison.maxAbsoluteError > maxAbsoluteTolerance || comparison.rmsError > rmsTolerance)
     {
-        gmx_fatal(FARGS,
-                  "GaMD GPU %s shadow forces exceed provisional mixed-precision tolerances "
-                  "(max %.9g > %.9g or RMS %.9g > %.9g).",
-                  label,
-                  comparison.maxAbsoluteError,
-                  maxAbsoluteTolerance,
-                  comparison.rmsError,
-                  rmsTolerance);
+        GMX_THROW(SimulationInstabilityError(formatString(
+                "GaMD GPU %s shadow forces exceed provisional mixed-precision tolerances "
+                "(max %.9g > %.9g or RMS %.9g > %.9g).",
+                label,
+                comparison.maxAbsoluteError,
+                maxAbsoluteTolerance,
+                comparison.rmsError,
+                rmsTolerance)));
     }
 }
 
-static double readGaMDDiagnosticReal(const char* variableName, double defaultValue)
+namespace
+{
+
+/*! \internal \brief Reads a finite diagnostic number using the native strict converter. */
+double readGaMDDiagnosticReal(const char* variableName, double defaultValue)
 {
     const char* configuredValue = std::getenv(variableName);
     if (configuredValue == nullptr)
@@ -364,13 +395,14 @@ static double readGaMDDiagnosticReal(const char* variableName, double defaultVal
     }
     if (!valid)
     {
-        gmx_fatal(FARGS,
-                  "GaMD diagnostic variable %s must be a finite number without trailing text.",
-                  variableName);
+        GMX_THROW(InvalidInputError(formatString(
+                "GaMD diagnostic variable %s must be a finite number without trailing text.", variableName)));
     }
     return value;
 }
 
+
+} // namespace
 
 GaMDDiagnostics::GaMDDiagnostics()
 {
@@ -414,9 +446,19 @@ GaMDDiagnostics::GaMDDiagnostics()
 
 GaMDDiagnostics::~GaMDDiagnostics()
 {
-    closeGaMDDiagnosticFile(rawDihedralFile_, rawDihedralFilename_);
-    closeGaMDDiagnosticFile(dihedralForceFile_, dihedralForceFilename_);
-    closeGaMDDiagnosticFile(finalForceFile_, finalForceFilename_);
+    // 析构函数不能传播异常；关闭失败仍通过引擎的统一错误出口报告。
+    try
+    {
+        closeGaMDDiagnosticFile(rawDihedralFile_.release(), rawDihedralFilename_);
+        closeGaMDDiagnosticFile(dihedralForceFile_.release(), dihedralForceFilename_);
+        closeGaMDDiagnosticFile(finalForceFile_.release(), finalForceFilename_);
+    }
+    GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
+}
+
+void GaMDDiagnostics::setLogger(const MDLogger& logger)
+{
+    logger_ = logger;
 }
 
 GaMDHostWorkspace& GaMDDiagnostics::hostWorkspace()
@@ -466,7 +508,7 @@ void GaMDDiagnostics::dumpDihedralForces(const int64_t        step,
         return;
     }
     // 使用已经完成的力缓冲，不再按 bonded 内核的调用次数累加。
-    writeGaMDForceSnapshot(dihedralForceFile_,
+    writeGaMDForceSnapshot(dihedralForceFile_.get(),
                            dihedralForceFilename_,
                            step,
                            rawForces,
@@ -483,7 +525,7 @@ void GaMDDiagnostics::addRawDihedralForce(const int atomIndex, const rvec force)
     {
         return;
     }
-    if (std::fprintf(rawDihedralFile_,
+    if (std::fprintf(rawDihedralFile_.get(),
                      "%lld %d %.9e %.9e %.9e\n",
                      static_cast<long long>(rawDihedralCurrentStep_),
                      atomIndex,
@@ -492,10 +534,9 @@ void GaMDDiagnostics::addRawDihedralForce(const int atomIndex, const rvec force)
                      static_cast<double>(force[ZZ]))
         < 0)
     {
-        gmx_fatal(FARGS,
-                  "Failed to write GaMD diagnostic file '%s': %s.",
-                  rawDihedralFilename_.c_str(),
-                  std::strerror(errno));
+        GMX_THROW(FileIOError(formatString("Failed to write GaMD diagnostic file '%s': %s.",
+                                           rawDihedralFilename_.c_str(),
+                                           std::strerror(errno))));
     }
 }
 
@@ -518,15 +559,15 @@ void GaMDDiagnostics::finishDihedralStep(const int64_t step, const bool isMainRa
 {
     if (rawDihedralFile_ != nullptr)
     {
-        flushGaMDDiagnosticFile(rawDihedralFile_, rawDihedralFilename_);
+        flushGaMDDiagnosticFile(rawDihedralFile_.get(), rawDihedralFilename_);
     }
     // 到达了请求的步号却没有样本时，不能把空文件当成有效诊断结果。
     if (isMainRank && dihedralForceOutputRequested(step))
     {
-        gmx_fatal(FARGS,
-                  "No GaMD dihedral force snapshot was produced at step %lld for '%s'.",
-                  static_cast<long long>(step),
-                  dihedralForceFilename_.c_str());
+        GMX_THROW(InternalError(
+                formatString("No GaMD dihedral force snapshot was produced at step %lld for '%s'.",
+                             static_cast<long long>(step),
+                             dihedralForceFilename_.c_str())));
     }
 }
 
@@ -537,7 +578,7 @@ void GaMDDiagnostics::dumpFinalForces(const int64_t step, const ArrayRef<const R
         return;
     }
     writeGaMDForceSnapshot(
-            finalForceFile_, finalForceFilename_, step, forces, finalForceBegin_, finalForceCount_, 1.0, {});
+            finalForceFile_.get(), finalForceFilename_, step, forces, finalForceBegin_, finalForceCount_, 1.0, {});
 }
 
 bool GaMDDiagnostics::shouldPrintNstcalcenergyMessage()
@@ -571,3 +612,4 @@ bool GaMDDiagnostics::shouldPrintGpuWorkloadDiagnostics()
 }
 
 } // namespace gmx
+//! \endcond

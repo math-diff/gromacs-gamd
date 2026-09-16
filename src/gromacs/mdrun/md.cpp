@@ -171,6 +171,7 @@
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/enumerationhelpers.h"
+#include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/fatalerror.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/logger.h"
@@ -1143,18 +1144,23 @@ void gmx::LegacySimulator::do_md()
                 {
                     if (ir->nstcalcenergy > 1)
                     {
-                        fprintf(stderr,
-                                "\n[GaMD WARNING] nstcalcenergy = %d > 1.\n"
-                                "Current-step GaMD requires raw energies every step.\n"
-                                "Set nstcalcenergy = 1 for a supported production path.\n\n",
-                                ir->nstcalcenergy);
+                        GMX_LOG(mdLog_.warning)
+                                .asParagraph()
+                                .appendTextFormatted(
+                                        "\n[GaMD WARNING] nstcalcenergy = %d > 1.\n"
+                                        "Current-step GaMD requires raw energies every step.\n"
+                                        "Set nstcalcenergy = 1 for a supported production "
+                                        "path.\n\n",
+                                        ir->nstcalcenergy);
                     }
                     else
                     {
-                        fprintf(stderr,
-                                "\n[GaMD INFO] nstcalcenergy = %d.\n"
-                                "GaMD is using current-step energies.\n\n",
-                                ir->nstcalcenergy);
+                        GMX_LOG(mdLog_.info)
+                                .asParagraph()
+                                .appendTextFormatted(
+                                        "\n[GaMD INFO] nstcalcenergy = %d.\n"
+                                        "GaMD is using current-step energies.\n\n",
+                                        ir->nstcalcenergy);
                     }
                 }
             }
@@ -1240,19 +1246,27 @@ void gmx::LegacySimulator::do_md()
                                              || gaMDModule_->gpuExecutor()->dihedralShadowEnabled();
             // 此列表在普通步和图重放时都会逐步增长，无需回传 GPU 计数来判断容量。
             const bool historyBufferIsFull =
-                    deferredPressureBoxes.size() >= GaMDGpuExecutor::c_historyCapacity;
+                    deferredPressureBoxes.size() >= GaMDGpuExecutor::sc_historyCapacity;
             const bool needHostEnergy = needEnergyAndVirial || diagnosticHostState || historyBufferIsFull
                                         || gaMDModule_->requiresHostEnergyThisStep(step);
             runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost = needHostEnergy;
 
             if (cr_->nodeid == 0 && gaMDModule_->diagnostics().shouldPrintResidentEnergyMessage())
             {
-                std::fprintf(
-                        stderr,
-                        "[GaMD GPU INFO] Device-resident production energy enabled; host staging "
-                        "is retained for %slog, checkpoint, adaptive-stage, diagnostic, and "
-                        "full-history steps.\n",
-                        useBufferedOutput ? "standard energy/" : "GaMD output, ");
+                const char* hostStagingOutputs = "GaMD output, ";
+                if (useBufferedOutput)
+                {
+                    hostStagingOutputs = "standard energy/";
+                }
+                GMX_LOG(mdLog_.info)
+                        .asParagraph()
+                        .appendTextFormatted(
+                                "[GaMD GPU INFO] Device-resident production energy enabled; host "
+                                "staging "
+                                "is retained for %slog, checkpoint, adaptive-stage, diagnostic, "
+                                "and "
+                                "full-history steps.\n",
+                                hostStagingOutputs);
             }
         }
 
@@ -1405,17 +1419,22 @@ void gmx::LegacySimulator::do_md()
                          fr_->longRangeNonbondeds.get(),
                          ddBalanceRegionHandler);
             }
-            // 加权二面角快照已在求力流程写出，这里刷出原始调用追踪并核对快照。
-            if (useCurrentStepGaMD)
+            // 文件与诊断错误在 legacy MD 入口统一收口。
+            try
             {
-                gaMDModule_->diagnostics().finishDihedralStep(step, MAIN(cr_));
-            }
+                // 加权二面角快照已在求力流程写出，这里刷出原始调用追踪并核对快照。
+                if (useCurrentStepGaMD)
+                {
+                    gaMDModule_->diagnostics().finishDihedralStep(step, MAIN(cr_));
+                }
 
-            // 最终总力诊断也由模块实例写出，避免跨模拟共享文件句柄和步号。
-            if (!useResidentEnergy)
-            {
-                gaMDModule_->diagnostics().dumpFinalForces(step, f.view().force(), MAIN(cr_));
+                // 最终总力诊断也由模块实例写出，避免跨模拟共享文件句柄和步号。
+                if (!useResidentEnergy)
+                {
+                    gaMDModule_->diagnostics().dumpFinalForces(step, f.view().force(), MAIN(cr_));
+                }
             }
+            GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
             // VV integrators do not need the following velocity half step
             // if it is the first step after starting from a checkpoint.
             // That is, the half step is needed on all other steps, and

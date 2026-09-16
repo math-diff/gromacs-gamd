@@ -31,6 +31,11 @@
  * To help us fund GROMACS development, we humbly ask that you cite
  * the research papers on the package. Check out https://www.gromacs.org.
  */
+/*! \internal \file
+ * \brief Declares CUDA launch support for the device bias state.
+ *
+ * \ingroup module_applied_forces
+ */
 #ifndef GMX_APPLIED_FORCES_GAMD_GAMD_SCALE_GPU_H
 #define GMX_APPLIED_FORCES_GAMD_GAMD_SCALE_GPU_H
 
@@ -39,6 +44,10 @@
 
 namespace gmx
 {
+
+//! \cond internal
+//! \addtogroup module_applied_forces
+//! \{
 
 struct GaMDBiasParameters;
 struct GaMDForceOverrides;
@@ -52,6 +61,9 @@ void launchGamdProductionScaleKernel(DeviceBuffer<float>       gamdState,
                                      const GaMDBiasParameters& parameters,
                                      const GaMDForceOverrides& forceOverrides,
                                      const DeviceStream&       deviceStream);
+
+//! \}
+//! \endcond
 
 } // namespace gmx
 

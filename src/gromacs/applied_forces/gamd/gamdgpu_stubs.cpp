@@ -31,14 +31,20 @@
  * To help us fund GROMACS development, we humbly ask that you cite
  * the research papers on the package. Check out https://www.gromacs.org.
  */
+/*! \internal \file
+ * \brief Provides the non-CUDA implementation of the GaMD device interface.
+ *
+ * \ingroup module_applied_forces
+ */
 
 #include "gmxpre.h"
 
 #include "gromacs/utility/arrayref.h"
-#include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/exceptions.h"
 
 #include "gamdgpu.h"
 
+//! \cond internal
 namespace gmx
 {
 
@@ -50,7 +56,7 @@ GaMDGpuExecutor::GaMDGpuExecutor(bool, const DeviceContext&, const DeviceStream&
     impl_(nullptr)
 {
     // 非 CUDA 构建保留完整接口，但绝不能进入 CUDA 专用执行路径。
-    gmx_fatal(FARGS, "The GaMD GPU executor currently requires a CUDA build.");
+    GMX_THROW(NotImplementedError("The GaMD GPU executor currently requires a CUDA build."));
 }
 
 GaMDGpuExecutor::~GaMDGpuExecutor() = default;
@@ -165,3 +171,4 @@ GpuEventSynchronizer* GaMDGpuExecutor::forcesReadyEvent()
 }
 
 } // namespace gmx
+//! \endcond

@@ -31,8 +31,11 @@
  * To help us fund GROMACS development, we humbly ask that you cite
  * the research papers on the package. Check out https://www.gromacs.org.
  */
-/*! \internal \file
- * \brief Declares instance-owned GaMD diagnostic state and host scratch buffers.
+/*! \libinternal \file
+ * \brief Declares GaMD diagnostics, logging and reusable host buffers.
+ *
+ * \inlibraryapi
+ * \ingroup module_applied_forces
  */
 #ifndef GMX_APPLIED_FORCES_GAMD_GAMDDIAGNOSTICS_H
 #define GMX_APPLIED_FORCES_GAMD_GAMDDIAGNOSTICS_H
@@ -46,63 +49,103 @@
 
 #include "gromacs/math/vectypes.h"
 #include "gromacs/utility/arrayref.h"
+#include "gromacs/utility/fileptr.h"
+#include "gromacs/utility/logger.h"
 
 #include "gamdtypes.h"
 
 namespace gmx
 {
 
+//! \cond libapi
+//! \addtogroup module_applied_forces
+//! \{
+
 //! 对照当前步的主机和设备结果，在比较误差前拒绝非有限数值。
-void validateGaMDGpuShadowEnergy(int64_t step, const GaMDStepResult& reference, const GaMDStepResult& candidate);
-void validateGaMDGpuShadowVirial(int64_t                            step,
+void validateGaMDGpuShadowEnergy(const MDLogger&       logger,
+                                 int64_t               step,
+                                 const GaMDStepResult& reference,
+                                 const GaMDStepResult& candidate);
+//! Compares finite CPU/GPU virial tensors and logs the maximum error.
+void validateGaMDGpuShadowVirial(const MDLogger&                    logger,
+                                 int64_t                            step,
                                  const tensor                       reference,
                                  const std::array<real, DIM * DIM>& candidate);
 
 //! Compare shadow forces and reject non-finite or out-of-tolerance results.
-void validateGaMDGpuShadowForces(const char*          label,
+void validateGaMDGpuShadowForces(const MDLogger&      logger,
+                                 const char*          label,
                                  int64_t              step,
                                  ArrayRef<const RVec> reference,
                                  ArrayRef<const RVec> candidate,
                                  double               maxAbsoluteTolerance,
                                  double               rmsTolerance);
 
-/*! \internal
+/*! \libinternal
  * \brief Reusable host buffers whose lifetime is tied to one GaMD simulation.
  */
 struct GaMDHostWorkspace
 {
+    //! CPU dihedral reference for live GPU validation.
     std::vector<RVec> gpuModeDihedralForces;
+    //! Periodic shift-force reference for the dihedral virial.
     std::vector<RVec> gpuModeDihedralShiftForces;
+    //! Downloaded device dihedral forces for validation or snapshots.
     std::vector<RVec> gpuShadowDihedralForces;
+    //! CPU combination of raw and dihedral forces for comparison.
     std::vector<RVec> referenceCorrectedForces;
+    //! Downloaded corrected device forces.
     std::vector<RVec> liveGpuCorrectedForces;
+    //! Device-reduced forces captured before live correction.
     std::vector<RVec> rawReducedForcesForShadow;
 
+    //! Raw CPU forces supplied to the GPU shadow correction.
     std::vector<RVec> rawForcesForCorrectionShadow;
+    //! GPU shadow result compared with corrected CPU forces.
     std::vector<RVec> correctedForcesForShadow;
-    bool              correctionShadowCompared = false;
+    //! Whether the one-time CPU-path force comparison has run.
+    bool correctionShadowCompared = false;
 
+    //! Reusable raw dihedral buffer for CPU force correction.
     std::vector<RVec> cpuDihedralForces;
+    //! Reusable shift forces for CPU dihedral virial correction.
     std::vector<RVec> cpuDihedralShiftForces;
+    //! Device dihedral reference used by the CPU execution path.
     std::vector<RVec> gpuDihedralForcesForShadow;
-    bool              dihedralShadowCompared = false;
+    //! Whether the one-time CPU-path dihedral comparison has run.
+    bool dihedralShadowCompared = false;
 };
 
-/*! \internal
+/*! \libinternal
  * \brief Owns optional GaMD diagnostics for one simulation instance.
  */
 class GaMDDiagnostics final
 {
 public:
+    //! Opens configured diagnostic streams; throws on invalid settings or I/O.
     GaMDDiagnostics();
+    //! Closes owned diagnostic streams and reports failures without propagating exceptions.
     ~GaMDDiagnostics();
 
+    //! 文件句柄由当前实例独占，复制会让两个实例关闭同一文件。
+    GaMDDiagnostics(const GaMDDiagnostics&) = delete;
+    //! Disables assignment of diagnostic files and per-simulation state.
+    GaMDDiagnostics& operator=(const GaMDDiagnostics&) = delete;
+
+    //! 保存引擎提供的日志目标；默认日志对象不输出消息，便于独立测试。
+    void setLogger(const MDLogger& logger);
+    //! 返回当前模拟的日志接口。
+    const MDLogger& logger() const { return logger_; }
+
+    //! Returns reusable force buffers owned by this simulation instance.
     GaMDHostWorkspace& hostWorkspace();
 
     //! Read once on first GaMD use; ordinary simulations never request overrides.
     const GaMDForceOverrides& forceOverrides();
 
+    //! Records the step number used by raw CPU evaluation tracing.
     void prepareDihedralStep(int64_t step);
+    //! Tests whether the selected step still needs its one snapshot.
     bool dihedralForceOutputRequested(int64_t step) const;
     //! 写出同一步的加权二面角力；有原子重排序时使用拓扑编号。
     void dumpDihedralForces(int64_t              step,
@@ -110,6 +153,7 @@ public:
                             double               forceWeight,
                             bool                 isMainRank,
                             ArrayRef<const int>  globalAtomIndices = {});
+    //! Writes four raw CPU contributions; the OpenMP caller must contain I/O errors.
     void addRawDihedralForces(int        atomIndexI,
                               const rvec forceI,
                               int        atomIndexJ,
@@ -118,33 +162,40 @@ public:
                               const rvec forceK,
                               int        atomIndexL,
                               const rvec forceL);
+    //! Flushes raw tracing and rejects an unfulfilled selected-step snapshot.
     void finishDihedralStep(int64_t step, bool isMainRank);
+    //! Writes the selected final-force buffer in its current atom order.
     void dumpFinalForces(int64_t step, ArrayRef<const RVec> forces, bool isMainRank);
 
+    //! Returns true only for the first energy-cadence announcement.
     bool shouldPrintNstcalcenergyMessage();
+    //! Returns true only for the first resident-mode announcement.
     bool shouldPrintResidentEnergyMessage();
+    //! Returns true once when workload diagnostics are requested.
     bool shouldPrintGpuWorkloadDiagnostics();
 
 private:
+    //! Writes one raw CPU force contribution, throwing on write failure.
     void addRawDihedralForce(int atomIndex, const rvec force);
 
     GaMDHostWorkspace hostWorkspace_;
+    MDLogger          logger_;
 
     bool               forceOverridesRead_ = false;
     GaMDForceOverrides forceOverrides_;
 
-    FILE*       rawDihedralFile_ = nullptr;
+    FilePtr     rawDihedralFile_;
     std::string rawDihedralFilename_;
     int64_t     rawDihedralCurrentStep_ = -1;
 
-    FILE*       dihedralForceFile_ = nullptr;
+    FilePtr     dihedralForceFile_;
     std::string dihedralForceFilename_;
     int64_t     dihedralForceStep_        = -1;
     int64_t     dihedralForceWrittenStep_ = -1;
     int         dihedralForceBegin_       = 0;
     int         dihedralForceCount_       = -1;
 
-    FILE*       finalForceFile_ = nullptr;
+    FilePtr     finalForceFile_;
     std::string finalForceFilename_;
     int64_t     finalForceStep_  = -1;
     int         finalForceBegin_ = 0;
@@ -155,6 +206,9 @@ private:
     bool gpuWorkloadDiagnosticsEnabled_ = false;
     bool gpuWorkloadDiagnosticsPrinted_ = false;
 };
+
+//! \}
+//! \endcond
 
 } // namespace gmx
 

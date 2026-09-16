@@ -467,15 +467,15 @@ static void applyGaMDGpuForceCorrection(int64_t                       step,
                        "GPU GaMD force correction requires the device dihedral-force buffer");
     if (virtualSites != nullptr)
     {
-        gmx_fatal(FARGS,
-                  "GPU GaMD force correction does not yet support virtual-site force "
-                  "spreading.");
+        GMX_THROW(InconsistentInputError(
+                "GPU GaMD force correction does not yet support virtual-site force "
+                "spreading."));
     }
     if (forceRecord->pbcType == PbcType::Screw)
     {
-        gmx_fatal(FARGS,
-                  "GPU GaMD dihedral virial reduction does not support screw periodic "
-                  "boundary conditions.");
+        GMX_THROW(InconsistentInputError(
+                "GPU GaMD dihedral virial reduction does not support screw periodic "
+                "boundary conditions."));
     }
 
     const bool              validateLiveGpuCorrection = gpuExecutor->dihedralShadowEnabled();
@@ -551,8 +551,13 @@ static void applyGaMDGpuForceCorrection(int64_t                       step,
                                               freeEnergyParameters,
                                               nullptr);
 
-            validateGaMDGpuShadowForces(
-                    "live-dihedral", step, gamdGpuModeDihedralForces, gpuShadowDihedralForces, 0.005, 0.0001);
+            validateGaMDGpuShadowForces(module.diagnostics().logger(),
+                                        "live-dihedral",
+                                        step,
+                                        gamdGpuModeDihedralForces,
+                                        gpuShadowDihedralForces,
+                                        0.005,
+                                        0.0001);
 
             tensor cpuDihedralVirial = { { 0 } };
             calc_vir(c_numShiftVectors,
@@ -567,7 +572,8 @@ static void applyGaMDGpuForceCorrection(int64_t                       step,
                        as_rvec_array(gamdGpuModeDihedralForces.data()),
                        cpuDihedralVirial,
                        box);
-            validateGaMDGpuShadowVirial(step, cpuDihedralVirial, gpuDihedralVirial);
+            validateGaMDGpuShadowVirial(
+                    module.diagnostics().logger(), step, cpuDihedralVirial, gpuDihedralVirial);
         }
         wallcycle_stop(wallCycle, WallCycleCounter::GaMDDihedral);
 
@@ -638,8 +644,13 @@ static void applyGaMDGpuForceCorrection(int64_t                       step,
         gpuExecutor->forcesReadyEvent()->waitForEvent();
         forceRecord->stateGpu->copyForcesFromGpu(liveGpuCorrectedForces, AtomLocality::Local);
         forceRecord->stateGpu->waitForcesReadyOnHost(AtomLocality::Local);
-        validateGaMDGpuShadowForces(
-                "live-force-correction", step, referenceCorrectedForces, liveGpuCorrectedForces, 0.005, 0.0001);
+        validateGaMDGpuShadowForces(module.diagnostics().logger(),
+                                    "live-force-correction",
+                                    step,
+                                    referenceCorrectedForces,
+                                    liveGpuCorrectedForces,
+                                    0.005,
+                                    0.0001);
         module.diagnostics().dumpFinalForces(step, liveGpuCorrectedForces, isMainRank);
     }
 }
@@ -679,15 +690,15 @@ static void applyGaMDCpuForceCorrection(const t_commrec&              communicat
     const bool usesDomainAtomOrdering = haveDDAtomOrdering(communicationRecord);
     if (gpuShadowEnabled && usesDomainAtomOrdering)
     {
-        gmx_fatal(FARGS,
-                  "GMX_GAMD_GPU_DIH_SHADOW currently supports only one rank without domain "
-                  "decomposition.");
+        GMX_THROW(InconsistentInputError(
+                "GMX_GAMD_GPU_DIH_SHADOW currently supports only one rank without domain "
+                "decomposition."));
     }
     if (gpuShadowEnabled && virtualSites != nullptr)
     {
-        gmx_fatal(FARGS,
-                  "GMX_GAMD_GPU_DIH_SHADOW does not yet apply virtual-site force spreading on "
-                  "the device.");
+        GMX_THROW(InconsistentInputError(
+                "GMX_GAMD_GPU_DIH_SHADOW does not yet apply virtual-site force spreading on "
+                "the device."));
     }
     bool&                   correctionShadowCompared = gaMDHostWorkspace.correctionShadowCompared;
     std::vector<gmx::RVec>& rawForcesForGpuShadow = gaMDHostWorkspace.rawForcesForCorrectionShadow;
@@ -762,8 +773,13 @@ static void applyGaMDCpuForceCorrection(const t_commrec&              communicat
             {
                 gpuShadowForces.resize(gamdDihedralForces.size());
                 gpuExecutor->copyDihedralForces(gpuShadowForces);
-                validateGaMDGpuShadowForces(
-                        "dihedral", step, gamdDihedralForces, gpuShadowForces, 0.1, 0.01);
+                validateGaMDGpuShadowForces(module.diagnostics().logger(),
+                                            "dihedral",
+                                            step,
+                                            gamdDihedralForces,
+                                            gpuShadowForces,
+                                            0.1,
+                                            0.01);
                 shadowCompared = true;
             }
         }
@@ -850,7 +866,8 @@ static void applyGaMDCpuForceCorrection(const t_commrec&              communicat
     {
         gpuExecutor->applyForceCorrectionShadow(
                 rawForcesForGpuShadow, totalScale, dihedralCorrectionScale, correctedGpuShadowForces);
-        validateGaMDGpuShadowForces("force-correction", step, forces, correctedGpuShadowForces, 0.1, 0.01);
+        validateGaMDGpuShadowForces(
+                module.diagnostics().logger(), "force-correction", step, forces, correctedGpuShadowForces, 0.1, 0.01);
         correctionShadowCompared = true;
     }
 }
@@ -871,87 +888,98 @@ static void applyGaMDCurrentStepCorrection(const t_commrec&              communi
                                            gmx_wallcycle*                wallCycle,
                                            const MdrunScheduleWorkload&  runScheduleWork)
 {
-    GaMDMDModule* module = runScheduleWork.gaMDModule;
-    GMX_RELEASE_ASSERT(module != nullptr, "Current-step GaMD requires the built-in GaMD module");
-    const auto& simulationWork = runScheduleWork.simulationWork;
-    const auto& stepWork       = runScheduleWork.stepWork;
+    // GaMD 校验可能抛异常；不能把异常带出仍可能有设备工作的 legacy 求力入口。
+    try
+    {
+        GaMDMDModule* module = runScheduleWork.gaMDModule;
+        GMX_RELEASE_ASSERT(module != nullptr, "Current-step GaMD requires the built-in GaMD module");
+        const auto& simulationWork = runScheduleWork.simulationWork;
+        const auto& stepWork       = runScheduleWork.stepWork;
 
-    if (!stepWork.computeEnergy)
-    {
-        gmx_fatal(FARGS, "Current-step GaMD requires nstcalcenergy = 1.");
-    }
-    if (simulationWork.useMts)
-    {
-        gmx_fatal(FARGS, "Current-step GaMD does not support MTS.");
-    }
-    if (simulationWork.havePpDomainDecomposition)
-    {
-        gmx_fatal(FARGS, "Current-step GaMD does not support domain decomposition.");
-    }
-
-    // 先完成同一步的能量记账，再把力修正交给对应执行分支。
-    GaMDGpuExecutor* gpuExecutor = module->gpuExecutor();
-    if (stepWork.stageGpuEnergyAndVirialToHost)
-    {
-        sum_epot(energyData->grpp, energyData->term.data());
-        const double rawPotentialEnergy = energyData->term[F_EPOT];
-        const double rawDihedralEnergy  = energyData->term[F_PDIHS] + energyData->term[F_RBDIHS]
-                                         + energyData->term[F_FOURDIHS] + energyData->term[F_CMAP];
-        module->finalizeCurrentStep(
-                step, communicationRecord.nodeid, rawPotentialEnergy, rawDihedralEnergy, wallCycle);
-        if (forceRecord->listedForcesGpu != nullptr && gpuExecutor != nullptr
-            && gpuExecutor->energyDiagnosticsEnabled())
+        if (!stepWork.computeEnergy)
         {
-            validateGaMDGpuShadowEnergy(step, module->stepResult(), gpuExecutor->energyDiagnostics());
+            GMX_THROW(InconsistentInputError("Current-step GaMD requires nstcalcenergy = 1."));
+        }
+        if (simulationWork.useMts)
+        {
+            GMX_THROW(InconsistentInputError("Current-step GaMD does not support MTS."));
+        }
+        if (simulationWork.havePpDomainDecomposition)
+        {
+            GMX_THROW(InconsistentInputError(
+                    "Current-step GaMD does not support domain decomposition."));
+        }
+
+        // 先完成同一步的能量记账，再把力修正交给对应执行分支。
+        GaMDGpuExecutor* gpuExecutor = module->gpuExecutor();
+        if (stepWork.stageGpuEnergyAndVirialToHost)
+        {
+            sum_epot(energyData->grpp, energyData->term.data());
+            const double rawPotentialEnergy = energyData->term[F_EPOT];
+            const double rawDihedralEnergy  = energyData->term[F_PDIHS] + energyData->term[F_RBDIHS]
+                                             + energyData->term[F_FOURDIHS] + energyData->term[F_CMAP];
+            module->finalizeCurrentStep(
+                    step, communicationRecord.nodeid, rawPotentialEnergy, rawDihedralEnergy, wallCycle);
+            if (forceRecord->listedForcesGpu != nullptr && gpuExecutor != nullptr
+                && gpuExecutor->energyDiagnosticsEnabled())
+            {
+                validateGaMDGpuShadowEnergy(module->diagnostics().logger(),
+                                            step,
+                                            module->stepResult(),
+                                            gpuExecutor->energyDiagnostics());
+            }
+        }
+        else
+        {
+            GMX_RELEASE_ASSERT(
+                    simulationWork.useGpuResidentGaMD() && forceRecord->listedForcesGpu != nullptr
+                            && gpuExecutor != nullptr && gpuExecutor->scaleFromDeviceEnabled(),
+                    "GaMD can skip host energy staging only with device scale correction");
+        }
+
+        if (simulationWork.useGpuResidentGaMD())
+        {
+            if (haveDDAtomOrdering(communicationRecord))
+            {
+                GMX_THROW(InconsistentInputError(
+                        "GPU GaMD force correction does not support domain decomposition."));
+            }
+            applyGaMDGpuForceCorrection(step,
+                                        interactionDefinitions,
+                                        box,
+                                        coordinates,
+                                        forces,
+                                        forceVirial,
+                                        numLocalAtoms,
+                                        freeEnergyParameters,
+                                        forceRecord,
+                                        virtualSites,
+                                        operationCounter,
+                                        wallCycle,
+                                        *module,
+                                        stepWork,
+                                        MAIN(&communicationRecord));
+        }
+        else
+        {
+            applyGaMDCpuForceCorrection(communicationRecord,
+                                        step,
+                                        interactionDefinitions,
+                                        box,
+                                        coordinates,
+                                        forces,
+                                        forceVirial,
+                                        numLocalAtoms,
+                                        freeEnergyParameters,
+                                        forceRecord,
+                                        virtualSites,
+                                        operationCounter,
+                                        wallCycle,
+                                        *module,
+                                        stepWork);
         }
     }
-    else
-    {
-        GMX_RELEASE_ASSERT(simulationWork.useGpuResidentGaMD() && forceRecord->listedForcesGpu != nullptr
-                                   && gpuExecutor != nullptr && gpuExecutor->scaleFromDeviceEnabled(),
-                           "GaMD can skip host energy staging only with device scale correction");
-    }
-
-    if (simulationWork.useGpuResidentGaMD())
-    {
-        if (haveDDAtomOrdering(communicationRecord))
-        {
-            gmx_fatal(FARGS, "GPU GaMD force correction does not support domain decomposition.");
-        }
-        applyGaMDGpuForceCorrection(step,
-                                    interactionDefinitions,
-                                    box,
-                                    coordinates,
-                                    forces,
-                                    forceVirial,
-                                    numLocalAtoms,
-                                    freeEnergyParameters,
-                                    forceRecord,
-                                    virtualSites,
-                                    operationCounter,
-                                    wallCycle,
-                                    *module,
-                                    stepWork,
-                                    MAIN(&communicationRecord));
-    }
-    else
-    {
-        applyGaMDCpuForceCorrection(communicationRecord,
-                                    step,
-                                    interactionDefinitions,
-                                    box,
-                                    coordinates,
-                                    forces,
-                                    forceVirial,
-                                    numLocalAtoms,
-                                    freeEnergyParameters,
-                                    forceRecord,
-                                    virtualSites,
-                                    operationCounter,
-                                    wallCycle,
-                                    *module,
-                                    stepWork);
-    }
+    GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
 }
 
 static void do_nb_verlet(t_forcerec*                fr,
@@ -2086,17 +2114,19 @@ void do_force(FILE*                         fplog,
     if (simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuResident
         && runScheduleWork.gaMDModule->diagnostics().shouldPrintGpuWorkloadDiagnostics())
     {
-        std::fprintf(stderr,
-                     "[GaMD GPU diagnostics] cpuLocal=%d cpuListed=%d cpuBonded=%d special=%d "
-                     "freeEnergy=%d gpuFBufferOps=%d computeVirial=%d shortRangeVirial=%d\n",
-                     domainWork.haveCpuLocalForceWork,
-                     domainWork.haveCpuListedForceWork,
-                     domainWork.haveCpuBondedWork,
-                     domainWork.haveSpecialForces,
-                     domainWork.haveFreeEnergyWork,
-                     stepWork.useGpuFBufferOps,
-                     stepWork.computeVirial,
-                     useGpuGaMDShortRangeVirial);
+        GMX_LOG(runScheduleWork.gaMDModule->diagnostics().logger().info)
+                .asParagraph()
+                .appendTextFormatted(
+                        "[GaMD GPU diagnostics] cpuLocal=%d cpuListed=%d cpuBonded=%d special=%d "
+                        "freeEnergy=%d gpuFBufferOps=%d computeVirial=%d shortRangeVirial=%d\n",
+                        domainWork.haveCpuLocalForceWork,
+                        domainWork.haveCpuListedForceWork,
+                        domainWork.haveCpuBondedWork,
+                        domainWork.haveSpecialForces,
+                        domainWork.haveFreeEnergyWork,
+                        stepWork.useGpuFBufferOps,
+                        stepWork.computeVirial,
+                        useGpuGaMDShortRangeVirial);
     }
     if (useGpuGaMDShortRangeVirial && fr->wholeMoleculeTransform != nullptr)
     {

@@ -31,6 +31,11 @@
  * To help us fund GROMACS development, we humbly ask that you cite
  * the research papers on the package. Check out https://www.gromacs.org.
  */
+/*! \internal \file
+ * \brief CUDA evaluation of the shared GaMD bias and diagnostic force overrides.
+ *
+ * \ingroup module_applied_forces
+ */
 
 #include "gmxpre.h"
 
@@ -40,12 +45,14 @@
 
 #include "gamdmath.h"
 
+//! \cond internal
 namespace gmx
 {
 
 namespace
 {
 
+/*! \internal \brief Evaluates the shared bias and writes the six-float device state. */
 __global__ void gamdProductionScaleKernel(float*                   gm_gamdState,
                                           const GaMDBiasParameters parameters,
                                           const GaMDForceOverrides forceOverrides)
@@ -98,3 +105,4 @@ void launchGamdProductionScaleKernel(DeviceBuffer<float>       gamdState,
 }
 
 } // namespace gmx
+//! \endcond

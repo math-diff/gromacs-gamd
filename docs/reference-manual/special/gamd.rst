@@ -159,6 +159,12 @@ force override values are errors rather than implicit zeroes. Integer debug
 indices and steps also use checked conversion. These switches select optional
 diagnostics; production mode selection remains automatic.
 
+GaMD information messages and successful CPU/GPU shadow comparisons use the
+standard simulation logger. With ``-deffnm run`` they are recorded in
+``run.log``; warnings use the configured warning output as well. Scripts that
+verify a shadow comparison should read the simulation log. Input, numerical
+and requested-file errors still report their cause and terminate the run.
+
 Force overrides are read once on first GaMD use and shared by CPU and CUDA.
 They only affect GaMD-enabled simulations. The current-step force correction
 applies the requested weights once to forces and virial; the integration loop

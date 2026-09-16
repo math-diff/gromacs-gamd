@@ -31,11 +31,14 @@
  * To help us fund GROMACS development, we humbly ask that you cite
  * the research papers on the package. Check out https://www.gromacs.org.
  */
-/*! \internal \file
- * \brief Declares the built-in GaMD simulation module.
+/*! \libinternal \file
+ * \brief Declares the built-in GaMD module and its legacy MD entry points.
+ *
+ * \inlibraryapi
+ * \ingroup module_applied_forces
  */
-#ifndef GMX_APPLIED_FORCES_GAMD_GAMMDMODULE_H
-#define GMX_APPLIED_FORCES_GAMD_GAMMDMODULE_H
+#ifndef GMX_APPLIED_FORCES_GAMD_GAMDMDMODULE_H
+#define GMX_APPLIED_FORCES_GAMD_GAMDMDMODULE_H
 
 #include <array>
 #include <memory>
@@ -53,28 +56,44 @@ struct gmx_wallcycle;
 namespace gmx
 {
 
+//! \cond libapi
+//! \addtogroup module_applied_forces
+//! \{
+
 class GaMDGpuExecutor;
 class GaMDDiagnostics;
 class GaMDRuntime;
 
-/*! \internal
+/*! \libinternal
  * \brief Owns the GaMD runtime for one simulation.
  *
  * The module is constructed by MDModules and remains alive until the simulator
  * has completed. Performance-critical force and update paths receive a
  * non-owning pointer through SimulatorModules instead of discovering GaMD
  * state through process-wide globals.
+ *
+ * Runtime failures are translated at these legacy MD entry points with
+ * GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR. The internal GaMDRuntime interface
+ * reports exceptions; an instance must be reinitialized after failed input
+ * preparation. Simulation-setup notifications supply the MDLogger targets.
  */
 class GaMDMDModule final : public IMDModule
 {
 public:
+    //! Constructs the host runtime and optional diagnostic outputs.
     GaMDMDModule();
+    //! Releases the GPU executor, runtime and diagnostics owned by this simulation.
     ~GaMDMDModule() override;
 
+    //! Returns no MDP provider; GaMD parameters use the legacy input file.
     IMdpOptionProvider* mdpOptionProvider() override;
-    IMDOutputProvider*  outputProvider() override;
-    void                initForceProviders(ForceProviders* forceProviders) override;
+    //! Returns no separate output provider; the MD loop owns output timing.
+    IMDOutputProvider* outputProvider() override;
+    //! Leaves force-provider registration empty; correction uses the MD bridge.
+    void initForceProviders(ForceProviders* forceProviders) override;
+    //! Subscribes to the simulation logger notification.
     void subscribeToSimulationSetupNotifications(MDModulesNotifiers* notifiers) override;
+    //! Requires no preprocessing callbacks for the legacy input.
     void subscribeToPreProcessingNotifications(MDModulesNotifiers* notifiers) override;
 
     //! Prepares the immutable work description for one step.
@@ -91,10 +110,12 @@ public:
                                const DeviceStream&  deviceStream,
                                gmx_wallcycle*       wallCycleCounters);
     //! Returns the module-owned device executor, or nullptr when unavailable.
-    GaMDGpuExecutor*       gpuExecutor();
+    GaMDGpuExecutor* gpuExecutor();
+    //! Returns the optional executor without allowing modification.
     const GaMDGpuExecutor* gpuExecutor() const;
     //! Returns diagnostics and host scratch state owned by this simulation module.
-    GaMDDiagnostics&       diagnostics();
+    GaMDDiagnostics& diagnostics();
+    //! Returns the per-instance diagnostics without allowing modification.
     const GaMDDiagnostics& diagnostics() const;
     //! Updates host statistics and the host step result from current raw energies.
     void finalizeCurrentStep(int64_t        step,
@@ -131,6 +152,9 @@ private:
 
 //! Constructs the built-in GaMD module.
 std::unique_ptr<GaMDMDModule> createGaMDModule();
+
+//! \}
+//! \endcond
 
 } // namespace gmx
 

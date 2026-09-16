@@ -32,10 +32,9 @@
  * the research papers on the package. Check out https://www.gromacs.org.
  */
 /*! \internal \file
- * \brief Pure GaMD bias and population-statistics calculations.
+ * \brief Declares shared GaMD bias and population-statistics calculations.
  *
- * The evaluator is shared by CPU force correction, CUDA production, and
- * deferred output. It does not read files, modify statistics, or clamp scales.
+ * \ingroup module_applied_forces
  */
 #ifndef GMX_APPLIED_FORCES_GAMD_GAMDMATH_H
 #define GMX_APPLIED_FORCES_GAMD_GAMDMATH_H
@@ -43,9 +42,14 @@
 #include <cstdint>
 
 #include "gromacs/applied_forces/gamd/gamdtypes.h"
+#include "gromacs/compat/pointers.h"
 
 namespace gmx
 {
+
+//! \cond internal
+//! \addtogroup module_applied_forces
+//! \{
 
 //! Existing force-weight safety floor; applied after evaluating the bias.
 constexpr double c_gaMDScaleFloor = 0.01;
@@ -102,33 +106,52 @@ __host__ __device__
 //! Persistent statistics and bias parameters for one energy component.
 struct GaMDEnergyStatistics
 {
-    double  maximum       = -1e99;
-    double  minimum       = 1e99;
-    double  average       = 0.0;
-    double  deviation     = 0.001;
-    double  m2            = 0.0; //!< Retained for legacy restart compatibility.
-    int64_t count         = 0;
-    double  threshold     = 0.0;
-    double  k0            = 0.0;
-    double  forceConstant = 0.0;
+    //! Largest sampled energy in kJ/mol.
+    double maximum = -1e99;
+    //! Smallest sampled energy in kJ/mol.
+    double minimum = 1e99;
+    //! Mean from the most recently completed window, in kJ/mol.
+    double average = 0.0;
+    //! Population standard deviation in kJ/mol.
+    double deviation = 0.001;
+    double m2        = 0.0; //!< Retained for legacy restart compatibility.
+    //! Number of accumulated samples.
+    int64_t count = 0;
+    //! Applied threshold energy in kJ/mol.
+    double threshold = 0.0;
+    //! Dimensionless normalized force constant.
+    double k0 = 0.0;
+    //! Applied force constant in inverse kJ/mol.
+    double forceConstant = 0.0;
 };
 
 //! Welford accumulator for the current averaging window.
 struct GaMDWindowStatistics
 {
+    //! Number of accumulated samples.
     int64_t count = 0;
-    double  mean  = 0.0;
-    double  m2    = 0.0;
+    //! Current Welford window mean in kJ/mol.
+    double mean = 0.0;
+    //! Current sum of squared deviations in squared kJ/mol.
+    double m2 = 0.0;
 };
 
 //! Accumulate one sample without changing the currently applied bias.
-void updateGaMDStatistics(double energy, GaMDEnergyStatistics& statistics, GaMDWindowStatistics& window);
+void updateGaMDStatistics(double                                  energy,
+                          compat::not_null<GaMDEnergyStatistics*> statistics,
+                          compat::not_null<GaMDWindowStatistics*> window);
 
 //! Finish a nonempty window using population variance (M2 / count), then reset it.
-void finalizeWindowStatistics(GaMDWindowStatistics& window, GaMDEnergyStatistics& statistics);
+void finalizeWindowStatistics(compat::not_null<GaMDWindowStatistics*> window,
+                              compat::not_null<GaMDEnergyStatistics*> statistics);
 
 //! Update E and k using the existing iE=1/2 policy; retain them for degenerate input.
-void calculateThresholdAndForceConstant(int thresholdMode, double sigmaLimit, GaMDEnergyStatistics& statistics);
+void calculateThresholdAndForceConstant(int                                     thresholdMode,
+                                        double                                  sigmaLimit,
+                                        compat::not_null<GaMDEnergyStatistics*> statistics);
+
+//! \}
+//! \endcond
 
 } // namespace gmx
 

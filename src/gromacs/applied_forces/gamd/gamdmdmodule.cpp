@@ -31,16 +31,26 @@
  * To help us fund GROMACS development, we humbly ask that you cite
  * the research papers on the package. Check out https://www.gromacs.org.
  */
+/*! \internal \file
+ * \brief Connects the GaMD runtime to the legacy MD loop and setup notifications.
+ *
+ * \ingroup module_applied_forces
+ */
 #include "gmxpre.h"
 
 #include "gamdmdmodule.h"
 
+#include <functional>
+
+#include "gromacs/mdrunutility/mdmodulesnotifiers.h"
+#include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/gmxassert.h"
 
 #include "gamddiagnostics.h"
 #include "gamdgpu.h"
 #include "gamdruntime.h"
 
+//! \cond internal
 namespace gmx
 {
 
@@ -64,13 +74,23 @@ IMDOutputProvider* GaMDMDModule::outputProvider()
 
 void GaMDMDModule::initForceProviders(ForceProviders* /* forceProviders */) {}
 
-void GaMDMDModule::subscribeToSimulationSetupNotifications(MDModulesNotifiers* /* notifiers */) {}
+void GaMDMDModule::subscribeToSimulationSetupNotifications(MDModulesNotifiers* notifiers)
+{
+    // 复用引擎的日志目标，不再绕过它直接写 stderr。
+    std::function<void(const MDLogger&)> setLogger =
+            std::bind(&GaMDDiagnostics::setLogger, diagnostics_.get(), std::placeholders::_1);
+    notifiers->simulationSetupNotifier_.subscribe(setLogger);
+}
 
 void GaMDMDModule::subscribeToPreProcessingNotifications(MDModulesNotifiers* /* notifiers */) {}
 
 const GaMDStepPlan& GaMDMDModule::prepareStep(int64_t step, int rank, bool pressureCouplingThisStep)
 {
-    return runtime_->prepareStep(step, rank, pressureCouplingThisStep);
+    try
+    {
+        return runtime_->prepareStep(step, rank, pressureCouplingThisStep);
+    }
+    GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
 }
 
 const GaMDStepPlan& GaMDMDModule::stepPlan() const
@@ -125,7 +145,11 @@ void GaMDMDModule::finalizeCurrentStep(int64_t        step,
                                        double         dihedralEnergy,
                                        gmx_wallcycle* wallCycle)
 {
-    runtime_->finalizeCurrentStep(step, rank, totalPotentialEnergy, dihedralEnergy, wallCycle);
+    try
+    {
+        runtime_->finalizeCurrentStep(step, rank, totalPotentialEnergy, dihedralEnergy, wallCycle);
+    }
+    GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
 }
 
 bool GaMDMDModule::requiresHostEnergyThisStep(int64_t step) const
@@ -149,8 +173,12 @@ void GaMDMDModule::writeBufferedProductionOutput(ArrayRef<const int64_t> deferre
                                                  int            rank,
                                                  gmx_wallcycle* wallCycle)
 {
-    runtime_->writeBufferedProductionOutput(
-            deferredSteps, deferredEnergySamples, currentStep, rank, wallCycle);
+    try
+    {
+        runtime_->writeBufferedProductionOutput(
+                deferredSteps, deferredEnergySamples, currentStep, rank, wallCycle);
+    }
+    GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
 }
 
 void GaMDMDModule::setCheckpointingThisStep(bool checkpointingThisStep)
@@ -160,12 +188,20 @@ void GaMDMDModule::setCheckpointingThisStep(bool checkpointingThisStep)
 
 void GaMDMDModule::writeRestartState(int64_t step)
 {
-    runtime_->writeRestartState(step);
+    try
+    {
+        runtime_->writeRestartState(step);
+    }
+    GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
 }
 
 void GaMDMDModule::warnIfRunTooShort(int64_t initStep, int64_t numSteps, int rank)
 {
-    runtime_->warnIfRunTooShort(initStep, numSteps, rank);
+    try
+    {
+        runtime_->warnIfRunTooShort(initStep, numSteps, rank);
+    }
+    GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
 }
 
 void GaMDMDModule::resetStateForTesting()
@@ -181,3 +217,4 @@ std::unique_ptr<GaMDMDModule> createGaMDModule()
 }
 
 } // namespace gmx
+//! \endcond

@@ -32,8 +32,7 @@
  * the research papers on the package. Check out https://www.gromacs.org.
  */
 /*! \internal \file
- *
- * \brief Implements the CUDA GaMD device executor.
+ * \brief CUDA force, energy, virial and kinetic-history operations for GaMD.
  *
  * \author Jon Vincent <jvincent@nvidia.com>
  * \author Magnus Lundborg <lundborg.magnus@gmail.com>
@@ -70,10 +69,14 @@
 #include "gromacs/timing/wallcycle.h"
 #include "gromacs/utility/gmxassert.h"
 
+//! \cond internal
 namespace gmx
+{
+namespace
 {
 
 // 这些核在 update stream 上记录约束维里和动能历史，避免 GaMD 状态散落在 update 模块中。
+/*! \internal \brief Appends a constraint-virial sample using the device-side slot counter. */
 __global__ void recordConstraintVirialKernel(const float* gm_lincsVirial,
                                              const bool   haveLincs,
                                              const float* gm_settleVirial,
@@ -116,6 +119,7 @@ __global__ void recordConstraintVirialKernel(const float* gm_lincsVirial,
     }
 }
 
+/*! \internal \brief Reduces half-step kinetic tensors and temperature-group energies. */
 __global__ void accumulateHalfStepKineticKernel(const int             numAtoms,
                                                 const int             numGroups,
                                                 const float3*         gm_velocities,
@@ -173,6 +177,7 @@ __global__ void accumulateHalfStepKineticKernel(const int             numAtoms,
     }
 }
 
+/*! \internal \brief Combines adjacent half steps and optionally records a full-step sample. */
 __global__ void finalizeKineticHistoryKernel(const int    numGroups,
                                              const bool   recordSample,
                                              const float* gm_currentHalf,
@@ -220,6 +225,7 @@ __global__ void finalizeKineticHistoryKernel(const int    numGroups,
     }
 }
 
+/*! \internal \brief Reduces the previous half-step kinetic tensor for each temperature group. */
 __global__ void accumulateGroupHalfKineticTensorKernel(const int             numAtoms,
                                                        const int             numGroups,
                                                        const float3*         gm_velocities,
@@ -256,6 +262,7 @@ __global__ void accumulateGroupHalfKineticTensorKernel(const int             num
     }
 }
 
+/*! \internal \brief Maps raw dihedral forces from nonbonded order to state atom order. */
 __global__ void mapNbnxnToStateForceKernel(const int     numAtoms,
                                            const int*    gm_nbnxnAtomOrder,
                                            const float3* gm_nbnxnForce,
@@ -268,6 +275,7 @@ __global__ void mapNbnxnToStateForceKernel(const int     numAtoms,
     }
 }
 
+/*! \internal \brief Accumulates raw potential and dihedral-partition energies in device order. */
 __global__ void reduceGamdRawEnergiesKernel(const float* gm_nbLJEnergy,
                                             const float* gm_nbElecEnergy,
                                             const float* gm_pmeEnergy,
@@ -305,6 +313,7 @@ __global__ void reduceGamdRawEnergiesKernel(const float* gm_nbLJEnergy,
     }
 }
 
+/*! \internal \brief Appends a complete energy-component sample within the fixed capacity. */
 __global__ void recordGamdEnergySampleKernel(const float* gm_nbLJEnergy,
                                              const float* gm_nbElecEnergy,
                                              const float* gm_pmeEnergy,
@@ -348,6 +357,7 @@ __global__ void recordGamdEnergySampleKernel(const float* gm_nbLJEnergy,
     }
 }
 
+/*! \internal \brief Appends force virial with the same weights as the force correction. */
 __global__ void recordGamdForceVirialSampleKernel(const float* gm_shortRangeVirial,
                                                   const float* gm_dihedralVirial,
                                                   const float* gm_pmeEnergyAndVirial,
@@ -375,6 +385,7 @@ __global__ void recordGamdForceVirialSampleKernel(const float* gm_shortRangeViri
     }
 }
 
+/*! \internal \brief Combines raw and dihedral forces with the current GaMD force weights. */
 __global__ void gamdForceCorrectionKernel(const int     numAtoms,
                                           const float   totalScale,
                                           const float   dihedralCorrectionScale,
@@ -403,6 +414,7 @@ __global__ void gamdForceCorrectionKernel(const int     numAtoms,
     }
 }
 
+/*! \internal \brief Reduces direct and periodic-shift contributions to a virial tensor. */
 __global__ void reduceGamdDihedralVirialKernel(const int     numAtoms,
                                                const float4* gm_xq,
                                                const float3* gm_dihedralForce,
@@ -485,6 +497,8 @@ __global__ void reduceGamdDihedralVirialKernel(const int     numAtoms,
 
 /*-------------------------------- End CUDA kernels-----------------------------*/
 
+} // namespace
+
 void GaMDGpuExecutor::Impl::recordUpdateConstraintVirial(DeviceBuffer<float> lincsVirial,
                                                          const bool          haveLincs,
                                                          DeviceBuffer<float> settleVirial,
@@ -512,7 +526,7 @@ void GaMDGpuExecutor::Impl::recordUpdateConstraintVirial(DeviceBuffer<float> lin
                                                       &haveSettles,
                                                       &scaleFactor,
                                                       &d_updateConstraintVirialHistoryCount_,
-                                                      &c_historyCapacity,
+                                                      &sc_historyCapacity,
                                                       &d_updateConstraintVirialHistory_);
     launchGpuKernel(kernel, config, *updateStream_, nullptr, "Record deferred constraint virial", kernelArgs);
 }
@@ -572,7 +586,7 @@ void GaMDGpuExecutor::Impl::recordUpdateKineticEnergy(const bool recordSample)
                                                         &d_updateCurrentHalfKinetic_,
                                                         &d_updatePreviousHalfKinetic_,
                                                         &d_updateKineticHistoryCount_,
-                                                        &c_historyCapacity,
+                                                        &sc_historyCapacity,
                                                         &d_updateKineticHistory_);
     launchGpuKernel(finalizeKernel,
                     finalizeConfig,
@@ -736,7 +750,7 @@ void GaMDGpuExecutor::Impl::launchGamdEnergyReduction(const GaMDBiasParameters& 
                                                                  &listedEnergies_,
                                                                  &d_gamdState_,
                                                                  &d_gamdEnergyHistoryCount_,
-                                                                 &c_historyCapacity,
+                                                                 &sc_historyCapacity,
                                                                  &d_gamdEnergyHistory_);
         launchGpuKernel(
                 historyKernel, config, deviceStream_, nullptr, "Record deferred GaMD energy sample", historyKernelArgs);
@@ -776,7 +790,7 @@ std::vector<std::array<real, F_NRE>> GaMDGpuExecutor::Impl::takeGamdEnergyHistor
                          GpuApiCallBehavior::Sync,
                          nullptr);
     const int sampleCount = h_gamdEnergyHistoryCount_[0];
-    GMX_RELEASE_ASSERT(sampleCount <= c_historyCapacity,
+    GMX_RELEASE_ASSERT(sampleCount <= sc_historyCapacity,
                        "Deferred GaMD energy history exceeded its fixed capacity");
     if (sampleCount == 0)
     {
@@ -822,7 +836,7 @@ void GaMDGpuExecutor::Impl::recordGamdForceVirialSample()
                                                       &d_gamdPmeEnergy_,
                                                       &d_gamdState_,
                                                       &d_gamdEnergyHistoryCount_,
-                                                      &c_historyCapacity,
+                                                      &sc_historyCapacity,
                                                       &d_gamdForceVirialHistory_);
     launchGpuKernel(kernel, config, deviceStream_, nullptr, "Record deferred GaMD force virial", kernelArgs);
 }
@@ -831,7 +845,7 @@ std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::Impl::takeGamdForceVir
 {
     GMX_RELEASE_ASSERT(useGpuResidentGaMD_,
                        "Deferred GaMD force-virial history requested while disabled");
-    GMX_RELEASE_ASSERT(numSamples >= 0 && numSamples <= c_historyCapacity,
+    GMX_RELEASE_ASSERT(numSamples >= 0 && numSamples <= sc_historyCapacity,
                        "Deferred GaMD force-virial sample count is out of range");
     if (numSamples == 0)
     {
@@ -961,3 +975,4 @@ void GaMDGpuExecutor::Impl::launchGamdForceCorrectionShadowKernel(real totalScal
 }
 
 } // namespace gmx
+//! \endcond

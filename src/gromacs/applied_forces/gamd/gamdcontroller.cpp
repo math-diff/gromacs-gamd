@@ -32,7 +32,9 @@
  * the research papers on the package. Check out https://www.gromacs.org.
  */
 /*! \internal \file
- * \brief GaMD step scheduling and accounting.
+ * \brief Advances GaMD stages, statistics and current-step bias accounting.
+ *
+ * \ingroup module_applied_forces
  */
 #include "gmxpre.h"
 
@@ -45,12 +47,14 @@
 #include <limits>
 
 #include "gromacs/timing/wallcycle.h"
-#include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/gmxassert.h"
+#include "gromacs/utility/stringutil.h"
 
 #include "gamddiagnostics.h"
 #include "gamdruntime.h"
 
+//! \cond internal
 namespace gmx
 {
 
@@ -183,20 +187,24 @@ void GaMDRuntime::warnIfRunTooShort(int64_t initStep, int64_t nsteps, int rank)
     // 阶段长度已在输入时检查；模拟总步数也要在相加之前排除溢出。
     if (initStep > std::numeric_limits<int64_t>::max() - nsteps)
     {
-        gmx_fatal(FARGS, "GaMD init_step + nsteps exceeds the signed 64-bit step range.");
+        GMX_THROW(InconsistentInputError(
+                "GaMD init_step + nsteps exceeds the signed 64-bit step range."));
     }
     const int64_t adaptivePhaseEnd = parameters_.conventionalEnd + parameters_.boostLength;
     const int64_t plannedFinalStep = initStep + nsteps;
     if (adaptivePhaseEnd >= plannedFinalStep)
     {
-        std::fprintf(
-                stderr,
-                "\n[GaMD WARNING] ntcmd + nteb = %" PRId64 " >= planned final step = %" PRId64
-                ".\n"
-                "GaMD requires ntcmd + nteb < init_step + nsteps to reach the production stage.\n"
-                "Increase nsteps or reduce ntcmd/nteb if production sampling is intended.\n\n",
-                adaptivePhaseEnd,
-                plannedFinalStep);
+        GMX_LOG(diagnostics_.logger().warning)
+                .asParagraph()
+                .appendTextFormatted("\n[GaMD WARNING] ntcmd + nteb = %" PRId64
+                                     " >= planned final step = %" PRId64
+                                     ".\n"
+                                     "GaMD requires ntcmd + nteb < init_step + nsteps to reach the "
+                                     "production stage.\n"
+                                     "Increase nsteps or reduce ntcmd/nteb if production sampling "
+                                     "is intended.\n\n",
+                                     adaptivePhaseEnd,
+                                     plannedFinalStep);
     }
 }
 
@@ -211,35 +219,37 @@ double GaMDRuntime::validateAndClampScale(const char*                 label,
     if (!std::isfinite(rawScale) || !std::isfinite(energy) || !std::isfinite(stat.threshold)
         || !std::isfinite(stat.forceConstant))
     {
-        gmx_fatal(FARGS,
-                  "Non-finite GaMD %s boost quantity at step %" PRId64
-                  ": raw_scale=%g energy=%g "
-                  "threshold_E=%g k=%g.",
-                  label,
-                  step,
-                  rawScale,
-                  energy,
-                  stat.threshold,
-                  stat.forceConstant);
+        GMX_THROW(SimulationInstabilityError(
+                formatString("Non-finite GaMD %s boost quantity at step %" PRId64
+                             ": raw_scale=%g energy=%g "
+                             "threshold_E=%g k=%g.",
+                             label,
+                             step,
+                             rawScale,
+                             energy,
+                             stat.threshold,
+                             stat.forceConstant)));
     }
 
     if (rawScale <= c_gaMDScaleFloor && !*warnedAtFloor)
     {
         if (rank == 0)
         {
-            std::fprintf(stderr,
-                         "\n[GaMD WARNING] %s raw force weight reached the 0.01 safety floor "
-                         "at step %" PRId64
-                         ": raw_weight=%.17g, energy=%.17g kJ/mol, E=%.17g "
-                         "kJ/mol, k=%.17g (kJ/mol)^-1. The applied weight is clamped to "
-                         "0.01. Inspect equilibration and GaMD parameters before using this "
-                         "trajectory for production analysis.\n\n",
-                         label,
-                         step,
-                         rawScale,
-                         energy,
-                         stat.threshold,
-                         stat.forceConstant);
+            GMX_LOG(diagnostics_.logger().warning)
+                    .asParagraph()
+                    .appendTextFormatted(
+                            "\n[GaMD WARNING] %s raw force weight reached the 0.01 safety floor "
+                            "at step %" PRId64
+                            ": raw_weight=%.17g, energy=%.17g kJ/mol, E=%.17g "
+                            "kJ/mol, k=%.17g (kJ/mol)^-1. The applied weight is clamped to "
+                            "0.01. Inspect equilibration and GaMD parameters before using this "
+                            "trajectory for production analysis.\n\n",
+                            label,
+                            step,
+                            rawScale,
+                            energy,
+                            stat.threshold,
+                            stat.forceConstant);
         }
         *warnedAtFloor = true;
     }
@@ -300,11 +310,11 @@ void GaMDRuntime::finalizeCurrentStep(int64_t        step,
         }
         if (!std::isfinite(stepResult_.boostP) || !std::isfinite(stepResult_.boostD))
         {
-            gmx_fatal(FARGS,
-                      "Non-finite GaMD boost energy at step %" PRId64 ": boostP=%g boostD=%g.",
-                      step,
-                      stepResult_.boostP,
-                      stepResult_.boostD);
+            GMX_THROW(SimulationInstabilityError(formatString(
+                    "Non-finite GaMD boost energy at step %" PRId64 ": boostP=%g boostD=%g.",
+                    step,
+                    stepResult_.boostP,
+                    stepResult_.boostD)));
         }
         stepResult_.scaleP = validateAndClampScale("total-potential",
                                                    stepResult_.scaleP,
@@ -329,19 +339,25 @@ void GaMDRuntime::finalizeCurrentStep(int64_t        step,
 
         if (parameters_.boostType == 1 || parameters_.boostType == 3)
         {
-            updateGaMDStatistics(totalPotentialForStats, potentialStatistics_, potentialWindowStatistics_);
+            updateGaMDStatistics(totalPotentialForStats,
+                                 compat::make_not_null(&potentialStatistics_),
+                                 compat::make_not_null(&potentialWindowStatistics_));
             if (updateAverageWindow)
             {
-                finalizeWindowStatistics(potentialWindowStatistics_, potentialStatistics_);
+                finalizeWindowStatistics(compat::make_not_null(&potentialWindowStatistics_),
+                                         compat::make_not_null(&potentialStatistics_));
             }
         }
 
         if (parameters_.boostType == 2 || parameters_.boostType == 3)
         {
-            updateGaMDStatistics(dihedralEnergy, dihedralStatistics_, dihedralWindowStatistics_);
+            updateGaMDStatistics(dihedralEnergy,
+                                 compat::make_not_null(&dihedralStatistics_),
+                                 compat::make_not_null(&dihedralWindowStatistics_));
             if (updateAverageWindow)
             {
-                finalizeWindowStatistics(dihedralWindowStatistics_, dihedralStatistics_);
+                finalizeWindowStatistics(compat::make_not_null(&dihedralWindowStatistics_),
+                                         compat::make_not_null(&dihedralStatistics_));
             }
         }
 
@@ -352,13 +368,15 @@ void GaMDRuntime::finalizeCurrentStep(int64_t        step,
         {
             if (parameters_.boostType == 1 || parameters_.boostType == 3)
             {
-                calculateThresholdAndForceConstant(
-                        parameters_.potentialMode, parameters_.potentialSigmaLimit, potentialStatistics_);
+                calculateThresholdAndForceConstant(parameters_.potentialMode,
+                                                   parameters_.potentialSigmaLimit,
+                                                   compat::make_not_null(&potentialStatistics_));
             }
             if (parameters_.boostType == 2 || parameters_.boostType == 3)
             {
-                calculateThresholdAndForceConstant(
-                        parameters_.dihedralMode, parameters_.dihedralSigmaLimit, dihedralStatistics_);
+                calculateThresholdAndForceConstant(parameters_.dihedralMode,
+                                                   parameters_.dihedralSigmaLimit,
+                                                   compat::make_not_null(&dihedralStatistics_));
             }
         }
     }
@@ -393,7 +411,7 @@ void GaMDRuntime::writeBufferedProductionOutput(ArrayRef<const int64_t> deferred
     }
 
     wallcycle_start(wallCycle, WallCycleCounter::GaMDOutput);
-    for (std::size_t sampleIndex = 0; sampleIndex < deferredEnergySamples.size(); ++sampleIndex)
+    for (Index sampleIndex = 0; sampleIndex < deferredEnergySamples.ssize(); ++sampleIndex)
     {
         const auto& sample          = deferredEnergySamples[sampleIndex];
         float       potentialEnergy = 0;
@@ -434,12 +452,16 @@ void GaMDRuntime::writeBufferedProductionOutput(ArrayRef<const int64_t> deferred
 
     writeParameterLine(currentStep, rank, false);
     writeReweightLine(currentStep, rank, false);
-    if ((parameterFile_ != nullptr && std::fflush(parameterFile_) != 0)
-        || (reweightFile_ != nullptr && std::fflush(reweightFile_) != 0))
+    if ((parameterFile_ != nullptr
+         && (std::fflush(parameterFile_.get()) != 0 || std::ferror(parameterFile_.get()) != 0))
+        || (reweightFile_ != nullptr
+            && (std::fflush(reweightFile_.get()) != 0 || std::ferror(reweightFile_.get()) != 0)))
     {
-        gmx_fatal(FARGS, "Failed to flush buffered GaMD output at step %" PRId64 ".", currentStep);
+        GMX_THROW(FileIOError(formatString(
+                "Failed to flush buffered GaMD output at step %" PRId64 ".", currentStep)));
     }
     wallcycle_stop(wallCycle, WallCycleCounter::GaMDOutput);
 }
 
 } // namespace gmx
+//! \endcond

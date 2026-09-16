@@ -78,6 +78,7 @@
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/enumerationhelpers.h"
+#include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/fatalerror.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/smalloc.h"
@@ -144,8 +145,13 @@ void traceGaMDRawDihedralForces(const t_fcdata* forceCalculationData,
     {
         return;
     }
-    forceCalculationData->gaMDDiagnostics->addRawDihedralForces(
-            atomIndexI, forceI, atomIndexJ, forceJ, atomIndexK, forceK, atomIndexL, forceL);
+    // 此回调会在 OpenMP 区域执行，文件异常不能跨线程传播。
+    try
+    {
+        forceCalculationData->gaMDDiagnostics->addRawDihedralForces(
+                atomIndexI, forceI, atomIndexJ, forceJ, atomIndexK, forceK, atomIndexL, forceL);
+    }
+    GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
 }
 
 } // namespace

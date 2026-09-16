@@ -32,7 +32,9 @@
  * the research papers on the package. Check out https://www.gromacs.org.
  */
 /*! \internal \file
- * \brief Host-side GaMD statistics and adaptive threshold calculations.
+ * \brief Evaluates GaMD population statistics and adaptive bias parameters.
+ *
+ * \ingroup module_applied_forces
  */
 #include "gmxpre.h"
 
@@ -42,13 +44,16 @@
 
 #include <algorithm>
 
+//! \cond internal
 namespace gmx
 {
 
-void calculateThresholdAndForceConstant(int thresholdMode, double sigmaLimit, GaMDEnergyStatistics& statistics)
+void calculateThresholdAndForceConstant(int                                     thresholdMode,
+                                        double                                  sigmaLimit,
+                                        compat::not_null<GaMDEnergyStatistics*> statistics)
 {
-    if (statistics.maximum <= statistics.minimum || statistics.deviation < 1e-6
-        || statistics.maximum == statistics.average)
+    if (statistics->maximum <= statistics->minimum || statistics->deviation < 1e-6
+        || statistics->maximum == statistics->average)
     {
         return;
     }
@@ -56,72 +61,76 @@ void calculateThresholdAndForceConstant(int thresholdMode, double sigmaLimit, Ga
     // 保留原来的上下界选择和回退条件，避免重构改变平衡阶段的参数。
     if (thresholdMode == 1)
     {
-        statistics.threshold                 = statistics.maximum;
-        const double normalizedForceConstant = (sigmaLimit / statistics.deviation)
-                                               * (statistics.maximum - statistics.minimum)
-                                               / (statistics.maximum - statistics.average);
-        statistics.k0 = std::min(1.0, normalizedForceConstant);
+        statistics->threshold                = statistics->maximum;
+        const double normalizedForceConstant = (sigmaLimit / statistics->deviation)
+                                               * (statistics->maximum - statistics->minimum)
+                                               / (statistics->maximum - statistics->average);
+        statistics->k0 = std::min(1.0, normalizedForceConstant);
     }
     else if (thresholdMode == 2)
     {
-        const double upperForceConstant = (1.0 - sigmaLimit / statistics.deviation)
-                                          * (statistics.maximum - statistics.minimum)
-                                          / std::max(1e-6, statistics.average - statistics.minimum);
+        const double upperForceConstant = (1.0 - sigmaLimit / statistics->deviation)
+                                          * (statistics->maximum - statistics->minimum)
+                                          / std::max(1e-6, statistics->average - statistics->minimum);
         if (upperForceConstant > 0.0 && upperForceConstant <= 1.0)
         {
-            statistics.k0 = upperForceConstant;
-            statistics.threshold =
-                    statistics.minimum + (statistics.maximum - statistics.minimum) / statistics.k0;
+            statistics->k0 = upperForceConstant;
+            statistics->threshold =
+                    statistics->minimum + (statistics->maximum - statistics->minimum) / statistics->k0;
         }
         else
         {
-            statistics.threshold                 = statistics.maximum;
-            const double normalizedForceConstant = (sigmaLimit / statistics.deviation)
-                                                   * (statistics.maximum - statistics.minimum)
-                                                   / (statistics.maximum - statistics.average);
-            statistics.k0 = std::min(1.0, normalizedForceConstant);
+            statistics->threshold                = statistics->maximum;
+            const double normalizedForceConstant = (sigmaLimit / statistics->deviation)
+                                                   * (statistics->maximum - statistics->minimum)
+                                                   / (statistics->maximum - statistics->average);
+            statistics->k0 = std::min(1.0, normalizedForceConstant);
         }
     }
-    statistics.forceConstant = statistics.k0 / std::max(1e-6, statistics.maximum - statistics.minimum);
+    statistics->forceConstant = statistics->k0 / std::max(1e-6, statistics->maximum - statistics->minimum);
 }
 
-void updateGaMDStatistics(double energy, GaMDEnergyStatistics& statistics, GaMDWindowStatistics& window)
+void updateGaMDStatistics(double                                  energy,
+                          compat::not_null<GaMDEnergyStatistics*> statistics,
+                          compat::not_null<GaMDWindowStatistics*> window)
 {
-    if (energy > statistics.maximum)
+    if (energy > statistics->maximum)
     {
-        statistics.maximum = energy;
+        statistics->maximum = energy;
     }
-    if (energy < statistics.minimum)
+    if (energy < statistics->minimum)
     {
-        statistics.minimum = energy;
+        statistics->minimum = energy;
     }
-    statistics.count++;
+    statistics->count++;
 
     // 用原有的逐样本算法累计均值和平方偏差，续跑时仍可保存完整窗口。
-    window.count++;
-    const double previousDifference = energy - window.mean;
-    window.mean += previousDifference / window.count;
-    const double updatedDifference = energy - window.mean;
-    window.m2 += previousDifference * updatedDifference;
+    window->count++;
+    const double previousDifference = energy - window->mean;
+    window->mean += previousDifference / window->count;
+    const double updatedDifference = energy - window->mean;
+    window->m2 += previousDifference * updatedDifference;
 }
 
-void finalizeWindowStatistics(GaMDWindowStatistics& window, GaMDEnergyStatistics& statistics)
+void finalizeWindowStatistics(compat::not_null<GaMDWindowStatistics*> window,
+                              compat::not_null<GaMDEnergyStatistics*> statistics)
 {
-    if (window.count <= 0)
+    if (window->count <= 0)
     {
         return;
     }
 
-    statistics.average = window.mean;
-    if (window.count > 1)
+    statistics->average = window->mean;
+    if (window->count > 1)
     {
-        statistics.deviation = std::sqrt(window.m2 / window.count);
+        statistics->deviation = std::sqrt(window->m2 / window->count);
     }
     else
     {
-        statistics.deviation = 0.0;
+        statistics->deviation = 0.0;
     }
-    window = {};
+    *window = {};
 }
 
 } // namespace gmx
+//! \endcond

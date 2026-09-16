@@ -31,6 +31,11 @@
  * To help us fund GROMACS development, we humbly ask that you cite
  * the research papers on the package. Check out https://www.gromacs.org.
  */
+/*! \internal \file
+ * \brief Owns CUDA buffers, bindings and deferred GaMD sample batches.
+ *
+ * \ingroup module_applied_forces
+ */
 
 #include "gmxpre.h"
 
@@ -45,17 +50,20 @@
 #include "gromacs/timing/wallcycle.h"
 #include "gromacs/topology/ifunc.h"
 #include "gromacs/utility/arrayref.h"
-#include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/gmxassert.h"
+#include "gromacs/utility/stringutil.h"
 
 #include "gamdgpu_impl.h"
 
+//! \cond internal
 namespace gmx
 {
 
 namespace
 {
 
+/*! \internal \brief Checks whether the listed interaction type contains unsupported perturbations. */
 bool hasPerturbedEntries(const InteractionDefinitions& interactionDefinitions, int functionType)
 {
     GMX_ASSERT(interactionDefinitions.ilsort == ilsortNO_FE || interactionDefinitions.ilsort == ilsortFE_SORTED,
@@ -114,12 +122,12 @@ GaMDGpuExecutor::Impl::Impl(const bool           useGpuResidentGaMD,
         allocateDeviceBuffer(&d_gamdState_, c_gaMDStateSize, deviceContext_);
         if (useGpuResidentGaMD_)
         {
-            allocateDeviceBuffer(&d_gamdEnergyHistory_, c_historyCapacity * F_NRE, deviceContext_);
-            allocateDeviceBuffer(&d_gamdForceVirialHistory_, c_historyCapacity * DIM * DIM, deviceContext_);
+            allocateDeviceBuffer(&d_gamdEnergyHistory_, sc_historyCapacity * F_NRE, deviceContext_);
+            allocateDeviceBuffer(&d_gamdForceVirialHistory_, sc_historyCapacity * DIM * DIM, deviceContext_);
             allocateDeviceBuffer(&d_gamdEnergyHistoryCount_, 1, deviceContext_);
             clearDeviceBufferAsync(&d_gamdEnergyHistoryCount_, 0, 1, deviceStream_);
-            h_gamdEnergyHistory_.resize(c_historyCapacity * F_NRE);
-            h_gamdForceVirialHistory_.resize(c_historyCapacity * DIM * DIM);
+            h_gamdEnergyHistory_.resize(sc_historyCapacity * F_NRE);
+            h_gamdForceVirialHistory_.resize(sc_historyCapacity * DIM * DIM);
             h_gamdEnergyHistoryCount_.resize(1);
         }
         if (gamdEnergyShadowDiagnosticsEnabled_)
@@ -243,14 +251,14 @@ void GaMDGpuExecutor::Impl::initializeUpdateHistory(const int           numTempe
     updateNumTemperatureGroups_ = numTemperatureGroups;
 
     // 固定容量覆盖两次 host staging 之间的生产步，避免普通步重新分配和同步。
-    allocateDeviceBuffer(&d_updateConstraintVirialHistory_, c_historyCapacity * DIM * DIM, deviceContext_);
+    allocateDeviceBuffer(&d_updateConstraintVirialHistory_, sc_historyCapacity * DIM * DIM, deviceContext_);
     allocateDeviceBuffer(&d_updateConstraintVirialHistoryCount_, 1, deviceContext_);
     allocateDeviceBuffer(&d_updateCurrentHalfKinetic_, 6 + updateNumTemperatureGroups_, deviceContext_);
     allocateDeviceBuffer(&d_updatePreviousHalfKinetic_, 6 + updateNumTemperatureGroups_, deviceContext_);
     allocateDeviceBuffer(
             &d_updateGroupHalfKineticTensor_, updateNumTemperatureGroups_ * DIM * DIM, deviceContext_);
     allocateDeviceBuffer(&d_updateKineticHistory_,
-                         c_historyCapacity * (DIM * DIM + updateNumTemperatureGroups_),
+                         sc_historyCapacity * (DIM * DIM + updateNumTemperatureGroups_),
                          deviceContext_);
     allocateDeviceBuffer(&d_updateKineticHistoryCount_, 1, deviceContext_);
 
@@ -258,9 +266,9 @@ void GaMDGpuExecutor::Impl::initializeUpdateHistory(const int           numTempe
     clearDeviceBufferAsync(&d_updatePreviousHalfKinetic_, 0, 6 + updateNumTemperatureGroups_, *updateStream_);
     clearDeviceBufferAsync(&d_updateKineticHistoryCount_, 0, 1, *updateStream_);
 
-    h_updateConstraintVirialHistory_.resize(c_historyCapacity * DIM * DIM);
+    h_updateConstraintVirialHistory_.resize(sc_historyCapacity * DIM * DIM);
     h_updateConstraintVirialHistoryCount_.resize(1);
-    h_updateKineticHistory_.resize(c_historyCapacity * (DIM * DIM + updateNumTemperatureGroups_));
+    h_updateKineticHistory_.resize(sc_historyCapacity * (DIM * DIM + updateNumTemperatureGroups_));
     h_updatePreviousHalfKinetic_.resize(updateNumTemperatureGroups_ * DIM * DIM);
     h_updateKineticHistoryCount_.resize(1);
 }
@@ -324,7 +332,7 @@ std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::Impl::takeUpdateConstr
                          GpuApiCallBehavior::Sync,
                          nullptr);
     const int sampleCount = h_updateConstraintVirialHistoryCount_[0];
-    GMX_RELEASE_ASSERT(sampleCount <= c_historyCapacity,
+    GMX_RELEASE_ASSERT(sampleCount <= sc_historyCapacity,
                        "GaMD deferred constraint-virial history exceeded its fixed capacity");
     if (sampleCount == 0)
     {
@@ -361,7 +369,7 @@ GaMDKineticEnergyHistory GaMDGpuExecutor::Impl::takeUpdateKineticEnergyHistory()
                          GpuApiCallBehavior::Sync,
                          nullptr);
     const int sampleCount = h_updateKineticHistoryCount_[0];
-    GMX_RELEASE_ASSERT(sampleCount <= c_historyCapacity,
+    GMX_RELEASE_ASSERT(sampleCount <= sc_historyCapacity,
                        "GaMD deferred kinetic history exceeded its fixed capacity");
     GaMDKineticEnergyHistory history;
     history.numGroups = updateNumTemperatureGroups_;
@@ -430,19 +438,19 @@ void GaMDGpuExecutor::Impl::bindListedForceBuffers(ArrayRef<const int> nbnxnAtom
     {
         if (!interactionDefinitions.il[F_FOURDIHS].empty())
         {
-            gmx_fatal(FARGS,
-                      "The GaMD GPU force path does not support FOURDIHS. Use -update cpu or "
-                      "add CUDA FOURDIHS support before using this topology.");
+            GMX_THROW(InconsistentInputError(
+                    "The GaMD GPU force path does not support FOURDIHS. Use -update cpu or "
+                    "add CUDA FOURDIHS support before using this topology."));
         }
         for (const int functionType : { F_PDIHS, F_RBDIHS, F_CMAP })
         {
             if (!interactionDefinitions.il[functionType].empty()
                 && hasPerturbedEntries(interactionDefinitions, functionType))
             {
-                gmx_fatal(FARGS,
-                          "The GaMD GPU force path does not support perturbed %s interactions. "
-                          "Use -update cpu for this topology.",
-                          interaction_function[functionType].longname);
+                GMX_THROW(InconsistentInputError(formatString(
+                        "The GaMD GPU force path does not support perturbed %s interactions. "
+                        "Use -update cpu for this topology.",
+                        interaction_function[functionType].longname)));
             }
         }
 
@@ -635,14 +643,19 @@ void GaMDGpuExecutor::bindListedForceBuffers(ArrayRef<const int>           nbnxn
                                              DeviceBuffer<float> shortRangeElectrostaticEnergy,
                                              DeviceBuffer<float> listedEnergies)
 {
-    impl_->bindListedForceBuffers(nbnxnAtomOrder,
-                                  interactionDefinitions,
-                                  coordinatesAndCharges,
-                                  forces,
-                                  shiftForces,
-                                  shortRangeLennardJonesEnergy,
-                                  shortRangeElectrostaticEnergy,
-                                  listedEnergies);
+    // 调用方已发起异步上传；拓扑错误必须在这里收口，不能展开其调用栈。
+    try
+    {
+        impl_->bindListedForceBuffers(nbnxnAtomOrder,
+                                      interactionDefinitions,
+                                      coordinatesAndCharges,
+                                      forces,
+                                      shiftForces,
+                                      shortRangeLennardJonesEnergy,
+                                      shortRangeElectrostaticEnergy,
+                                      listedEnergies);
+    }
+    GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
 }
 
 void GaMDGpuExecutor::setPbc(const PbcAiuc& pbcAiuc)
@@ -686,13 +699,13 @@ GaMDHistoryBatch GaMDGpuExecutor::Impl::takeHistory()
 {
     // 保持原来的两条流的读取顺序，在返回之前统一检查四组记录。
     GaMDHistoryBatch history;
-    history.energySamples         = takeGamdEnergyHistory();
-    history.forceVirials          = takeGamdForceVirialHistory(history.energySamples.size());
-    history.constraintVirials     = takeUpdateConstraintVirialHistory();
-    history.kineticEnergy         = takeUpdateKineticEnergyHistory();
-    const std::size_t sampleCount = history.energySamples.size();
-    GMX_RELEASE_ASSERT(history.forceVirials.size() == sampleCount && history.constraintVirials.size() == sampleCount
-                               && history.kineticEnergy.totalTensors.size() == sampleCount,
+    history.energySamples     = takeGamdEnergyHistory();
+    history.forceVirials      = takeGamdForceVirialHistory(history.energySamples.size());
+    history.constraintVirials = takeUpdateConstraintVirialHistory();
+    history.kineticEnergy     = takeUpdateKineticEnergyHistory();
+    const Index sampleCount   = ssize(history.energySamples);
+    GMX_RELEASE_ASSERT(ssize(history.forceVirials) == sampleCount && ssize(history.constraintVirials) == sampleCount
+                               && ssize(history.kineticEnergy.totalTensors) == sampleCount,
                        "Deferred GaMD energy, virial, and kinetic sample counts must match");
     GMX_RELEASE_ASSERT(history.kineticEnergy.groupKineticEnergies.size()
                                == sampleCount * history.kineticEnergy.numGroups,
@@ -783,3 +796,4 @@ GpuEventSynchronizer* GaMDGpuExecutor::forcesReadyEvent()
 }
 
 } // namespace gmx
+//! \endcond

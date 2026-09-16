@@ -33,6 +33,8 @@
  */
 /*! \internal \file
  * \brief Analytical checks for the shared GaMD scientific core.
+ *
+ * \ingroup module_applied_forces
  */
 #include "gmxpre.h"
 
@@ -142,12 +144,12 @@ TEST(GaMDMathTest, WindowsUsePopulationVarianceAndCanBeResumed)
 {
     GaMDEnergyStatistics statistics;
     GaMDWindowStatistics window;
-    updateGaMDStatistics(2.0, statistics, window);
-    updateGaMDStatistics(4.0, statistics, window);
+    updateGaMDStatistics(2.0, compat::make_not_null(&statistics), compat::make_not_null(&window));
+    updateGaMDStatistics(4.0, compat::make_not_null(&statistics), compat::make_not_null(&window));
     GaMDWindowStatistics resumedWindow = window;
-    updateGaMDStatistics(6.0, statistics, resumedWindow);
-    updateGaMDStatistics(8.0, statistics, resumedWindow);
-    finalizeWindowStatistics(resumedWindow, statistics);
+    updateGaMDStatistics(6.0, compat::make_not_null(&statistics), compat::make_not_null(&resumedWindow));
+    updateGaMDStatistics(8.0, compat::make_not_null(&statistics), compat::make_not_null(&resumedWindow));
+    finalizeWindowStatistics(compat::make_not_null(&resumedWindow), compat::make_not_null(&statistics));
     EXPECT_EQ(statistics.count, 4);
     EXPECT_DOUBLE_EQ(statistics.minimum, 2.0);
     EXPECT_DOUBLE_EQ(statistics.maximum, 8.0);
@@ -156,7 +158,7 @@ TEST(GaMDMathTest, WindowsUsePopulationVarianceAndCanBeResumed)
     EXPECT_EQ(resumedWindow.count, 0);
     EXPECT_DOUBLE_EQ(resumedWindow.mean, 0.0);
     EXPECT_DOUBLE_EQ(resumedWindow.m2, 0.0);
-    finalizeWindowStatistics(resumedWindow, statistics);
+    finalizeWindowStatistics(compat::make_not_null(&resumedWindow), compat::make_not_null(&statistics));
     EXPECT_DOUBLE_EQ(statistics.average, 5.0);
     EXPECT_DOUBLE_EQ(statistics.deviation, std::sqrt(5.0));
 }
@@ -168,15 +170,15 @@ TEST(GaMDMathTest, ThresholdPoliciesIncludeUpperBoundFallback)
     statistics.maximum   = 10.0;
     statistics.average   = 5.0;
     statistics.deviation = 2.0;
-    calculateThresholdAndForceConstant(1, 1.5, statistics);
+    calculateThresholdAndForceConstant(1, 1.5, compat::make_not_null(&statistics));
     EXPECT_DOUBLE_EQ(statistics.threshold, 10.0);
     EXPECT_DOUBLE_EQ(statistics.k0, 1.0);
     EXPECT_DOUBLE_EQ(statistics.forceConstant, 0.1);
-    calculateThresholdAndForceConstant(2, 1.5, statistics);
+    calculateThresholdAndForceConstant(2, 1.5, compat::make_not_null(&statistics));
     EXPECT_DOUBLE_EQ(statistics.threshold, 20.0);
     EXPECT_DOUBLE_EQ(statistics.k0, 0.5);
     EXPECT_DOUBLE_EQ(statistics.forceConstant, 0.05);
-    calculateThresholdAndForceConstant(2, 0.5, statistics);
+    calculateThresholdAndForceConstant(2, 0.5, compat::make_not_null(&statistics));
     EXPECT_DOUBLE_EQ(statistics.threshold, 10.0);
     EXPECT_DOUBLE_EQ(statistics.k0, 0.5);
     EXPECT_DOUBLE_EQ(statistics.forceConstant, 0.05);
@@ -188,9 +190,9 @@ TEST(GaMDMathTest, DegenerateWindowPreservesThePreviousBias)
     GaMDWindowStatistics window;
     statistics.threshold     = 20.0;
     statistics.forceConstant = 0.05;
-    updateGaMDStatistics(4.0, statistics, window);
-    finalizeWindowStatistics(window, statistics);
-    calculateThresholdAndForceConstant(1, 1.0, statistics);
+    updateGaMDStatistics(4.0, compat::make_not_null(&statistics), compat::make_not_null(&window));
+    finalizeWindowStatistics(compat::make_not_null(&window), compat::make_not_null(&statistics));
+    calculateThresholdAndForceConstant(1, 1.0, compat::make_not_null(&statistics));
     EXPECT_DOUBLE_EQ(statistics.deviation, 0.0);
     EXPECT_DOUBLE_EQ(statistics.threshold, 20.0);
     EXPECT_DOUBLE_EQ(statistics.forceConstant, 0.05);

@@ -32,38 +32,51 @@
  * the research papers on the package. Check out https://www.gromacs.org.
  */
 /*! \internal \file
- * \brief Strict legacy GaMD parameter parsing and validation.
+ * \brief Reads and validates legacy GaMD input with native text utilities.
+ *
+ * \ingroup module_applied_forces
  */
 #include "gmxpre.h"
 
 #include <cinttypes>
 #include <cmath>
-#include <cstdio>
 
-#include <fstream>
 #include <limits>
 #include <set>
-#include <sstream>
 #include <string>
 
-#include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/exceptions.h"
+#include "gromacs/utility/path.h"
+#include "gromacs/utility/strconvert.h"
+#include "gromacs/utility/stringutil.h"
+#include "gromacs/utility/textreader.h"
 
+#include "gamddiagnostics.h"
 #include "gamdruntime.h"
 
+//! \cond internal
 namespace gmx
 {
 namespace
 {
 
+/*! \internal \brief Rejects a missing mandatory legacy input key. */
 void requireParameter(const std::set<std::string>& providedParameters, const char* requiredKey)
 {
     if (providedParameters.count(requiredKey) == 0)
     {
-        gmx_fatal(FARGS, "Required GaMD parameter '%s' is missing from gamd.in.", requiredKey);
+        GMX_THROW(InvalidInputError(
+                formatString("Required GaMD parameter '%s' is missing from gamd.in.", requiredKey)));
     }
 }
 
 } // namespace
+
+std::vector<std::string> splitGaMDInputLine(const std::string& line)
+{
+    // substr 接受 npos，既支持无注释的整行，也支持紧跟数值的 # / ; 注释。
+    return splitString(line.substr(0, line.find_first_of("#;")));
+}
 
 std::string gaMDStageParameterError(const GaMDParameters& parameters)
 {
@@ -97,129 +110,130 @@ void GaMDRuntime::loadParameters(int rank)
         return;
     }
 
-    std::ifstream input("gamd.in");
-    if (!input.is_open())
+    if (!File::exists("gamd.in", File::returnFalseOnError))
     {
-        gmx_fatal(FARGS, "GaMD is enabled but required parameter file 'gamd.in' was not found.");
+        GMX_THROW(FileIOError(
+                "GaMD is enabled but required parameter file 'gamd.in' was not found."));
     }
-
+    TextReader            input("gamd.in");
     std::set<std::string> providedParameters;
     std::string           lineText;
-    std::string           parameterName;
     int64_t               lineNumber = 0;
 
-    while (std::getline(input, lineText))
+    while (input.readLine(&lineText))
     {
         lineNumber++;
-        std::istringstream lineStream(lineText);
-        if (!(lineStream >> parameterName) || parameterName[0] == '#' || parameterName[0] == ';')
+        const std::vector<std::string> fields = splitGaMDInputLine(lineText);
+        if (fields.empty())
         {
             continue;
         }
-
-        // 每行先检查重复键，再读取目标字段，最后统一检查格式。
+        const std::string& parameterName = fields[0];
         if (!providedParameters.insert(parameterName).second)
         {
-            gmx_fatal(FARGS,
-                      "Duplicate GaMD parameter '%s' at gamd.in line %" PRId64 ".",
-                      parameterName.c_str(),
-                      lineNumber);
+            GMX_THROW(InvalidInputError(
+                    formatString("Duplicate GaMD parameter '%s' at gamd.in line %" PRId64 ".",
+                                 parameterName.c_str(),
+                                 lineNumber)));
         }
 
-        if (parameterName == "igamd")
+        // 统一使用项目的严格数值转换，失败时补上参数名和文件行号。
+        const char* value = "";
+        if (fields.size() >= 2)
         {
-            lineStream >> parameters_.boostType;
+            value = fields[1].c_str();
         }
-        else if (parameterName == "irest_gamd")
+        bool recognized = true;
+        try
         {
-            lineStream >> parameters_.restartMode;
+            if (parameterName == "igamd")
+            {
+                parameters_.boostType = intFromString(value);
+            }
+            else if (parameterName == "irest_gamd")
+            {
+                parameters_.restartMode = intFromString(value);
+            }
+            else if (parameterName == "iE")
+            {
+                parameters_.thresholdMode = intFromString(value);
+            }
+            else if (parameterName == "iEP")
+            {
+                parameters_.potentialMode = intFromString(value);
+            }
+            else if (parameterName == "iED")
+            {
+                parameters_.dihedralMode = intFromString(value);
+            }
+            else if (parameterName == "ntcmdprep")
+            {
+                parameters_.conventionalPrepEnd = int64FromString(value);
+            }
+            else if (parameterName == "ntcmd")
+            {
+                parameters_.conventionalEnd = int64FromString(value);
+            }
+            else if (parameterName == "ntebprep")
+            {
+                parameters_.boostPrepLength = int64FromString(value);
+            }
+            else if (parameterName == "nteb")
+            {
+                parameters_.boostLength = int64FromString(value);
+            }
+            else if (parameterName == "ntave")
+            {
+                parameters_.averagingWindow = int64FromString(value);
+            }
+            else if (parameterName == "reweight_nst")
+            {
+                parameters_.reweightInterval = int64FromString(value);
+            }
+            else if (parameterName == "para_nst")
+            {
+                parameters_.parameterInterval = int64FromString(value);
+            }
+            else if (parameterName == "sigma0P")
+            {
+                parameters_.potentialSigmaLimit = doubleFromString(value) * 4.184;
+            }
+            else if (parameterName == "sigma0D")
+            {
+                parameters_.dihedralSigmaLimit = doubleFromString(value) * 4.184;
+            }
+            else if (parameterName == "debug")
+            {
+                debug_ = intFromString(value);
+            }
+            else
+            {
+                recognized = false;
+            }
         }
-        else if (parameterName == "iE")
+        catch (const InvalidInputError&)
         {
-            lineStream >> parameters_.thresholdMode;
+            GMX_THROW(InvalidInputError(formatString(
+                    "Missing or invalid value for GaMD parameter '%s' at gamd.in line %" PRId64 ".",
+                    parameterName.c_str(),
+                    lineNumber)));
         }
-        else if (parameterName == "iEP")
+        if (!recognized)
         {
-            lineStream >> parameters_.potentialMode;
+            GMX_THROW(InvalidInputError(formatString(
+                    "Unknown GaMD parameter '%s' at gamd.in line %" PRId64 ".", parameterName.c_str(), lineNumber)));
         }
-        else if (parameterName == "iED")
+        if (fields.size() > 2)
         {
-            lineStream >> parameters_.dihedralMode;
-        }
-        else if (parameterName == "ntcmdprep")
-        {
-            lineStream >> parameters_.conventionalPrepEnd;
-        }
-        else if (parameterName == "ntcmd")
-        {
-            lineStream >> parameters_.conventionalEnd;
-        }
-        else if (parameterName == "ntebprep")
-        {
-            lineStream >> parameters_.boostPrepLength;
-        }
-        else if (parameterName == "nteb")
-        {
-            lineStream >> parameters_.boostLength;
-        }
-        else if (parameterName == "ntave")
-        {
-            lineStream >> parameters_.averagingWindow;
-        }
-        else if (parameterName == "reweight_nst")
-        {
-            lineStream >> parameters_.reweightInterval;
-        }
-        else if (parameterName == "para_nst")
-        {
-            lineStream >> parameters_.parameterInterval;
-        }
-        else if (parameterName == "sigma0P")
-        {
-            double sigmaLimitKcal = 0.0;
-            lineStream >> sigmaLimitKcal;
-            parameters_.potentialSigmaLimit = sigmaLimitKcal * 4.184;
-        }
-        else if (parameterName == "sigma0D")
-        {
-            double sigmaLimitKcal = 0.0;
-            lineStream >> sigmaLimitKcal;
-            parameters_.dihedralSigmaLimit = sigmaLimitKcal * 4.184;
-        }
-        else if (parameterName == "debug")
-        {
-            lineStream >> debug_;
-        }
-        else
-        {
-            gmx_fatal(FARGS,
-                      "Unknown GaMD parameter '%s' at gamd.in line %" PRId64 ".",
-                      parameterName.c_str(),
-                      lineNumber);
-        }
-        if (!lineStream)
-        {
-            gmx_fatal(FARGS,
-                      "Missing or invalid value for GaMD parameter '%s' at gamd.in line %" PRId64
-                      ".",
-                      parameterName.c_str(),
-                      lineNumber);
-        }
-        std::string trailing;
-        if ((lineStream >> trailing) && trailing[0] != '#' && trailing[0] != ';')
-        {
-            gmx_fatal(FARGS,
-                      "Unexpected trailing token '%s' for GaMD parameter '%s' at gamd.in line "
-                      "%" PRId64 ".",
-                      trailing.c_str(),
-                      parameterName.c_str(),
-                      lineNumber);
+            GMX_THROW(
+                    InvalidInputError(formatString("Unexpected trailing token '%s' for GaMD "
+                                                   "parameter '%s' at gamd.in line %" PRId64 ".",
+                                                   fields[2].c_str(),
+                                                   parameterName.c_str(),
+                                                   lineNumber)));
         }
     }
-    if (input.bad())
-    {
-        gmx_fatal(FARGS, "Failed while reading required parameter file 'gamd.in'.");
-    }
+    input.close();
 
     requireParameter(providedParameters, "igamd");
     requireParameter(providedParameters, "iE");
@@ -227,32 +241,39 @@ void GaMDRuntime::loadParameters(int rank)
 
     if (parameters_.boostType < 1 || parameters_.boostType > 3)
     {
-        gmx_fatal(FARGS, "GaMD parameter igamd must be 1, 2, or 3; got %d.", parameters_.boostType);
+        GMX_THROW(InvalidInputError(formatString("GaMD parameter igamd must be 1, 2, or 3; got %d.",
+                                                 parameters_.boostType)));
     }
     if (parameters_.restartMode != 0 && parameters_.restartMode != 1)
     {
-        gmx_fatal(FARGS, "GaMD parameter irest_gamd must be 0 or 1; got %d.", parameters_.restartMode);
+        GMX_THROW(InvalidInputError(formatString(
+                "GaMD parameter irest_gamd must be 0 or 1; got %d.", parameters_.restartMode)));
     }
     if (parameters_.thresholdMode < 1 || parameters_.thresholdMode > 2 || parameters_.potentialMode < 1
         || parameters_.potentialMode > 2 || parameters_.dihedralMode < 1 || parameters_.dihedralMode > 2)
     {
-        gmx_fatal(FARGS, "GaMD parameters iE, iEP, and iED must each be 1 or 2.");
+        GMX_THROW(InvalidInputError("GaMD parameters iE, iEP, and iED must each be 1 or 2."));
     }
     if (parameters_.reweightInterval <= 0)
     {
-        gmx_fatal(FARGS,
-                  "GaMD parameter reweight_nst must be positive; got %" PRId64 ".",
-                  parameters_.reweightInterval);
+        GMX_THROW(InvalidInputError(
+                formatString("GaMD parameter reweight_nst must be positive; got %" PRId64 ".",
+                             parameters_.reweightInterval)));
     }
     if (parameters_.parameterInterval < 0)
     {
-        gmx_fatal(FARGS,
-                  "GaMD parameter para_nst must be non-negative; got %" PRId64 ".",
-                  parameters_.parameterInterval);
+        GMX_THROW(InvalidInputError(
+                formatString("GaMD parameter para_nst must be non-negative; got %" PRId64 ".",
+                             parameters_.parameterInterval)));
     }
     if (debug_ != 0 && debug_ != 1)
     {
-        gmx_fatal(FARGS, "GaMD parameter debug must be 0 or 1; got %d.", debug_);
+        GMX_THROW(InvalidInputError(formatString("GaMD parameter debug must be 0 or 1; got %d.", debug_)));
+    }
+
+    if (!std::isfinite(parameters_.potentialSigmaLimit) || !std::isfinite(parameters_.dihedralSigmaLimit))
+    {
+        GMX_THROW(InvalidInputError("GaMD sigma0P and sigma0D must be finite."));
     }
 
     const bool usesPotentialBoost = (parameters_.boostType == 1 || parameters_.boostType == 3);
@@ -263,7 +284,7 @@ void GaMDRuntime::loadParameters(int rank)
         requireParameter(providedParameters, "sigma0P");
         if (!std::isfinite(parameters_.potentialSigmaLimit) || parameters_.potentialSigmaLimit <= 0.0)
         {
-            gmx_fatal(FARGS, "GaMD parameter sigma0P must be finite and positive.");
+            GMX_THROW(InvalidInputError("GaMD parameter sigma0P must be finite and positive."));
         }
     }
     if (usesDihedralBoost)
@@ -272,7 +293,7 @@ void GaMDRuntime::loadParameters(int rank)
         requireParameter(providedParameters, "sigma0D");
         if (!std::isfinite(parameters_.dihedralSigmaLimit) || parameters_.dihedralSigmaLimit <= 0.0)
         {
-            gmx_fatal(FARGS, "GaMD parameter sigma0D must be finite and positive.");
+            GMX_THROW(InvalidInputError("GaMD parameter sigma0D must be finite and positive."));
         }
     }
 
@@ -287,7 +308,7 @@ void GaMDRuntime::loadParameters(int rank)
         const std::string stageError = gaMDStageParameterError(parameters_);
         if (!stageError.empty())
         {
-            gmx_fatal(FARGS, "%s", stageError.c_str());
+            GMX_THROW(InvalidInputError(stageError));
         }
     }
 
@@ -295,24 +316,34 @@ void GaMDRuntime::loadParameters(int rank)
 
     if (rank == 0)
     {
-        std::fprintf(stderr, "\n=== GaMD Parameters Loaded from gamd.in ===\n");
-        std::fprintf(stderr, "igamd        = %d\n", parameters_.boostType);
-        std::fprintf(stderr, "irest_gamd   = %d\n", parameters_.restartMode);
-        std::fprintf(stderr, "iE           = %d\n", parameters_.thresholdMode);
-        std::fprintf(stderr, "iEP          = %d\n", parameters_.potentialMode);
-        std::fprintf(stderr, "iED          = %d\n", parameters_.dihedralMode);
-        std::fprintf(stderr, "ntcmdprep    = %" PRId64 "\n", parameters_.conventionalPrepEnd);
-        std::fprintf(stderr, "ntcmd        = %" PRId64 "\n", parameters_.conventionalEnd);
-        std::fprintf(stderr, "ntebprep     = %" PRId64 "\n", parameters_.boostPrepLength);
-        std::fprintf(stderr, "nteb         = %" PRId64 "\n", parameters_.boostLength);
-        std::fprintf(stderr, "ntave        = %" PRId64 "\n", parameters_.averagingWindow);
-        std::fprintf(stderr, "reweight_nst = %" PRId64 "\n", parameters_.reweightInterval);
-        std::fprintf(stderr, "para_nst     = %" PRId64 "\n", parameters_.parameterInterval);
-        std::fprintf(stderr, "sigma0P      = %.4f kJ/mol\n", parameters_.potentialSigmaLimit);
-        std::fprintf(stderr, "sigma0D      = %.4f kJ/mol\n", parameters_.dihedralSigmaLimit);
-        std::fprintf(stderr, "DEBUG MODE   = %d\n", debug_);
-        std::fprintf(stderr, "===========================================\n\n");
+        GMX_LOG(diagnostics_.logger().info)
+                .asParagraph()
+                .appendTextFormatted(
+                        "GaMD parameters loaded from gamd.in:\n"
+                        "igamd = %d, irest_gamd = %d, iE = %d, iEP = %d, iED = %d\n"
+                        "ntcmdprep = %" PRId64 ", ntcmd = %" PRId64 ", ntebprep = %" PRId64
+                        ", nteb = %" PRId64 ", ntave = %" PRId64
+                        "\n"
+                        "reweight_nst = %" PRId64 ", para_nst = %" PRId64
+                        "\n"
+                        "sigma0P = %.4f kJ/mol, sigma0D = %.4f kJ/mol, debug = %d",
+                        parameters_.boostType,
+                        parameters_.restartMode,
+                        parameters_.thresholdMode,
+                        parameters_.potentialMode,
+                        parameters_.dihedralMode,
+                        parameters_.conventionalPrepEnd,
+                        parameters_.conventionalEnd,
+                        parameters_.boostPrepLength,
+                        parameters_.boostLength,
+                        parameters_.averagingWindow,
+                        parameters_.reweightInterval,
+                        parameters_.parameterInterval,
+                        parameters_.potentialSigmaLimit,
+                        parameters_.dihedralSigmaLimit,
+                        debug_);
     }
 }
 
 } // namespace gmx
+//! \endcond
