@@ -186,17 +186,6 @@ struct gmx_mdoutf;
 struct gmx_shellfc_t;
 struct pme_load_balancing_t;
 
-namespace
-{
-
-bool doCRescalePressureCouplingThisStep(const t_inputrec& inputRecord, int64_t step)
-{
-    return inputRecord.pressureCouplingOptions.epc == PressureCoupling::CRescale
-           && do_per_step(step, inputRecord.pressureCouplingOptions.nstpcouple);
-}
-
-} // namespace
-
 using gmx::SimulationSignaller;
 
 void gmx::LegacySimulator::do_md()
@@ -901,10 +890,8 @@ void gmx::LegacySimulator::do_md()
 
     bool       usedMdGpuGraphLastStep = false;
     const bool useCurrentStepGaMD     = ir->bDoGaMD || getenv("GMX_USE_GAMD") != nullptr;
-    const bool useResidentEnergy      = simulationWork.useGpuResidentGaMD();
-    const bool useDeviceGlobals       = useResidentEnergy;
-    const bool useBufferedOutput      = useResidentEnergy;
-    gaMDModule_->setBufferedProductionOutputEnabled(useBufferedOutput);
+    const bool useGpuResidentGaMD     = simulationWork.useGpuResidentGaMD();
+    gaMDModule_->setBufferedProductionOutputEnabled(useGpuResidentGaMD);
     if (useCurrentStepGaMD)
     {
         // bonded 层只保存非拥有指针，所有诊断状态仍由当前 GaMD 模块实例管理。
@@ -1139,8 +1126,10 @@ void gmx::LegacySimulator::do_md()
         {
             gaMDModule_->diagnostics().logEnergyCadence(ir->nstcalcenergy, cr_->nodeid == 0);
 
-            const bool pressureCouplingThisStep = doCRescalePressureCouplingThisStep(*ir, step);
-            gaMDModule_->prepareStep(step, cr_->nodeid, pressureCouplingThisStep);
+            const bool cRescaleCouplingThisStep =
+                    ir->pressureCouplingOptions.epc == PressureCoupling::CRescale
+                    && do_per_step(step, ir->pressureCouplingOptions.nstpcouple);
+            gaMDModule_->prepareStep(step, cr_->nodeid, cRescaleCouplingThisStep);
             gaMDModule_->warnIfRunTooShort(ir->init_step, ir->nsteps, cr_->nodeid);
         }
 
@@ -1207,7 +1196,7 @@ void gmx::LegacySimulator::do_md()
         runScheduleWork_->stepWork = setupStepWorkload(
                 legacyForceFlags, ir->mtsLevels, step, runScheduleWork_->domainWork, simulationWork);
 
-        if (useCurrentStepGaMD && useResidentEnergy)
+        if (useCurrentStepGaMD && useGpuResidentGaMD)
         {
             if (simulationWork.gamdExecutionMode != GaMDExecutionMode::GpuResident
                 || fr_->listedForcesGpu == nullptr
@@ -1225,12 +1214,12 @@ void gmx::LegacySimulator::do_md()
                                         || gaMDModule_->requiresHostEnergyThisStep(step);
             runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost = needHostEnergy;
 
-            gaMDModule_->diagnostics().logResidentEnergy(useBufferedOutput, cr_->nodeid == 0);
+            gaMDModule_->diagnostics().logResidentEnergy(useGpuResidentGaMD, cr_->nodeid == 0);
         }
 
-        const bool useResidentOrdinaryStep = useCurrentStepGaMD && useResidentEnergy
-                                             && !runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost;
-        const bool useResidentGpuGraphThisStep = useResidentOrdinaryStep && useDeviceGlobals;
+        // 本步可延后主机统计和回传；CUDA Graph 是否执行仍由下面的条件决定。
+        const bool deferGaMDHostWork = useCurrentStepGaMD && useGpuResidentGaMD
+                                       && !runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost;
 
         const bool doTemperatureScaling = (ir->etc != TemperatureCoupling::No
                                            && do_per_step(step + ir->nsttcouple - 1, ir->nsttcouple));
@@ -1256,7 +1245,7 @@ void gmx::LegacySimulator::do_md()
         {
             // Reset graph on search step (due to changing neighbour list etc)
             // or virial step (due to changing shifts and box).
-            if (bNS || (bCalcVir && !useResidentGpuGraphThisStep))
+            if (bNS || (bCalcVir && !deferGaMDHostWork))
             {
                 fr_->mdGraph[MdGraphEvenOrOddStep::EvenStep]->reset();
                 fr_->mdGraph[MdGraphEvenOrOddStep::OddStep]->reset();
@@ -1264,11 +1253,10 @@ void gmx::LegacySimulator::do_md()
             else
             {
                 mdGraph->setUsedGraphLastStep(usedMdGpuGraphLastStep);
-                const bool hostGlobalWorkCompatibleWithGraph = useResidentGpuGraphThisStep;
-                bool       canUseMdGpuGraphThisStep =
-                        !bNS && (!bCalcVir || useResidentGpuGraphThisStep) && !doTemperatureScaling
-                        && !doParrinelloRahman && (!bGStat || hostGlobalWorkCompatibleWithGraph)
-                        && (!needHalfStepKineticEnergy || hostGlobalWorkCompatibleWithGraph)
+                bool canUseMdGpuGraphThisStep =
+                        !bNS && (!bCalcVir || deferGaMDHostWork) && !doTemperatureScaling
+                        && !doParrinelloRahman && (!bGStat || deferGaMDHostWork)
+                        && (!needHalfStepKineticEnergy || deferGaMDHostWork)
                         && !do_per_step(step, ir->nstxout) && !do_per_step(step, ir->nstxout_compressed)
                         && !do_per_step(step, ir->nstvout) && !do_per_step(step, ir->nstfout)
                         && !checkpointHandler->isCheckpointingStep();
@@ -1387,7 +1375,7 @@ void gmx::LegacySimulator::do_md()
                 }
 
                 // 最终总力诊断也由模块实例写出，避免跨模拟共享文件句柄和步号。
-                if (!useResidentEnergy)
+                if (!useGpuResidentGaMD)
                 {
                     gaMDModule_->diagnostics().dumpFinalForces(step, f.view().force(), MAIN(cr_));
                 }
@@ -1478,7 +1466,6 @@ void gmx::LegacySimulator::do_md()
             // Copy coordinate from the GPU for the output/checkpointing if the update is offloaded
             // and coordinates have not already been copied for i) search or ii) CPU force tasks.
             if (useGpuForUpdate && !bNS && !runScheduleWork_->domainWork.haveCpuLocalForceWork
-                && !simulationWork.requireCpuForceBufferForPostProcessing
                 && (do_per_step(step, ir->nstxout) || do_per_step(step, ir->nstxout_compressed)
                     || checkpointHandler->isCheckpointingStep()))
             {
@@ -1714,7 +1701,7 @@ void gmx::LegacySimulator::do_md()
                                      : stateGpu->getLocalForcesReadyOnDeviceEvent(
                                                runScheduleWork_->stepWork, runScheduleWork_->simulationWork));
 
-                    if (useCurrentStepGaMD && useResidentEnergy && useDeviceGlobals
+                    if (useCurrentStepGaMD && useGpuResidentGaMD
                         && runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost
                         && !deferredPressureBoxes.empty())
                     {
@@ -1730,7 +1717,7 @@ void gmx::LegacySimulator::do_md()
                         }
                     }
 
-                    const bool deferConstraintVirialToHost = useResidentOrdinaryStep;
+                    const bool deferConstraintVirialToHost = deferGaMDHostWork;
 
                     // This applies Leap-Frog, LINCS and SETTLE in succession
                     integrator->integrate(forcesReadyForUpdate,
@@ -1881,9 +1868,8 @@ void gmx::LegacySimulator::do_md()
          * the kinetic energy one step before communication.
          */
         {
-            const bool performHostGlobalReduction = bGStat && !useResidentGpuGraphThisStep;
-            const bool performHostHalfStepKinetic =
-                    needHalfStepKineticEnergy && !useResidentGpuGraphThisStep;
+            const bool performHostGlobalReduction = bGStat && !deferGaMDHostWork;
+            const bool performHostHalfStepKinetic = needHalfStepKineticEnergy && !deferGaMDHostWork;
             // Organize to do inter-simulation signalling on steps if
             // and when algorithms require it.
             const bool doInterSimSignal = (simulationsShareState && do_per_step(step, nstSignalComm));
@@ -2035,7 +2021,7 @@ void gmx::LegacySimulator::do_md()
         /* #### We now have r(t+dt) and v(t+dt/2)  ############# */
 
         /* The coordinates (x) were unshifted in update */
-        if (!bGStat || useResidentGpuGraphThisStep)
+        if (!bGStat || deferGaMDHostWork)
         {
             /* We will not sum ekinh_old,
              * so signal that we still have to do it.
@@ -2097,7 +2083,7 @@ void gmx::LegacySimulator::do_md()
             {
                 const bool outputDHDL = (computeDHDL && do_per_step(step, ir->fepvals->nstdhdl));
 
-                if (useCurrentStepGaMD && useResidentEnergy)
+                if (useCurrentStepGaMD && useGpuResidentGaMD)
                 {
                     if (runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost)
                     {
@@ -2177,18 +2163,12 @@ void gmx::LegacySimulator::do_md()
                                                                       deferredScalarPressures,
                                                                       deferredSurfaceTensions);
                         energyOutput.completeDeferredGpuEnergySamples(deferredEnergySamples);
-                        if (useBufferedOutput)
-                        {
-                            GMX_RELEASE_ASSERT(
-                                    deferredGamdOutputSteps.size() == deferredEnergySamples.size(),
-                                    "Buffered GaMD output steps and energy samples must match");
-                            gaMDModule_->writeBufferedProductionOutput(deferredGamdOutputSteps,
-                                                                       deferredEnergySamples,
-                                                                       step,
-                                                                       cr_->nodeid,
-                                                                       wallCycleCounters_);
-                            deferredGamdOutputSteps.clear();
-                        }
+                        GMX_RELEASE_ASSERT(
+                                deferredGamdOutputSteps.size() == deferredEnergySamples.size(),
+                                "Buffered GaMD output steps and energy samples must match");
+                        gaMDModule_->writeBufferedProductionOutput(
+                                deferredGamdOutputSteps, deferredEnergySamples, step, cr_->nodeid, wallCycleCounters_);
+                        deferredGamdOutputSteps.clear();
                         deferredPressureBoxes.clear();
                     }
                     else
@@ -2197,10 +2177,7 @@ void gmx::LegacySimulator::do_md()
                         std::array<real, DIM * DIM> pressureBox;
                         std::copy_n(lastbox[0], DIM * DIM, pressureBox.begin());
                         deferredPressureBoxes.push_back(pressureBox);
-                        if (useBufferedOutput)
-                        {
-                            deferredGamdOutputSteps.push_back(step);
-                        }
+                        deferredGamdOutputSteps.push_back(step);
                     }
                 }
 

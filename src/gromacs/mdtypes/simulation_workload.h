@@ -196,8 +196,6 @@ public:
     bool useGpuXBufferOpsWhenAllowed = false;
     //! If F buffer operations are allowed on GPU (actual use depends on other activities that step).
     bool useGpuFBufferOpsWhenAllowed = false;
-    //! If host-side force post-processing needs the final force buffer before GPU update.
-    bool requireCpuForceBufferForPostProcessing = false;
     //! Current-step GaMD execution mode selected for this simulation.
     GaMDExecutionMode gamdExecutionMode = GaMDExecutionMode::CpuReference;
     //! Whether the complete GPU-resident GaMD feature bundle is active.

@@ -129,6 +129,12 @@ a full batch is drained through ``takeHistory`` before appending another sample.
 The host list advances on graph replay too, so this needs no additional counter
 or per-step device readback.
 
+The MD loop uses ``useGpuResidentGaMD`` for the selected execution mode and
+``deferGaMDHostWork`` for steps that can postpone host statistics and readback.
+CUDA Graph eligibility and replay retain their own scheduling checks. CPU
+GaMD requires CPU update; GPU update requires the supported resident path.
+Native CPU force work still controls its coordinate copies and event waits.
+
 The legacy output synchronization helper checks ``ferror`` before treating a
 file as committed. An earlier failed write can leave no pending buffer, making
 the last ``fflush`` succeed; reconciliation must still stop before replacing

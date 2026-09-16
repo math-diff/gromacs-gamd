@@ -1058,9 +1058,7 @@ static int getExpectedLocalXReadyOnDeviceConsumptionCount(const SimulationWorklo
         // Event is consumed by force clearing which waits for the update to complete
         result++;
     }
-    const bool needCpuForceBufferBeforeUpdate =
-            domainWork.haveCpuLocalForceWork || simulationWork.requireCpuForceBufferForPostProcessing;
-    if (simulationWork.useGpuUpdate && needCpuForceBufferBeforeUpdate)
+    if (simulationWork.useGpuUpdate && domainWork.haveCpuLocalForceWork)
     {
         // Event is consumed when waiting for it on the CPU prior to CPU force buffer clearing.
         // The actual data dependency does not involve coordinates, but we use this event
@@ -1667,9 +1665,8 @@ void do_force(FILE*                         fplog,
     // hence copy is not needed.
     if (simulationWork.useGpuUpdate && !stepWork.doNeighborSearch
         && (runScheduleWork.domainWork.haveCpuLocalForceWork
-            || (stepWork.computeVirial && !useGpuGaMDShortRangeVirial)
-            || simulationWork.useCpuPmePpCommunication || simulationWork.useCpuHaloExchange
-            || simulationWork.computeMuTot || simulationWork.requireCpuForceBufferForPostProcessing))
+            || (stepWork.computeVirial && !useGpuGaMDShortRangeVirial) || simulationWork.useCpuPmePpCommunication
+            || simulationWork.useCpuHaloExchange || simulationWork.computeMuTot))
     {
         stateGpu->copyCoordinatesFromGpu(x.unpaddedArrayRef(), AtomLocality::Local);
         haveCopiedXFromGpu = true;
@@ -1944,9 +1941,7 @@ void do_force(FILE*                         fplog,
     // force reduction has already completed. To minimize the cross-step dependencies
     // we wait on the coordinates to be updated on the device which is sufficient but
     // a later event than what we strictly need to synchronize with.
-    const bool needCpuForceBufferBeforeUpdate =
-            domainWork.haveCpuLocalForceWork || simulationWork.requireCpuForceBufferForPostProcessing;
-    if (simulationWork.useGpuUpdate && needCpuForceBufferBeforeUpdate)
+    if (simulationWork.useGpuUpdate && domainWork.haveCpuLocalForceWork)
     {
         const bool coordinatesAlreadyUpdatedOnDevice =
                 stepWork.doNeighborSearch || simulationWork.useCpuHaloExchange
@@ -2003,8 +1998,7 @@ void do_force(FILE*                         fplog,
     {
         const bool needCoordsOnHost = (runScheduleWork.domainWork.haveCpuLocalForceWork
                                        || (stepWork.computeVirial && !useGpuGaMDShortRangeVirial)
-                                       || simulationWork.computeMuTot
-                                       || simulationWork.requireCpuForceBufferForPostProcessing);
+                                       || simulationWork.computeMuTot);
         const bool haveAlreadyWaited =
                 simulationWork.useCpuHaloExchange
                 || (stepWork.computePmeOnSeparateRank && !pmeSendCoordinatesFromGpu);
