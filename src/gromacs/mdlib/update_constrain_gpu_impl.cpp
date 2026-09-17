@@ -87,10 +87,8 @@ void UpdateConstrainGpu::Impl::integrate(GpuEventSynchronizer*             fRead
     wallcycle_start_nocount(wcycle_, WallCycleCounter::LaunchGpuPp);
     wallcycle_sub_start(wcycle_, WallCycleSubCounter::LaunchGpuUpdateConstrain);
 
-    if (!computeVirial)
-    {
-        clear_mat(virial);
-    }
+    // 先清空主机约束维里，立即回传时再累加本步贡献。
+    clear_mat(virial);
 
     // Make sure that the forces are ready on device before proceeding with the update.
     fReadyOnDevice->enqueueWaitEvent(deviceStream_);
@@ -109,7 +107,6 @@ void UpdateConstrainGpu::Impl::integrate(GpuEventSynchronizer*             fRead
 
         if (computeVirial && deferVirialToHost)
         {
-            clear_mat(virial);
             GMX_RELEASE_ASSERT(gaMDGpuExecutor_ != nullptr,
                                "Deferred constraint virial requires the GaMD GPU executor");
             gaMDGpuExecutor_->recordConstraintVirial(lincsGpu_->virialDeviceBuffer(),
@@ -120,7 +117,6 @@ void UpdateConstrainGpu::Impl::integrate(GpuEventSynchronizer*             fRead
         }
         else if (computeVirial)
         {
-            clear_mat(virial);
             lincsGpu_->copyVirialToHost(virial);
             settleGpu_->copyVirialToHost(virial);
 
@@ -133,10 +129,6 @@ void UpdateConstrainGpu::Impl::integrate(GpuEventSynchronizer*             fRead
         {
             gaMDGpuExecutor_->recordKineticEnergy(deferVirialToHost);
         }
-    }
-    else
-    {
-        clear_mat(virial);
     }
 
     xUpdatedOnDeviceEvent_.markEvent(deviceStream_);
