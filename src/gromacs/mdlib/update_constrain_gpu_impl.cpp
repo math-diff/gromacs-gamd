@@ -120,7 +120,13 @@ void UpdateConstrainGpu::Impl::integrate(GpuEventSynchronizer*             fRead
         }
         else if (computeVirial)
         {
-            copyConstraintVirialToHost(dt, virial);
+            clear_mat(virial);
+            lincsGpu_->copyVirialToHost(virial);
+            settleGpu_->copyVirialToHost(virial);
+
+            // 合并两类约束的维里，再按原公式缩放。
+            const float scaleFactor = 0.5F / (dt * dt);
+            msmul(virial, scaleFactor, virial);
         }
 
         if (gaMDGpuExecutor_ != nullptr)
@@ -137,17 +143,6 @@ void UpdateConstrainGpu::Impl::integrate(GpuEventSynchronizer*             fRead
 
     wallcycle_sub_stop(wcycle_, WallCycleSubCounter::LaunchGpuUpdateConstrain);
     wallcycle_stop(wcycle_, WallCycleCounter::LaunchGpuPp);
-}
-
-void UpdateConstrainGpu::Impl::copyConstraintVirialToHost(const real dt, tensor virial)
-{
-    clear_mat(virial);
-    lincsGpu_->copyVirialToHost(virial);
-    settleGpu_->copyVirialToHost(virial);
-
-    // scaledVirial -> virial (methods above return scaled values)
-    const float scaleFactor = 0.5F / (dt * dt);
-    msmul(virial, scaleFactor, virial);
 }
 
 void UpdateConstrainGpu::Impl::scaleCoordinates(const Matrix3x3& scalingMatrix)
@@ -309,11 +304,6 @@ void UpdateConstrainGpu::integrate(GpuEventSynchronizer*             fReadyOnDev
                      doParrinelloRahman,
                      dtPressureCouple,
                      prVelocityScalingMatrix);
-}
-
-void UpdateConstrainGpu::copyConstraintVirialToHost(const real dt, tensor virial)
-{
-    impl_->copyConstraintVirialToHost(dt, virial);
 }
 
 void UpdateConstrainGpu::scaleCoordinates(const gmx::Matrix3x3& scalingMatrix)

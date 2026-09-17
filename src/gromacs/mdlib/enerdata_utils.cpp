@@ -43,7 +43,6 @@
 #include <utility>
 #include <vector>
 
-#include "gromacs/applied_forces/gamd/gamdmdmodule.h"
 #include "gromacs/gmxlib/network.h"
 #include "gromacs/mdtypes/commrec.h"
 #include "gromacs/mdtypes/enerdata.h"
@@ -54,6 +53,7 @@
 #include "gromacs/utility/enumerationhelpers.h"
 #include "gromacs/utility/fatalerror.h"
 #include "gromacs/utility/gmxassert.h"
+
 ForeignLambdaTerms::ForeignLambdaTerms(
         const gmx::EnumerationArray<FreeEnergyPerturbationCouplingType, std::vector<double>>* allLambdas) :
     numLambdas_(allLambdas ? gmx::ssize((*allLambdas)[FreeEnergyPerturbationCouplingType::Fep]) : 0),
@@ -413,14 +413,9 @@ void reset_dvdl_enerdata(gmx_enerdata_t* enerd)
     }
 }
 
-void reset_enerdata(gmx_enerdata_t* enerd, int64_t step, gmx::GaMDMDModule* gaMDModule)
+void reset_enerdata(gmx_enerdata_t* enerd)
 {
     int i, j;
-
-    if (gaMDModule != nullptr)
-    {
-        gaMDModule->writeRestartState(step);
-    }
 
     /* First reset all energy components. */
     for (i = 0; (i < static_cast<int>(NonBondedEnergyTerms::Count)); i++)
@@ -444,7 +439,6 @@ void reset_enerdata(gmx_enerdata_t* enerd, int64_t step, gmx::GaMDMDModule* gaMD
     enerd->term[F_DVDL_RESTRAINT] = 0.0_real;
     enerd->term[F_DKDL]           = 0.0_real;
     enerd->foreignLambdaTerms.zeroAllTerms();
-
     /* reset dvdl - separate function since it is also called elsewhere */
     reset_dvdl_enerdata(enerd);
 }

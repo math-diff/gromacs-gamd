@@ -104,13 +104,13 @@ public:
      *   2. This is the temperature coupling step.
      * Parameters virial/lambdas can be nullptr if computeVirial/doTempCouple are false.
      *
-     * \param[in]  fReadyOnDevice           Event synchronizer indicating that the forces are ready in
-     *                                      the device memory.
+     * \param[in]  fReadyOnDevice           Event synchronizer indicating that the forces are
+     *                                      ready in the device memory.
      * \param[in]  dt                       Timestep.
      * \param[in]  updateVelocities         If the velocities should be constrained.
      * \param[in]  computeVirial            If virial should be updated.
-     * \param[in]  deferVirialToHost        If true, defer the host copy until
-     *                                      copyConstraintVirialToHost() is called.
+     * \param[in]  deferVirialToHost        If true, record the constraint virial in the GaMD
+     *                                      device history without copying it to the host.
      * \param[out] virial                   Place to save virial tensor.
      * \param[in]  doTemperatureScaling     If velocities should be scaled for temperature coupling.
      * \param[in]  tcstat                   Temperature coupling data.
@@ -129,8 +129,6 @@ public:
                    bool                              doParrinelloRahman,
                    float                             dtPressureCouple,
                    const gmx::Matrix3x3&             prVelocityScalingMatrix);
-
-    void copyConstraintVirialToHost(real dt, tensor virial);
 
     /*! \brief Scale coordinates on the GPU for the pressure coupling.
      *

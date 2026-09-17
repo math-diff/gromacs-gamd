@@ -2033,8 +2033,14 @@ void do_force(FILE*                         fplog,
                 &dipoleData, cr, (fr->efep != FreeEnergyPerturbationType::No), lambda, muTotal, ddBalanceRegionHandler);
     }
 
+    // 在清空能量前保存 GaMD 重启状态，保持原来的写入时机。
+    if (runScheduleWork.gaMDModule != nullptr)
+    {
+        runScheduleWork.gaMDModule->writeRestartState(step);
+    }
+
     /* Reset energies */
-    reset_enerdata(enerd, step, runScheduleWork.gaMDModule);
+    reset_enerdata(enerd);
 
     if (haveDDAtomOrdering(*cr) && simulationWork.haveSeparatePmeRank)
     {

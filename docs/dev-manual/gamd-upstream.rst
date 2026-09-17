@@ -135,6 +135,13 @@ CUDA Graph eligibility and replay retain their own scheduling checks. CPU
 GaMD requires CPU update; GPU update requires the supported resident path.
 Native CPU force work still controls its coordinate copies and event waits.
 
+``do_force`` explicitly calls the module's restart writer immediately before
+``reset_enerdata``. The native energy reset retains its one-argument interface
+and only clears energy data. Constraint virial handling stays in
+``UpdateConstrainGpu::Impl::integrate``: the deferred branch records device
+history, while the immediate branch copies LINCS and SETTLE virials and applies
+the existing scale in that order.
+
 The legacy output synchronization helper checks ``ferror`` before treating a
 file as committed. An earlier failed write can leave no pending buffer, making
 the last ``fflush`` succeed; reconciliation must still stop before replacing

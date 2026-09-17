@@ -105,8 +105,8 @@ public:
      * \param[in]  dt                       Timestep.
      * \param[in]  updateVelocities         If the velocities should be constrained.
      * \param[in]  computeVirial            If virial should be updated.
-     * \param[in]  deferVirialToHost        If true, leave the computed constraint virial on
-     *                                      the device until copyConstraintVirialToHost() is called.
+     * \param[in]  deferVirialToHost        If true, record the constraint virial in the GaMD
+     *                                      device history without copying it to the host.
      * \param[out] virial                   Place to save virial tensor.
      * \param[in]  doTemperatureScaling     If velocities should be scaled for temperature coupling.
      * \param[in]  tcstat                   Temperature coupling data.
@@ -125,9 +125,6 @@ public:
                    bool                              doParrinelloRahman,
                    float                             dtPressureCouple,
                    const gmx::Matrix3x3&             prVelocityScalingMatrix);
-
-    /*! \brief Copy and scale the most recently computed constraint virial to the host. */
-    void copyConstraintVirialToHost(real dt, tensor virial);
 
     /*! \brief Scale coordinates on the GPU for the pressure coupling.
      *

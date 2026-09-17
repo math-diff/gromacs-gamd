@@ -35,25 +35,19 @@
 #ifndef GMX_MDLIB_ENERDATA_UTILS_H
 #define GMX_MDLIB_ENERDATA_UTILS_H
 
-#include <cstdint>
-
 #include "gromacs/math/arrayrefwithpadding.h"
 #include "gromacs/math/vectypes.h"
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/real.h"
+
 struct gmx_enerdata_t;
 struct gmx_grppairener_t;
 struct t_lambda;
 
-namespace gmx
-{
-class GaMDMDModule;
-}
-
 void reset_dvdl_enerdata(gmx_enerdata_t* enerd);
 /* Resets only the dvdl energy data */
 
-void reset_enerdata(gmx_enerdata_t* enerd, int64_t step, gmx::GaMDMDModule* gaMDModule);
+void reset_enerdata(gmx_enerdata_t* enerd);
 /* Resets the energy data */
 
 /*! \brief Sums energy group pair contributions into epot */
