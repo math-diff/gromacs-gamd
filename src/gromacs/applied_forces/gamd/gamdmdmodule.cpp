@@ -93,11 +93,6 @@ const GaMDStepPlan& GaMDMDModule::prepareStep(int64_t step, int rank, bool press
     GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
 }
 
-const GaMDStepPlan& GaMDMDModule::stepPlan() const
-{
-    return runtime_->stepPlan();
-}
-
 const GaMDStepResult& GaMDMDModule::stepResult() const
 {
     return runtime_->stepResult();

@@ -98,8 +98,6 @@ public:
 
     //! Prepares the immutable work description for one step.
     const GaMDStepPlan& prepareStep(int64_t step, int rank, bool pressureCouplingThisStep = false);
-    //! Returns the current immutable step work description.
-    const GaMDStepPlan& stepPlan() const;
     //! Returns the host result for the current step.
     const GaMDStepResult& stepResult() const;
     //! Returns the current bias parameters shared by the CPU and GPU evaluators.

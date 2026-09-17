@@ -60,12 +60,10 @@ namespace gmx
 
 void GaMDRuntime::setCheckpointingThisStep(bool checkpointingThisStep)
 {
-    checkpointingThisStep_  = checkpointingThisStep;
-    stepPlan_.checkpointing = checkpointingThisStep;
+    checkpointingThisStep_ = checkpointingThisStep;
     if (checkpointingThisStep && stepPlan_.enabled)
     {
         stepPlan_.requiresHostEnergy = true;
-        stepPlan_.gpuGraphEligible   = false;
     }
 }
 
@@ -116,7 +114,6 @@ const GaMDStepPlan& GaMDRuntime::prepareStep(int64_t step, int rank, bool pressu
     stepPlan_           = {};
     stepPlan_.step      = step;
     stepPlan_.boostType = parameters_.boostType;
-    stepPlan_.debug     = debug_;
 
     if (parameters_.boostType == 0)
     {
@@ -129,7 +126,6 @@ const GaMDStepPlan& GaMDRuntime::prepareStep(int64_t step, int rank, bool pressu
     stepPlan_.kP            = potentialStatistics_.forceConstant;
     stepPlan_.thresholdD    = dihedralStatistics_.threshold;
     stepPlan_.kD            = dihedralStatistics_.forceConstant;
-    stepPlan_.checkpointing = checkpointingThisStep_;
     stepPlan_.writesParameters =
             parameters_.parameterInterval > 0 && step % parameters_.parameterInterval == 0;
     stepPlan_.writesReweight =
@@ -142,8 +138,6 @@ const GaMDStepPlan& GaMDRuntime::prepareStep(int64_t step, int rank, bool pressu
     stepPlan_.requiresHostEnergy = stepPlan_.stage != GaMDStage::Production
                                    || checkpointingThisStep_ || pressureCouplingThisStep
                                    || forcedScale || writesUnbufferedOutput || writesDihedralForces;
-    stepPlan_.gpuGraphEligible = stepPlan_.stage == GaMDStage::Production && !checkpointingThisStep_
-                                 && !pressureCouplingThisStep && !writesDihedralForces;
     return stepPlan_;
 }
 

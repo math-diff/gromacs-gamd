@@ -147,90 +147,27 @@ GaMDGpuExecutor::Impl::~Impl()
         updateStream_->synchronize();
     }
 
-    if (d_gamdDihedralForcesNbnxn_ != nullptr)
-    {
-        freeDeviceBuffer(&d_gamdDihedralForcesNbnxn_);
-    }
-    if (d_gamdDihedralForcesState_ != nullptr)
-    {
-        freeDeviceBuffer(&d_gamdDihedralForcesState_);
-    }
-    if (d_gamdDihedralShiftForces_ != nullptr)
-    {
-        freeDeviceBuffer(&d_gamdDihedralShiftForces_);
-    }
-    if (d_gamdDihedralVirial_ != nullptr)
-    {
-        freeDeviceBuffer(&d_gamdDihedralVirial_);
-    }
-    if (d_gamdShortRangeVirial_ != nullptr)
-    {
-        freeDeviceBuffer(&d_gamdShortRangeVirial_);
-    }
-    if (d_gamdCorrectedForcesState_ != nullptr)
-    {
-        freeDeviceBuffer(&d_gamdCorrectedForcesState_);
-    }
-    if (d_nbnxnAtomOrder_ != nullptr)
-    {
-        freeDeviceBuffer(&d_nbnxnAtomOrder_);
-    }
-    if (d_gamdState_ != nullptr)
-    {
-        freeDeviceBuffer(&d_gamdState_);
-    }
-    if (d_gamdPmeEnergy_ != nullptr)
-    {
-        freeDeviceBuffer(&d_gamdPmeEnergy_);
-    }
-    if (d_gamdEnergyHistory_ != nullptr)
-    {
-        freeDeviceBuffer(&d_gamdEnergyHistory_);
-    }
-    if (d_gamdForceVirialHistory_ != nullptr)
-    {
-        freeDeviceBuffer(&d_gamdForceVirialHistory_);
-    }
-    if (d_gamdEnergyHistoryCount_ != nullptr)
-    {
-        freeDeviceBuffer(&d_gamdEnergyHistoryCount_);
-    }
-    if (d_updateMasses_ != nullptr)
-    {
-        freeDeviceBuffer(&d_updateMasses_);
-    }
-    if (d_updateTemperatureGroups_ != nullptr)
-    {
-        freeDeviceBuffer(&d_updateTemperatureGroups_);
-    }
-    if (d_updateConstraintVirialHistory_ != nullptr)
-    {
-        freeDeviceBuffer(&d_updateConstraintVirialHistory_);
-    }
-    if (d_updateConstraintVirialHistoryCount_ != nullptr)
-    {
-        freeDeviceBuffer(&d_updateConstraintVirialHistoryCount_);
-    }
-    if (d_updateCurrentHalfKinetic_ != nullptr)
-    {
-        freeDeviceBuffer(&d_updateCurrentHalfKinetic_);
-    }
-    if (d_updatePreviousHalfKinetic_ != nullptr)
-    {
-        freeDeviceBuffer(&d_updatePreviousHalfKinetic_);
-    }
-    if (d_updateGroupHalfKineticTensor_ != nullptr)
-    {
-        freeDeviceBuffer(&d_updateGroupHalfKineticTensor_);
-    }
-    if (d_updateKineticHistory_ != nullptr)
-    {
-        freeDeviceBuffer(&d_updateKineticHistory_);
-    }
-    if (d_updateKineticHistoryCount_ != nullptr)
-    {
-        freeDeviceBuffer(&d_updateKineticHistoryCount_);
-    }
+    freeDeviceBuffer(&d_gamdDihedralForcesNbnxn_);
+    freeDeviceBuffer(&d_gamdDihedralForcesState_);
+    freeDeviceBuffer(&d_gamdDihedralShiftForces_);
+    freeDeviceBuffer(&d_gamdDihedralVirial_);
+    freeDeviceBuffer(&d_gamdShortRangeVirial_);
+    freeDeviceBuffer(&d_gamdCorrectedForcesState_);
+    freeDeviceBuffer(&d_nbnxnAtomOrder_);
+    freeDeviceBuffer(&d_gamdState_);
+    freeDeviceBuffer(&d_gamdPmeEnergy_);
+    freeDeviceBuffer(&d_gamdEnergyHistory_);
+    freeDeviceBuffer(&d_gamdForceVirialHistory_);
+    freeDeviceBuffer(&d_gamdEnergyHistoryCount_);
+    freeDeviceBuffer(&d_updateMasses_);
+    freeDeviceBuffer(&d_updateTemperatureGroups_);
+    freeDeviceBuffer(&d_updateConstraintVirialHistory_);
+    freeDeviceBuffer(&d_updateConstraintVirialHistoryCount_);
+    freeDeviceBuffer(&d_updateCurrentHalfKinetic_);
+    freeDeviceBuffer(&d_updatePreviousHalfKinetic_);
+    freeDeviceBuffer(&d_updateGroupHalfKineticTensor_);
+    freeDeviceBuffer(&d_updateKineticHistory_);
+    freeDeviceBuffer(&d_updateKineticHistoryCount_);
 }
 
 void GaMDGpuExecutor::Impl::initializeUpdateHistory(const int           numTemperatureGroups,

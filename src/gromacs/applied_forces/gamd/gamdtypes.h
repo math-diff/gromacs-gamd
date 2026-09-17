@@ -96,8 +96,6 @@ struct GaMDStepPlan
     int boostType = 0;
     //! Stage controlling statistics and bias application.
     GaMDStage stage = GaMDStage::Inactive;
-    //! Legacy diagnostic flag from gamd.in.
-    int debug = 0;
     //! Potential threshold in kJ/mol.
     double thresholdP = 0;
     //! Potential force constant in inverse kJ/mol.
@@ -108,16 +106,12 @@ struct GaMDStepPlan
     double kD = 0;
     //! Whether this prepared plan enables GaMD.
     bool enabled = false;
-    //! Mirror of the MD checkpoint decision.
-    bool checkpointing = false;
     //! Whether the parameter cadence selects this step.
     bool writesParameters = false;
     //! Whether the reweight cadence selects this step.
     bool writesReweight = false;
     //! Whether host state must account for this step.
     bool requiresHostEnergy = false;
-    //! Descriptive GaMD eligibility; MD workload flags make the final graph decision.
-    bool gpuGraphEligible = false;
 };
 
 /*! \libinternal

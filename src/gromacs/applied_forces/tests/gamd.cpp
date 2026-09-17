@@ -351,14 +351,14 @@ TEST(GaMDDiagnosticsTest, DihedralOutputStagesOnlyTheRequestedStep)
     {
         GaMDMDModule module;
         module.setBufferedProductionOutputEnabled(true);
-        EXPECT_FALSE(module.prepareStep(6, 0).requiresHostEnergy);
-        EXPECT_TRUE(module.stepPlan().gpuGraphEligible);
-        EXPECT_TRUE(module.prepareStep(7, 0).requiresHostEnergy);
-        EXPECT_FALSE(module.stepPlan().gpuGraphEligible);
+        module.prepareStep(6, 0);
+        EXPECT_FALSE(module.requiresHostEnergyThisStep(6));
+        module.prepareStep(7, 0);
+        EXPECT_TRUE(module.requiresHostEnergyThisStep(7));
         const std::array<RVec, 1> forces = { RVec(1, 2, 3) };
         module.diagnostics().dumpDihedralForces(7, forces, 1.0, true);
-        EXPECT_FALSE(module.prepareStep(8, 0).requiresHostEnergy);
-        EXPECT_TRUE(module.stepPlan().gpuGraphEligible);
+        module.prepareStep(8, 0);
+        EXPECT_FALSE(module.requiresHostEnergyThisStep(8));
     }
     gmxUnsetenv("GMX_GAMD_DIH_FORCE_DEBUG_FILE");
     gmxUnsetenv("GMX_GAMD_DIH_FORCE_DEBUG_STEP");

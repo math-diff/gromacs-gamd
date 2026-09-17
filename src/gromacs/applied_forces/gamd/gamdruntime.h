@@ -120,8 +120,6 @@ public:
 
     //! Loads validated input and prepares one step; throws on invalid input or I/O.
     const GaMDStepPlan& prepareStep(int64_t step, int rank, bool pressureCouplingThisStep);
-    //! Returns the work description from the last successful preparation.
-    const GaMDStepPlan& stepPlan() const { return stepPlan_; }
     //! Returns the result from current-step host accounting.
     const GaMDStepResult& stepResult() const { return stepResult_; }
     //! Returns the immutable parameters used by CPU, CUDA and deferred output.
