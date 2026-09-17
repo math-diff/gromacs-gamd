@@ -64,6 +64,7 @@
 #include "gromacs/listed_forces/listed_forces_gpu.h"
 #include "gromacs/math/units.h"
 #include "gromacs/mdlib/force_flags.h"
+#include "gromacs/mdlib/gpuforcereduction_impl_internal.h"
 #include "gromacs/mdtypes/interaction_const.h"
 #include "gromacs/mdtypes/simulation_workload.h"
 #include "gromacs/pbcutil/pbc_aiuc_cuda.cuh"
@@ -279,19 +280,6 @@ __global__ void accumulateGroupHalfKineticTensorKernel(const int             num
     for (int component = threadIdx.x; component < numGroups * DIM * DIM; component += blockDim.x)
     {
         atomicAdd(&gm_groupTensors[component], sm_groupKinetic[component]);
-    }
-}
-
-/*! \internal \brief Maps raw dihedral forces from nonbonded order to state atom order. */
-__global__ void mapNbnxnToStateForceKernel(const int     numAtoms,
-                                           const int*    gm_nbnxnAtomOrder,
-                                           const float3* gm_nbnxnForce,
-                                           float3*       gm_stateForce)
-{
-    const int atom = blockIdx.x * blockDim.x + threadIdx.x;
-    if (atom < numAtoms)
-    {
-        gm_stateForce[atom] = gm_nbnxnForce[gm_nbnxnAtomOrder[atom]];
     }
 }
 
@@ -701,30 +689,19 @@ void GaMDGpuExecutor::Impl::finishGamdDihedralBuffers()
     wallcycle_start_nocount(wallCycleCounters_, WallCycleCounter::LaunchGpuPp);
     wallcycle_sub_start(wallCycleCounters_, WallCycleSubCounter::LaunchGpuBonded);
 
-    constexpr int      c_mappingThreadsPerBlock = 256;
-    KernelLaunchConfig mappingConfig;
-    mappingConfig.blockSize[0] = c_mappingThreadsPerBlock;
-    mappingConfig.blockSize[1] = 1;
-    mappingConfig.blockSize[2] = 1;
-    mappingConfig.gridSize[0] =
-            (gamdStateForceSize_ + c_mappingThreadsPerBlock - 1) / c_mappingThreadsPerBlock;
-    mappingConfig.gridSize[1]      = 1;
-    mappingConfig.gridSize[2]      = 1;
-    mappingConfig.sharedMemorySize = 0;
-
-    auto       mappingKernel     = mapNbnxnToStateForceKernel;
-    const auto mappingKernelArgs = prepareGpuKernelArguments(mappingKernel,
-                                                             mappingConfig,
-                                                             &gamdStateForceSize_,
-                                                             &d_nbnxnAtomOrder_,
-                                                             &d_gamdDihedralForcesNbnxn_,
-                                                             &d_gamdDihedralForcesState_);
-    launchGpuKernel(mappingKernel,
-                    mappingConfig,
-                    deviceStream_,
-                    nullptr,
-                    "Map GaMD dihedral forces to state order",
-                    mappingKernelArgs);
+    // 关闭两种累加后，原生内核只按原子映射复制三个力分量。
+    // 未使用的附加力也传入有效缓冲，避免原生入口对空指针计算偏移。
+    launchForceReductionKernel(gamdStateForceSize_,
+                               /* atomStart= */ 0,
+                               /* addRvecForce= */ false,
+                               /* accumulate= */ false,
+                               d_gamdDihedralForcesNbnxn_,
+                               d_gamdDihedralForcesState_,
+                               d_gamdDihedralForcesState_,
+                               d_nbnxnAtomOrder_,
+                               deviceStream_,
+                               nullptr,
+                               0);
 
     launchGamdVirialReductionKernel(d_gamdDihedralForcesNbnxn_,
                                     d_gamdDihedralShiftForces_,
