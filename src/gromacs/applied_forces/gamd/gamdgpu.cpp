@@ -236,14 +236,7 @@ void GaMDGpuExecutor::Impl::bindUpdateBuffers(DeviceBuffer<Float3>           vel
 
     if (temperatureGroups.empty())
     {
-        std::vector<unsigned short> defaultTemperatureGroups(updateNumAtoms_, 0);
-        copyToDeviceBuffer(&d_updateTemperatureGroups_,
-                           defaultTemperatureGroups.data(),
-                           0,
-                           updateNumAtoms_,
-                           *updateStream_,
-                           GpuApiCallBehavior::Sync,
-                           nullptr);
+        clearDeviceBufferAsync(&d_updateTemperatureGroups_, 0, updateNumAtoms_, *updateStream_);
     }
     else
     {

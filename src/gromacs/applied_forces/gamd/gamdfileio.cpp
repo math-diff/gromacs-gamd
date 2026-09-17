@@ -196,11 +196,7 @@ void reconcileGaMDTextFile(const char* filename, int expectedColumns, int64_t sa
         GMX_THROW(FileIOError(
                 formatString("Failed to close repaired GaMD text file '%s'.", tmpName.c_str())));
     }
-    if (std::rename(tmpName.c_str(), filename) != 0)
-    {
-        GMX_THROW(FileIOError(formatString(
-                "Failed to atomically replace repaired GaMD text file '%s'.", filename)));
-    }
+    gmx_file_rename(tmpName, filename);
 
     if (malformedRows > 0 || futureRows > 0 || duplicateRows > 0)
     {
@@ -362,17 +358,9 @@ void GaMDRuntime::saveRestartState(int64_t step, int rank)
     if (fileExists(finalName))
     {
         std::remove(previousName);
-        if (std::rename(finalName, previousName) != 0)
-        {
-            GMX_THROW(FileIOError(formatString(
-                    "Failed to rotate previous GaMD restart %s -> %s.", finalName, previousName)));
-        }
+        gmx_file_rename(finalName, previousName);
     }
-    if (std::rename(tmpName, finalName) != 0)
-    {
-        GMX_THROW(FileIOError(formatString(
-                "Failed to atomically replace GaMD restart %s -> %s.", tmpName, finalName)));
-    }
+    gmx_file_rename(tmpName, finalName);
 }
 
 namespace

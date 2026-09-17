@@ -1161,6 +1161,35 @@ TEST_F(GaMDTest, IrestProductionCheckpointCanContinueWithoutDuplicateRows)
     EXPECT_EQ(countNumericRows("gamd-reweight.dat"), reweightRowsAtCheckpoint);
 }
 
+TEST_F(GaMDTest, RestartRenameFailurePreservesTheCurrentSnapshot)
+{
+    TestFileManager fileManager;
+    const auto      directory =
+            fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
+    ScopedWorkingDirectory workingDirectory(directory);
+    writeGaMDProductionInput(c_validGaMDRestart);
+
+    GaMDDiagnostics diagnostics;
+    GaMDRuntime     runtime(diagnostics);
+    runtime.prepareStep(0, 0, false);
+    runtime.setCheckpointingThisStep(true);
+
+    // 用非空目录阻止备份轮转，确认重命名失败不会丢掉原重启文件。
+    std::filesystem::create_directory("gamd-restart-prev.dat");
+    const std::filesystem::path restartPath          = "gamd-restart.dat";
+    const std::filesystem::path temporaryRestartPath = "gamd-restart.dat.tmp";
+    const std::filesystem::path markerPath           = "gamd-restart-prev.dat/marker";
+    {
+        std::ofstream marker(markerPath);
+        marker << "preserve\n";
+    }
+
+    EXPECT_THROW_GMX(runtime.writeRestartState(0), FileIOError);
+    EXPECT_EQ(TextReader::readFileToString(restartPath), c_validGaMDRestart);
+    EXPECT_EQ(TextReader::readFileToString(markerPath), "preserve\n");
+    EXPECT_NE(TextReader::readFileToString(temporaryRestartPath).find("saved_step 0\n"), std::string::npos);
+}
+
 TEST_F(GaMDTest, RestartReconciliationPreservesOriginalAfterWriteFailure)
 {
 #if defined(__linux__) && GTEST_HAS_DEATH_TEST
