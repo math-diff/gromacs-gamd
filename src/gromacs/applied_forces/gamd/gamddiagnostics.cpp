@@ -581,39 +581,6 @@ void GaMDDiagnostics::dumpFinalForces(const int64_t step, const ArrayRef<const R
             finalForceFile_.get(), finalForceFilename_, step, forces, finalForceBegin_, finalForceCount_, 1.0, {});
 }
 
-void GaMDDiagnostics::logEnergyCadence(const int nstcalcenergy, const bool isMainRank)
-{
-    if (nstcalcenergyMessagePrinted_)
-    {
-        return;
-    }
-    nstcalcenergyMessagePrinted_ = true;
-    if (!isMainRank)
-    {
-        return;
-    }
-
-    if (nstcalcenergy > 1)
-    {
-        GMX_LOG(logger_.warning)
-                .asParagraph()
-                .appendTextFormatted(
-                        "\n[GaMD WARNING] nstcalcenergy = %d > 1.\n"
-                        "Current-step GaMD requires raw energies every step.\n"
-                        "Set nstcalcenergy = 1 for a supported production path.\n\n",
-                        nstcalcenergy);
-    }
-    else
-    {
-        GMX_LOG(logger_.info)
-                .asParagraph()
-                .appendTextFormatted(
-                        "\n[GaMD INFO] nstcalcenergy = %d.\n"
-                        "GaMD is using current-step energies.\n\n",
-                        nstcalcenergy);
-    }
-}
-
 void GaMDDiagnostics::logResidentEnergy(const bool useBufferedOutput, const bool isMainRank)
 {
     if (!isMainRank || residentEnergyMessagePrinted_)

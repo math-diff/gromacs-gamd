@@ -138,17 +138,26 @@ This also applies when ``nstenergy`` and ``nstlog`` exceed the batch capacity.
 Supported execution
 -------------------
 
-All GaMD execution modes require one PP rank without domain decomposition and
-reject MTS before dynamics. CPU update does not provide a distributed GaMD
-energy/force reduction. The CPU reference path is selected with ``-update cpu``.
-Single-rank CPU runs may still use the engine's DD-style atom ordering; their
-local periodic-boundary information and atom mapping remain in use.
+Unsupported configurations are rejected once, before dynamics. All GaMD
+execution modes require ``integrator = md``, ``nstcalcenergy = 1`` (the bias
+uses the raw energies of the current step), and one PP rank without domain
+decomposition; MTS and ``mdrun -rerun`` are rejected. CPU update does not
+provide a distributed GaMD energy/force reduction. The CPU reference path is
+selected with ``-update cpu``. Single-rank CPU runs may still use the engine's
+DD-style atom ordering; their local periodic-boundary information and atom
+mapping remain in use.
 The validated GPU-resident target uses CUDA mixed precision and one GPU, with
 ``-nb gpu -pme gpu -bonded gpu -update gpu``. It requires ``nstfout=0`` and does
-not support DD, separate PME ranks, or MTS. The supported pressure modes are
-NVT and C-rescale isotropic/semiisotropic NPT. Coupling steps stage the current
-corrected virial and required globals; eligible intervening steps retain the
-resident/CUDA Graph path. Other builds/workloads are not implied to be supported.
+not support DD, separate PME ranks, MTS, more than two temperature-coupling
+groups, or the single-rank DD-style atom ordering requested with
+``GMX_DD_SINGLE_RANK=1``. The supported pressure modes are NVT and C-rescale
+isotropic/semiisotropic NPT. GPU update itself rejects virtual sites, Ewald
+surface correction and orientation restraints, and PME rejects screw PBC.
+Topologies with ``F_FOURDIHS`` or perturbed dihedrals are rejected at the start
+of the run, when the GPU listed-force buffers are set up. Coupling steps stage
+the current corrected virial and required globals; eligible intervening steps
+retain the resident/CUDA Graph path. Other builds/workloads are not implied to
+be supported.
 
 Diagnostic configuration
 ------------------------

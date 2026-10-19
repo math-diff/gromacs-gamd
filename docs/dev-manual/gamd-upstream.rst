@@ -148,8 +148,15 @@ the last ``fflush`` succeed; reconciliation must still stop before replacing
 the original output. The regression test injects a file-size-limit failure
 through the normal restart-loading entry and checks the original bytes.
 
-The current-step correction entry performs common checks and energy accounting,
-then calls the separate CPU or GPU sequence in ``gamdexecution.cpp``.
+``selectGaMDExecutionMode`` is the single setup-time check of supported GaMD
+configurations; ``createSimulationWorkload`` calls it before dynamics. The MD
+loop, ``do_force`` and the correction entry do not repeat its checks. Limits
+already enforced by native GPU update and PME (virtual sites, whole-molecule
+transforms, screw PBC) are not duplicated; relaxing one of those native rules
+requires a matching GaMD check. Topology limits of the GPU force path need the
+local topology and stay at GPU listed-force buffer binding.
+The current-step correction entry performs energy accounting, then calls the
+separate CPU or GPU sequence in ``gamdexecution.cpp``.
 ``sim_util.cpp`` retains the call at the original force-processing boundary.
 The private CPU dihedral helper reuses the native bonded kernels and overwrites
 its output buffer completely; only its accumulation buffers need clearing.

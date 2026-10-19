@@ -1576,12 +1576,6 @@ void do_force(FILE*                         fplog,
                         stepWork.computeVirial,
                         useGpuGaMDShortRangeVirial);
     }
-    if (useGpuGaMDShortRangeVirial && fr->wholeMoleculeTransform != nullptr)
-    {
-        gmx_fatal(FARGS,
-                  "GPU GaMD short-range virial reduction does not support whole-molecule host "
-                  "coordinate transforms.");
-    }
 
     const bool pmeSendCoordinatesFromGpu =
             simulationWork.useGpuPmePpCommunication && !stepWork.doNeighborSearch;

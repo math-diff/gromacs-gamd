@@ -167,8 +167,6 @@ public:
     //! Writes the selected final-force buffer in its current atom order.
     void dumpFinalForces(int64_t step, ArrayRef<const RVec> forces, bool isMainRank);
 
-    //! Logs the current-step energy requirement once on the main rank.
-    void logEnergyCadence(int nstcalcenergy, bool isMainRank);
     //! Logs resident host-staging conditions once on the main rank.
     void logResidentEnergy(bool useBufferedOutput, bool isMainRank);
     //! Returns true once when workload diagnostics are requested.
@@ -201,7 +199,6 @@ private:
     int         finalForceBegin_ = 0;
     int         finalForceCount_ = -1;
 
-    bool nstcalcenergyMessagePrinted_   = false;
     bool residentEnergyMessagePrinted_  = false;
     bool gpuWorkloadDiagnosticsEnabled_ = false;
     bool gpuWorkloadDiagnosticsPrinted_ = false;

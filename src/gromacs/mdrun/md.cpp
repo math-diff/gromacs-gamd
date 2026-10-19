@@ -1124,8 +1124,6 @@ void gmx::LegacySimulator::do_md()
 
         if (useCurrentStepGaMD)
         {
-            gaMDModule_->diagnostics().logEnergyCadence(ir->nstcalcenergy, cr_->nodeid == 0);
-
             const bool cRescaleCouplingThisStep =
                     ir->pressureCouplingOptions.epc == PressureCoupling::CRescale
                     && do_per_step(step, ir->pressureCouplingOptions.nstpcouple);
@@ -1198,13 +1196,6 @@ void gmx::LegacySimulator::do_md()
 
         if (useCurrentStepGaMD && useGpuResidentGaMD)
         {
-            if (simulationWork.gamdExecutionMode != GaMDExecutionMode::GpuResident
-                || fr_->listedForcesGpu == nullptr
-                || !gaMDModule_->gpuExecutor()->scaleFromDeviceEnabled())
-            {
-                gmx_fatal(FARGS, "GPU-resident GaMD was selected but its GPU state is unavailable.");
-            }
-
             const bool diagnosticHostState = gaMDModule_->gpuExecutor()->energyDiagnosticsEnabled()
                                              || gaMDModule_->gpuExecutor()->dihedralShadowEnabled();
             // 此列表在普通步和图重放时都会逐步增长，无需回传 GPU 计数来判断容量。

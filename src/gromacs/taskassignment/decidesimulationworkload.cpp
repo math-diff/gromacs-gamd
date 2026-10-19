@@ -81,10 +81,12 @@ namespace gmx
 SimulationWorkload createSimulationWorkload(const gmx::MDLogger& mdlog,
                                             const t_inputrec&    inputrec,
                                             const bool           useReplicaExchange,
+                                            const bool           doRerun,
                                             const bool           disableNonbondedCalculation,
                                             const DevelopmentFeatureFlags& devFlags,
                                             bool       haveFillerParticlesInLocalState,
                                             bool       havePpDomainDecomposition,
+                                            bool       haveDDAtomOrdering,
                                             bool       haveSeparatePmeRank,
                                             bool       useGpuForNonbonded,
                                             PmeRunMode pmeRunMode,
@@ -130,17 +132,16 @@ SimulationWorkload createSimulationWorkload(const gmx::MDLogger& mdlog,
     simulationWorkload.haveEwaldSurfaceContribution = haveEwaldSurfaceContribution(inputrec);
     simulationWorkload.useMts                       = inputrec.useMts;
     const bool useCurrentStepGaMD        = inputrec.bDoGaMD || getenv("GMX_USE_GAMD") != nullptr;
-    simulationWorkload.gamdExecutionMode = selectGaMDExecutionMode(useCurrentStepGaMD,
+    simulationWorkload.gamdExecutionMode = selectGaMDExecutionMode(inputrec,
+                                                                   useCurrentStepGaMD,
                                                                    useGpuForNonbonded,
                                                                    simulationWorkload.useGpuPme,
                                                                    useGpuForBonded,
                                                                    useGpuForUpdate,
                                                                    havePpDomainDecomposition,
+                                                                   haveDDAtomOrdering,
                                                                    haveSeparatePmeRank,
-                                                                   inputrec.useMts,
-                                                                   inputrec.pressureCouplingOptions.epc,
-                                                                   inputrec.pressureCouplingOptions.epct,
-                                                                   inputrec.nstfout);
+                                                                   doRerun);
     if (useCurrentStepGaMD)
     {
         GMX_LOG(mdlog.info)

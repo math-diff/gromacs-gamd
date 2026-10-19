@@ -180,9 +180,9 @@ void GaMDGpuExecutor::Impl::initializeUpdateHistory(const int           numTempe
     GMX_RELEASE_ASSERT(updateStream.isValid(), "GaMD update history requires a valid update stream");
     GMX_RELEASE_ASSERT(numTemperatureGroups > 0,
                        "GaMD deferred kinetic history requires temperature groups");
-    GMX_RELEASE_ASSERT(
-            numTemperatureGroups <= 2,
-            "GaMD deferred kinetic history currently supports at most two temperature groups");
+    GMX_RELEASE_ASSERT(numTemperatureGroups <= 2,
+                       "selectGaMDExecutionMode must reject GPU-resident GaMD with more than two "
+                       "temperature-coupling groups");
 
     updateStream_               = &updateStream;
     updateNumTemperatureGroups_ = numTemperatureGroups;

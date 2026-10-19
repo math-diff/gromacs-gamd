@@ -176,17 +176,35 @@ TEST(DecideSimulationWorkloadTest, CpuUpdateGaMDUsesReferenceModeWithoutMdGpuGra
     const bool useGpuNonbonded = GMX_GPU_CUDA || GMX_GPU_SYCL;
     if (useGpuNonbonded)
     {
-        const SimulationWorkload baselineWork = createSimulationWorkload(
-                logger, inputrec, false, false, devFlags, false, false, false, true, PmeRunMode::None, false, true, false, false, false);
+        const SimulationWorkload baselineWork = createSimulationWorkload(logger,
+                                                                         inputrec,
+                                                                         false,
+                                                                         false,
+                                                                         false,
+                                                                         devFlags,
+                                                                         false,
+                                                                         false,
+                                                                         false,
+                                                                         false,
+                                                                         true,
+                                                                         PmeRunMode::None,
+                                                                         false,
+                                                                         true,
+                                                                         false,
+                                                                         false,
+                                                                         false);
         EXPECT_TRUE(baselineWork.useMdGpuGraph);
     }
 
     inputrec.bDoGaMD                  = true;
+    inputrec.nstcalcenergy            = 1;
     const SimulationWorkload gamdWork = createSimulationWorkload(logger,
                                                                  inputrec,
                                                                  false,
                                                                  false,
+                                                                 false,
                                                                  devFlags,
+                                                                 false,
                                                                  false,
                                                                  false,
                                                                  false,
@@ -209,13 +227,28 @@ TEST(DecideSimulationWorkloadTest, EnvironmentGaMDRejectsCpuBondedWithGpuUpdate)
     const ScopedEnvironmentVariable enableGaMD("GMX_USE_GAMD", "1");
     const MDLogger                  logger;
     const DevelopmentFeatureFlags   devFlags;
-    const t_inputrec                inputrec;
+    t_inputrec                      inputrec;
+    inputrec.nstcalcenergy = 1;
 
     // 从真实入口请求旧的混合路径，应当直接拒绝，而不是退回 CPU 修正。
-    EXPECT_THROW(
-            createSimulationWorkload(
-                    logger, inputrec, false, false, devFlags, false, false, false, true, PmeRunMode::GPU, false, true, false, false, false),
-            InconsistentInputError);
+    EXPECT_THROW(createSimulationWorkload(logger,
+                                          inputrec,
+                                          false,
+                                          false,
+                                          false,
+                                          devFlags,
+                                          false,
+                                          false,
+                                          false,
+                                          false,
+                                          true,
+                                          PmeRunMode::GPU,
+                                          false,
+                                          true,
+                                          false,
+                                          false,
+                                          false),
+                 InconsistentInputError);
 }
 
 TEST(DecideSimulationWorkloadTest, ResidentGpuGaMDAllowsMdGpuGraph)
@@ -224,10 +257,26 @@ TEST(DecideSimulationWorkloadTest, ResidentGpuGaMDAllowsMdGpuGraph)
     DevelopmentFeatureFlags devFlags;
     devFlags.enableCudaGraphs = true;
     t_inputrec inputrec;
-    inputrec.bDoGaMD = true;
+    inputrec.bDoGaMD       = true;
+    inputrec.nstcalcenergy = 1;
 
-    const SimulationWorkload gamdWork = createSimulationWorkload(
-            logger, inputrec, false, false, devFlags, false, false, false, true, PmeRunMode::GPU, true, true, false, false, false);
+    const SimulationWorkload gamdWork = createSimulationWorkload(logger,
+                                                                 inputrec,
+                                                                 false,
+                                                                 false,
+                                                                 false,
+                                                                 devFlags,
+                                                                 false,
+                                                                 false,
+                                                                 false,
+                                                                 false,
+                                                                 true,
+                                                                 PmeRunMode::GPU,
+                                                                 true,
+                                                                 true,
+                                                                 false,
+                                                                 false,
+                                                                 false);
 
     EXPECT_EQ(GaMDExecutionMode::GpuResident, gamdWork.gamdExecutionMode);
     EXPECT_TRUE(gamdWork.useGpuUpdate);

@@ -61,6 +61,7 @@
 #include "gromacs/mdtypes/fcdata.h"
 #include "gromacs/mdtypes/forcerec.h"
 #include "gromacs/mdtypes/locality.h"
+#include "gromacs/mdtypes/md_enums.h"
 #include "gromacs/mdtypes/state_propagator_data_gpu.h"
 #include "gromacs/pbcutil/ishift.h"
 #include "gromacs/pbcutil/pbc.h"
@@ -69,6 +70,7 @@
 #include "gromacs/topology/ifunc.h"
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/gmxassert.h"
+#include "gromacs/utility/stringutil.h"
 
 #include "gamddiagnostics.h"
 #include "gamdgpu.h"
@@ -179,7 +181,6 @@ void applyGaMDGpuForceCorrection(int64_t                       step,
                                  int                           numLocalAtoms,
                                  ArrayRef<const real>          freeEnergyParameters,
                                  t_forcerec*                   forceRecord,
-                                 VirtualSitesHandler*          virtualSites,
                                  t_nrnb*                       operationCounter,
                                  gmx_wallcycle*                wallCycle,
                                  GaMDMDModule&                 module,
@@ -202,18 +203,6 @@ void applyGaMDGpuForceCorrection(int64_t                       step,
                        "GPU GaMD force correction requires GPU state and listed-force objects");
     GMX_RELEASE_ASSERT(gpuExecutor->dihedralBufferEnabled(),
                        "GPU GaMD force correction requires the device dihedral-force buffer");
-    if (virtualSites != nullptr)
-    {
-        GMX_THROW(InconsistentInputError(
-                "GPU GaMD force correction does not yet support virtual-site force "
-                "spreading."));
-    }
-    if (forceRecord->pbcType == PbcType::Screw)
-    {
-        GMX_THROW(InconsistentInputError(
-                "GPU GaMD dihedral virial reduction does not support screw periodic "
-                "boundary conditions."));
-    }
 
     const bool              validateLiveGpuCorrection = gpuExecutor->dihedralShadowEnabled();
     std::vector<gmx::RVec>& gamdGpuModeDihedralForces = gaMDHostWorkspace.gpuModeDihedralForces;
@@ -608,17 +597,16 @@ const char* gaMDExecutionModeName(GaMDExecutionMode mode)
     return "unknown";
 }
 
-GaMDExecutionMode selectGaMDExecutionMode(bool                 useGaMD,
-                                          bool                 useGpuNonbonded,
-                                          bool                 useGpuPme,
-                                          bool                 useGpuBonded,
-                                          bool                 useGpuUpdate,
-                                          bool                 havePpDomainDecomposition,
-                                          bool                 haveSeparatePmeRank,
-                                          bool                 useMts,
-                                          PressureCoupling     pressureCoupling,
-                                          PressureCouplingType pressureCouplingType,
-                                          int                  nstfout)
+GaMDExecutionMode selectGaMDExecutionMode(const t_inputrec& inputrec,
+                                          bool              useGaMD,
+                                          bool              useGpuNonbonded,
+                                          bool              useGpuPme,
+                                          bool              useGpuBonded,
+                                          bool              useGpuUpdate,
+                                          bool              havePpDomainDecomposition,
+                                          bool              haveDDAtomOrdering,
+                                          bool              haveSeparatePmeRank,
+                                          bool              doRerun)
 {
     if (!useGaMD)
     {
@@ -631,9 +619,28 @@ GaMDExecutionMode selectGaMDExecutionMode(bool                 useGaMD,
         GMX_THROW(InconsistentInputError(
                 "GaMD currently supports one PP rank without domain decomposition."));
     }
-    if (useMts)
+    if (inputrec.useMts)
     {
         GMX_THROW(InconsistentInputError("GaMD does not support MTS."));
+    }
+    // 每一步的 GaMD 状态只在 md 积分器的主循环里准备，其他积分器和 rerun 都不经过那里。
+    if (inputrec.eI != IntegrationAlgorithm::MD)
+    {
+        GMX_THROW(InconsistentInputError(
+                formatString("GaMD currently supports only integrator = md; got integrator = %s.",
+                             enumValueToString(inputrec.eI))));
+    }
+    if (doRerun)
+    {
+        GMX_THROW(InconsistentInputError("GaMD does not support mdrun -rerun."));
+    }
+    // 偏置使用当前步的原始能量，所以每一步都必须计算能量。
+    if (inputrec.nstcalcenergy != 1)
+    {
+        GMX_THROW(InconsistentInputError(formatString(
+                "GaMD requires nstcalcenergy = 1 because the bias uses the raw energies of the "
+                "current step; got nstcalcenergy = %d.",
+                inputrec.nstcalcenergy)));
     }
     if (!useGpuUpdate)
     {
@@ -663,6 +670,8 @@ GaMDExecutionMode selectGaMDExecutionMode(bool                 useGaMD,
                 "GPU-update GaMD currently supports one PP rank without domain decomposition "
                 "or a separate PME rank."));
     }
+    const PressureCoupling     pressureCoupling     = inputrec.pressureCouplingOptions.epc;
+    const PressureCouplingType pressureCouplingType = inputrec.pressureCouplingOptions.epct;
     if (pressureCoupling != PressureCoupling::No && pressureCoupling != PressureCoupling::CRescale)
     {
         GMX_THROW(InconsistentInputError(
@@ -676,11 +685,27 @@ GaMDExecutionMode selectGaMDExecutionMode(bool                 useGaMD,
                 "GPU-update GaMD with C-rescale supports only isotropic or semiisotropic "
                 "pressure coupling."));
     }
-    if (nstfout != 0)
+    if (inputrec.nstfout != 0)
     {
         GMX_THROW(InconsistentInputError(
                 "GPU-update GaMD currently requires nstfout=0 because corrected-force output "
                 "staging is not implemented."));
+    }
+    // GPU 路径假定状态缓冲按拓扑顺序排列；单 rank 的 DD 原子排序会打破这个前提。
+    if (haveDDAtomOrdering)
+    {
+        GMX_THROW(InconsistentInputError(
+                "GPU-update GaMD does not support domain-decomposition atom ordering, which is "
+                "used with a single rank only when GMX_DD_SINGLE_RANK=1 is set. Unset it or use "
+                "-update cpu."));
+    }
+    // 设备上的动能历史每个样本只为两个温度组留了位置。
+    if (inputrec.opts.ngtc > 2)
+    {
+        GMX_THROW(InconsistentInputError(formatString(
+                "GPU-update GaMD supports at most two temperature-coupling groups; got %d. Use "
+                "-update cpu for more groups.",
+                inputrec.opts.ngtc)));
     }
 
     return GaMDExecutionMode::GpuResident;
@@ -710,20 +735,7 @@ void applyGaMDCurrentStepCorrection(const t_commrec&              communicationR
         const auto& simulationWork = runScheduleWork.simulationWork;
         const auto& stepWork       = runScheduleWork.stepWork;
 
-        if (!stepWork.computeEnergy)
-        {
-            GMX_THROW(InconsistentInputError("Current-step GaMD requires nstcalcenergy = 1."));
-        }
-        if (simulationWork.useMts)
-        {
-            GMX_THROW(InconsistentInputError("Current-step GaMD does not support MTS."));
-        }
-        if (simulationWork.havePpDomainDecomposition)
-        {
-            GMX_THROW(InconsistentInputError(
-                    "Current-step GaMD does not support domain decomposition."));
-        }
-
+        // 不支持的配置已在 selectGaMDExecutionMode 里于动力学开始前拒绝。
         // 先完成同一步的能量记账，再把力修正交给对应执行分支。
         GaMDGpuExecutor* gpuExecutor = module->gpuExecutor();
         if (stepWork.stageGpuEnergyAndVirialToHost)
@@ -753,11 +765,6 @@ void applyGaMDCurrentStepCorrection(const t_commrec&              communicationR
 
         if (simulationWork.useGpuResidentGaMD())
         {
-            if (haveDDAtomOrdering(communicationRecord))
-            {
-                GMX_THROW(InconsistentInputError(
-                        "GPU GaMD force correction does not support domain decomposition."));
-            }
             applyGaMDGpuForceCorrection(step,
                                         interactionDefinitions,
                                         box,
@@ -767,7 +774,6 @@ void applyGaMDCurrentStepCorrection(const t_commrec&              communicationR
                                         numLocalAtoms,
                                         freeEnergyParameters,
                                         forceRecord,
-                                        virtualSites,
                                         operationCounter,
                                         wallCycle,
                                         *module,

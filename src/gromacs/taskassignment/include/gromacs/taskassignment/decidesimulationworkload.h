@@ -69,10 +69,13 @@ class MDLogger;
  * \param[in] mdlog                Logger object.
  * \param[in] inputrec           The input record
  * \param[in] useReplicaExchange Whether we are using replica exchange
+ * \param[in] doRerun            Whether mdrun reruns an existing trajectory.
  * \param[in] disableNonbondedCalculation  Disable calculation of nonbonded forces
  * \param[in] devFlags           The development feature flags
  * \param[in] haveFillerParticlesInLocalState Whether filler particles are part of the local state.
  * \param[in] havePpDomainDecomposition Whether PP domain decomposition is used in this run.
+ * \param[in] haveDDAtomOrdering Whether the domain-decomposition atom ordering is used,
+ *                               which can also happen with a single PP rank.
  * \param[in] haveSeparatePmeRank Whether separate PME rank(s) are used in this run.
  * \param[in] useGpuForNonbonded Whether we have short-range nonbonded interactions
  *                               calculations on GPU(s).
@@ -89,10 +92,12 @@ class MDLogger;
 SimulationWorkload createSimulationWorkload(const gmx::MDLogger& mdlog,
                                             const t_inputrec&    inputrec,
                                             bool                 useReplicaExchange,
+                                            bool                 doRerun,
                                             bool                 disableNonbondedCalculation,
                                             const DevelopmentFeatureFlags& devFlags,
                                             bool       haveFillerParticlesInLocalState,
                                             bool       havePpDomainDecomposition,
+                                            bool       haveDDAtomOrdering,
                                             bool       haveSeparatePmeRank,
                                             bool       useGpuForNonbonded,
                                             PmeRunMode pmeRunMode,

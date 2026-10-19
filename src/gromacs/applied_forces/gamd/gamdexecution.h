@@ -63,18 +63,30 @@ class VirtualSitesHandler;
 //! \addtogroup module_applied_forces
 //! \{
 
-//! Selects supported CPU/CUDA work or throws InconsistentInputError.
-GaMDExecutionMode selectGaMDExecutionMode(bool                 useGaMD,
-                                          bool                 useGpuNonbonded,
-                                          bool                 useGpuPme,
-                                          bool                 useGpuBonded,
-                                          bool                 useGpuUpdate,
-                                          bool                 havePpDomainDecomposition,
-                                          bool                 haveSeparatePmeRank,
-                                          bool                 useMts,
-                                          PressureCoupling     pressureCoupling,
-                                          PressureCouplingType pressureCouplingType,
-                                          int                  nstfout);
+/*! \brief Selects the GaMD execution mode or throws InconsistentInputError.
+ *
+ * This is the single setup-time check of the supported GaMD configurations,
+ * so unsupported input is rejected before the first dynamics step.
+ *
+ * Some limitations of the GPU path are not repeated here because no run can
+ * reach them: GPU update already rejects virtual sites, Ewald surface
+ * correction and orientation restraints (the only sources of whole-molecule
+ * transforms), and PME rejects screw PBC. Topology support of the GPU force
+ * path (FOURDIHS, perturbed dihedrals) needs the local topology and is checked
+ * when the listed-force buffers are bound, before the first force evaluation.
+ * Combinations with the GPU shadow diagnostics are checked where the
+ * diagnostics run.
+ */
+GaMDExecutionMode selectGaMDExecutionMode(const t_inputrec& inputrec,
+                                          bool              useGaMD,
+                                          bool              useGpuNonbonded,
+                                          bool              useGpuPme,
+                                          bool              useGpuBonded,
+                                          bool              useGpuUpdate,
+                                          bool              havePpDomainDecomposition,
+                                          bool              haveDDAtomOrdering,
+                                          bool              haveSeparatePmeRank,
+                                          bool              doRerun);
 
 //! Returns a stable descriptive name for a GaMD execution mode.
 const char* gaMDExecutionModeName(GaMDExecutionMode mode);
