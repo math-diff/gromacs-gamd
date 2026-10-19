@@ -53,10 +53,12 @@
 #include "gromacs/mdlib/energyoutput.h"
 
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 
 #include <array>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -66,6 +68,7 @@
 #include "gromacs/fileio/enxio.h"
 #include "gromacs/math/vectypes.h"
 #include "gromacs/mdlib/constr.h"
+#include "gromacs/mdlib/coupling.h"
 #include "gromacs/mdlib/ebin.h"
 #include "gromacs/mdlib/makeconstraints.h"
 #include "gromacs/mdrunutility/handlerestart.h"
@@ -369,6 +372,13 @@ public:
         // This is to keep done_inputrec happy (otherwise sfree() segfaults)
         snew(inputrec_.opts.anneal_time, inputrec_.opts.ngtc);
         snew(inputrec_.opts.anneal_temp, inputrec_.opts.ngtc);
+
+        // 和真实的输入记录一样给出各温度组的自由度，延后 GPU 样本用它换算温度。
+        snew(inputrec_.opts.nrdf, inputrec_.opts.ngtc);
+        for (int group = 0; group < inputrec_.opts.ngtc; ++group)
+        {
+            inputrec_.opts.nrdf[group] = 30 * (group + 1);
+        }
 
         // Communication record (for Constraints constructor)
         cr_.nnodes = 1;
@@ -696,41 +706,72 @@ TEST_P(EnergyOutputTest, DeferredGpuSamplesPreserveEnergyHistory)
     for (int batchIndex = 0; batchIndex < 2; ++batchIndex)
     {
         std::vector<std::array<real, F_NRE>>     energySamples;
-        std::vector<std::array<real, DIM * DIM>> virialSamples;
-        std::vector<std::array<real, DIM * DIM>> pressureSamples;
+        std::vector<std::array<real, DIM * DIM>> forceVirialSamples;
+        std::vector<std::array<real, DIM * DIM>> constraintVirialSamples;
         std::vector<std::array<real, DIM * DIM>> kineticSamples;
-        std::vector<real>                        scalarPressures;
-        std::vector<real>                        surfaceTensions;
-        std::vector<real>                        temperatures;
-        std::vector<real>                        groupTemperatures;
+        std::vector<real>                        groupKineticEnergySamples;
+        std::vector<std::array<real, DIM * DIM>> boxSamples;
         for (int sampleIndex = 0; sampleIndex < 3; ++sampleIndex)
         {
             setStepData(&testValue);
-            // 整数能量可精确表示，让这里检查批次记账，不混入两种旧累加路径的精度差异。
+            // 能量先取可精确表示的整数；温度和压力随后由回放所用的同一换算覆盖。
             for (int termIndex = 0; termIndex < F_NRE; ++termIndex)
             {
                 enerdata_->term[termIndex] = 100 * batchIndex + 10 * sampleIndex + termIndex;
             }
+            std::array<real, DIM * DIM> kinetic = {};
+            kinetic[XX * DIM + XX]              = enerdata_->term[F_EKIN];
+            // setStepData 的盒子各行成等差，是奇异矩阵；calc_pres 需要非零体积，这里换成对角盒子。
+            for (int row = 0; row < DIM; ++row)
+            {
+                for (int column = 0; column < DIM; ++column)
+                {
+                    box_[row][column] = 0;
+                }
+            }
+            box_[XX][XX] = 3 + sampleIndex;
+            box_[YY][YY] = 4 + batchIndex;
+            box_[ZZ][ZZ] = 5;
+
+            // 逐步路径的温度用与延后回放相同的换算得到，两条路径才能逐项比较。
+            real weightedTemperature   = 0;
+            real totalDegreesOfFreedom = 0;
+            for (int group = 0; group < inputrec_.opts.ngtc; ++group)
+            {
+                const real groupKineticEnergy = 5 * (group + 1) + sampleIndex;
+                groupKineticEnergySamples.push_back(groupKineticEnergy);
+                ekindata_.tcstat[group].T = calc_temp(groupKineticEnergy, inputrec_.opts.nrdf[group]);
+                weightedTemperature += inputrec_.opts.nrdf[group] * ekindata_.tcstat[group].T;
+                totalDegreesOfFreedom += inputrec_.opts.nrdf[group];
+            }
+            enerdata_->term[F_TEMP] = weightedTemperature / totalDegreesOfFreedom;
+
+            // 总维里拆成力维里和约束维里两部分，逐步路径的压力同样由 calc_pres 算出。
+            std::array<real, DIM * DIM> forceVirial;
+            std::array<real, DIM * DIM> constraintVirial;
+            std::copy_n(totalVirial_[0], DIM * DIM, forceVirial.begin());
+            for (int component = 0; component < DIM * DIM; ++component)
+            {
+                constraintVirial[component] = 0.5_real * component;
+                totalVirial_[component / DIM][component % DIM] =
+                        forceVirial[component] + constraintVirial[component];
+            }
+            enerdata_->term[F_PRES] = calc_pres(inputrec_.pbcType,
+                                                inputrec_.nwall,
+                                                box_,
+                                                reinterpret_cast<const rvec*>(kinetic.data()),
+                                                totalVirial_,
+                                                pressure_);
+
             std::array<real, F_NRE> energy;
             std::copy(enerdata_->term.begin(), enerdata_->term.end(), energy.begin());
             energySamples.push_back(energy);
-            std::array<real, DIM * DIM> virial;
-            std::array<real, DIM * DIM> pressure;
-            std::copy_n(totalVirial_[0], DIM * DIM, virial.begin());
-            std::copy_n(pressure_[0], DIM * DIM, pressure.begin());
-            virialSamples.push_back(virial);
-            pressureSamples.push_back(pressure);
-            std::array<real, DIM * DIM> kinetic = {};
-            kinetic[XX * DIM + XX]              = enerdata_->term[F_EKIN];
+            forceVirialSamples.push_back(forceVirial);
+            constraintVirialSamples.push_back(constraintVirial);
             kineticSamples.push_back(kinetic);
-            scalarPressures.push_back(enerdata_->term[F_PRES]);
-            surfaceTensions.push_back((pressure_[ZZ][ZZ] - (pressure_[XX][XX] + pressure_[YY][YY]) * 0.5)
-                                      * box_[ZZ][ZZ]);
-            temperatures.push_back(enerdata_->term[F_TEMP]);
-            for (const auto& group : ekindata_.tcstat)
-            {
-                groupTemperatures.push_back(group.T);
-            }
+            std::array<real, DIM * DIM> box;
+            std::copy_n(box_[0], DIM * DIM, box.begin());
+            boxSamples.push_back(box);
             deferred.deferGpuSamples(time_, *enerdata_);
             for (EnergyOutput* output : outputs)
             {
@@ -754,10 +795,12 @@ TEST_P(EnergyOutputTest, DeferredGpuSamplesPreserveEnergyHistory)
                                             constraints_.get());
             }
         }
-        deferred.completeDeferredGpuKineticSamples(kineticSamples, temperatures, groupTemperatures);
-        deferred.completeDeferredGpuVirialSamples(
-                virialSamples, pressureSamples, scalarPressures, surfaceTensions);
-        deferred.completeDeferredGpuEnergySamples(energySamples);
+        deferred.completeDeferredGpuSamples(energySamples,
+                                            forceVirialSamples,
+                                            constraintVirialSamples,
+                                            kineticSamples,
+                                            groupKineticEnergySamples,
+                                            boxSamples);
     }
 
     // 使用正常逐步记账作为独立参照，逐项比较写入 checkpoint 的统计数据。
@@ -775,7 +818,13 @@ TEST_P(EnergyOutputTest, DeferredGpuSamplesPreserveEnergyHistory)
         EXPECT_DOUBLE_EQ(immediateHistory.ener_sum[entryIndex], deferredHistory.ener_sum[entryIndex]);
         EXPECT_DOUBLE_EQ(immediateHistory.ener_sum_sim[entryIndex],
                          deferredHistory.ener_sum_sim[entryIndex]);
-        EXPECT_NEAR(immediateHistory.ener_ave[entryIndex], deferredHistory.ener_ave[entryIndex], 1e-9);
+        // 逐步路径的 add_ebin_indexed 把 m * e 舍入成 float，延后路径保持 double；
+        // 温度和压力不是整数，方差累加量会差几个 float ulp，求和仍逐位相同。
+        const double floatTolerance = 4 * std::numeric_limits<float>::epsilon()
+                                      * std::abs(immediateHistory.ener_ave[entryIndex]);
+        EXPECT_NEAR(immediateHistory.ener_ave[entryIndex],
+                    deferredHistory.ener_ave[entryIndex],
+                    1e-9 + floatTolerance);
     }
 }
 

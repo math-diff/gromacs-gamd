@@ -212,9 +212,13 @@ The diagnostics implementation shares checked stdio output for dihedral and
 final-force snapshots and reports requested-file failures explicitly.
 
 ``EnergyOutput::deferGpuSamples`` marks energy, virial and kinetic bins together.
-The completion routines retain independent sample-count checks, and replay
-kinetic data, virials and energy in the original order. Native ``msmul`` handles
-the host-side 3x3 virial scaling without additional allocation or transfer.
+The MD loop passes the device history and its host boxes as plain arrays to
+``EnergyOutput::completeDeferredGpuSamples``, which checks every array against
+the deferred sample count. It derives temperatures, pressures and surface
+tensions with the functions and formula of ``addDataAtEnergyStep``, then
+replays kinetic data, virials and energy in the original order; EnergyOutput
+depends on no GaMD type. Native ``msmul`` handles the host-side 3x3 virial
+scaling without additional allocation or transfer.
 
 PME supplies its private energy buffer and producer stream to
 ``launchGaMDPmeEnergyStaging`` in ``gamdgpu.cu``. The existing kernel launch and

@@ -60,6 +60,7 @@
 #include "gromacs/utility/real.h"
 
 class energyhistory_t;
+enum class PbcType : int;
 struct ener_file;
 class gmx_ekindata_t;
 struct gmx_enerdata_t;
@@ -203,19 +204,27 @@ public:
     /*! \brief Defer energy, virial and kinetic bins together for one device-resident step. */
     void deferGpuSamples(double time, const gmx_enerdata_t& enerd);
 
-    /*! \brief Complete deferred main-energy samples from device-produced F_NRE rows. */
-    void completeDeferredGpuEnergySamples(gmx::ArrayRef<const std::array<real, F_NRE>> deviceEnergySamples);
-
-    /*! \brief Complete deferred virial, pressure, and surface-tension samples. */
-    void completeDeferredGpuVirialSamples(gmx::ArrayRef<const std::array<real, DIM * DIM>> virialSamples,
-                                          gmx::ArrayRef<const std::array<real, DIM * DIM>> pressureSamples,
-                                          gmx::ArrayRef<const real> scalarPressureSamples,
-                                          gmx::ArrayRef<const real> surfaceTensionSamples);
-
-    /*! \brief Complete deferred kinetic and temperature samples. */
-    void completeDeferredGpuKineticSamples(gmx::ArrayRef<const std::array<real, DIM * DIM>> kineticTensorSamples,
-                                           gmx::ArrayRef<const real> temperatureSamples,
-                                           gmx::ArrayRef<const real> groupTemperatureSamples);
+    /*! \brief Complete every deferred device-resident sample in step order.
+     *
+     * Derives temperatures, pressures and surface tensions from the device
+     * history with the same formulas as addDataAtEnergyStep(), then completes
+     * the kinetic, virial and energy bins in that order. Each array holds one
+     * entry per deferred step, except \p groupKineticEnergySamples, which holds
+     * one value per temperature-coupling group of each step.
+     *
+     * \param[in] energySamples             Device energy terms of each step.
+     * \param[in] forceVirialSamples        Corrected force virial of each step.
+     * \param[in] constraintVirialSamples   Constraint virial of each step.
+     * \param[in] kineticTensorSamples      Full-step kinetic tensor of each step.
+     * \param[in] groupKineticEnergySamples Step-major kinetic energy of each coupling group.
+     * \param[in] boxSamples                Box used for the pressure of each step.
+     */
+    void completeDeferredGpuSamples(gmx::ArrayRef<const std::array<real, F_NRE>> energySamples,
+                                    gmx::ArrayRef<const std::array<real, DIM * DIM>> forceVirialSamples,
+                                    gmx::ArrayRef<const std::array<real, DIM * DIM>> constraintVirialSamples,
+                                    gmx::ArrayRef<const std::array<real, DIM * DIM>> kineticTensorSamples,
+                                    gmx::ArrayRef<const real> groupKineticEnergySamples,
+                                    gmx::ArrayRef<const std::array<real, DIM * DIM>> boxSamples);
 
     /*! \brief Update the data averaging structure counts.
      *
@@ -319,6 +328,18 @@ public:
     void printEnergyConservation(FILE* fplog, int simulationPart, bool usingMdIntegrator) const;
 
 private:
+    //! Completes deferred kinetic and temperature samples.
+    void completeDeferredGpuKineticSamples(gmx::ArrayRef<const std::array<real, DIM * DIM>> kineticTensorSamples,
+                                           gmx::ArrayRef<const real> temperatureSamples,
+                                           gmx::ArrayRef<const real> groupTemperatureSamples);
+    //! Completes deferred virial, pressure, and surface-tension samples.
+    void completeDeferredGpuVirialSamples(gmx::ArrayRef<const std::array<real, DIM * DIM>> virialSamples,
+                                          gmx::ArrayRef<const std::array<real, DIM * DIM>> pressureSamples,
+                                          gmx::ArrayRef<const real> scalarPressureSamples,
+                                          gmx::ArrayRef<const real> surfaceTensionSamples);
+    //! Completes deferred main-energy samples from device-produced F_NRE rows.
+    void completeDeferredGpuEnergySamples(gmx::ArrayRef<const std::array<real, F_NRE>> deviceEnergySamples);
+
     //! Timestep
     double delta_t_ = 0;
 
@@ -349,10 +370,12 @@ private:
     std::vector<double>                  deferredGpuEnergyTimes_;
     //! Whether the next step should defer energy, virial and kinetic bins together.
     bool deferNextGpuSample_ = false;
-    //! Number of virial/pressure samples omitted from the normal per-step bin update.
-    int deferredGpuVirialSampleCount_ = 0;
-    //! Number of temperature-group samples awaiting kinetic-energy completion.
-    int deferredGpuKineticSampleCount_ = 0;
+    //! Degrees of freedom of each temperature-coupling group, for deferred temperatures.
+    std::vector<real> degreesOfFreedom_;
+    //! Periodic boundary type for deferred pressures.
+    PbcType pbcType_;
+    //! Number of walls for deferred pressures.
+    int numWalls_ = 0;
 
     //! Index for constraints RMSD
     int iconrmsd_ = 0;

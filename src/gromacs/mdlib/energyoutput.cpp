@@ -67,6 +67,7 @@
 #include "gromacs/math/units.h"
 #include "gromacs/math/vec.h"
 #include "gromacs/mdlib/constr.h"
+#include "gromacs/mdlib/coupling.h"
 #include "gromacs/mdlib/ebin.h"
 #include "gromacs/mdlib/mdebin_bar.h"
 #include "gromacs/mdrunutility/handlerestart.h"
@@ -431,6 +432,10 @@ EnergyOutput::EnergyOutput(ener_file*                fp_ene,
 
     nTC_  = isRerun ? 0 : groups->groups[SimulationAtomGroupType::TemperatureCoupling].size();
     nNHC_ = inputrec.opts.nhchainlength; /* shorthand for number of NH chains */
+    // 回放延后的 GPU 样本时要换算温度和压力，需要各温度组的自由度和压力计算的周期设置。
+    degreesOfFreedom_.assign(inputrec.opts.nrdf, inputrec.opts.nrdf + inputrec.opts.ngtc);
+    pbcType_  = inputrec.pbcType;
+    numWalls_ = inputrec.nwall;
     if (bMTTK_)
     {
         nTCP_ = 1; /* assume only one possible coupling system for barostat
@@ -852,6 +857,17 @@ FILE* open_dhdl(const char* filename, const t_inputrec* ir, const gmx_output_env
 namespace gmx
 {
 
+namespace
+{
+
+//! 表面张力 (P_zz - (P_xx + P_yy) / 2) * L_z；逐步和延后两条路径共用这一个公式。
+real surfaceTension(const tensor pressure, const matrix box)
+{
+    return (pressure[ZZ][ZZ] - (pressure[XX][XX] + pressure[YY][YY]) * 0.5) * box[ZZ][ZZ];
+}
+
+} // namespace
+
 void EnergyOutput::addDataAtEnergyStep(bool                    bDoDHDL,
                                        bool                    bSum,
                                        double                  time,
@@ -932,7 +948,7 @@ void EnergyOutput::addDataAtEnergyStep(bool                    bDoDHDL,
     {
         add_ebin(ebin_, ivir_, 9, vir[0], bSum);
         add_ebin(ebin_, ipres_, 9, pres[0], bSum);
-        tmp = (pres[ZZ][ZZ] - (pres[XX][XX] + pres[YY][YY]) * 0.5) * box[ZZ][ZZ];
+        tmp = surfaceTension(pres, box);
         add_ebin(ebin_, isurft_, 1, &tmp, bSum);
     }
     if (epc_ == PressureCoupling::ParrinelloRahman || epc_ == PressureCoupling::Mttk)
@@ -1160,21 +1176,87 @@ void EnergyOutput::deferGpuSamples(const double time, const gmx_enerdata_t& ener
     std::copy(enerd.term.begin(), enerd.term.end(), sample.begin());
     deferredGpuEnergySamples_.push_back(sample);
     deferredGpuEnergyTimes_.push_back(time);
-    // 三类数据来自同一步；统一标记，但保留独立的完成计数检查。
-    ++deferredGpuVirialSampleCount_;
-    ++deferredGpuKineticSampleCount_;
+    // 能量、维里和动能三类数据来自同一步，只用一个标记；样本数由延后的能量样本给出。
     deferNextGpuSample_ = true;
 }
 
-void EnergyOutput::completeDeferredGpuEnergySamples(gmx::ArrayRef<const std::array<real, F_NRE>> deviceEnergySamples)
+void EnergyOutput::completeDeferredGpuSamples(
+        gmx::ArrayRef<const std::array<real, F_NRE>>     energySamples,
+        gmx::ArrayRef<const std::array<real, DIM * DIM>> forceVirialSamples,
+        gmx::ArrayRef<const std::array<real, DIM * DIM>> constraintVirialSamples,
+        gmx::ArrayRef<const std::array<real, DIM * DIM>> kineticTensorSamples,
+        gmx::ArrayRef<const real>                        groupKineticEnergySamples,
+        gmx::ArrayRef<const std::array<real, DIM * DIM>> boxSamples)
 {
-    GMX_RELEASE_ASSERT(deviceEnergySamples.size() == deferredGpuEnergySamples_.size(),
-                       "Device and host deferred energy sample counts must match");
-    if (deviceEnergySamples.empty())
+    const gmx::Index numSamples = gmx::ssize(deferredGpuEnergySamples_);
+    GMX_RELEASE_ASSERT(energySamples.ssize() == numSamples && forceVirialSamples.ssize() == numSamples
+                               && constraintVirialSamples.ssize() == numSamples
+                               && kineticTensorSamples.ssize() == numSamples
+                               && groupKineticEnergySamples.ssize() == numSamples * nTC_
+                               && boxSamples.ssize() == numSamples,
+                       "Every deferred GPU history must cover the same deferred steps");
+    if (numSamples == 0)
     {
         return;
     }
 
+    // 温度：各温度组按自由度加权平均，与逐步路径的总温度定义一致。
+    std::vector<real> groupTemperatures(numSamples * nTC_);
+    std::vector<real> temperatures(numSamples);
+    for (gmx::Index sample = 0; sample < numSamples; ++sample)
+    {
+        real weightedTemperature   = 0;
+        real totalDegreesOfFreedom = 0;
+        for (int group = 0; group < nTC_; ++group)
+        {
+            const real groupTemperature = calc_temp(
+                    groupKineticEnergySamples[sample * nTC_ + group], degreesOfFreedom_[group]);
+            groupTemperatures[sample * nTC_ + group] = groupTemperature;
+            weightedTemperature += degreesOfFreedom_[group] * groupTemperature;
+            totalDegreesOfFreedom += degreesOfFreedom_[group];
+        }
+        if (totalDegreesOfFreedom > 0)
+        {
+            temperatures[sample] = weightedTemperature / totalDegreesOfFreedom;
+        }
+        else
+        {
+            temperatures[sample] = 0;
+        }
+    }
+
+    // 压力：总维里是力维里加约束维里，压力和表面张力用逐步路径的同一组函数。
+    std::vector<std::array<real, DIM * DIM>> totalVirials(numSamples);
+    std::vector<std::array<real, DIM * DIM>> pressures(numSamples);
+    std::vector<real>                        scalarPressures(numSamples);
+    std::vector<real>                        surfaceTensions(numSamples);
+    for (gmx::Index sample = 0; sample < numSamples; ++sample)
+    {
+        for (int component = 0; component < DIM * DIM; ++component)
+        {
+            totalVirials[sample][component] = forceVirialSamples[sample][component]
+                                              + constraintVirialSamples[sample][component];
+        }
+        const rvec* box = reinterpret_cast<const rvec*>(boxSamples[sample].data());
+        scalarPressures[sample] =
+                calc_pres(pbcType_,
+                          numWalls_,
+                          box,
+                          reinterpret_cast<const rvec*>(kineticTensorSamples[sample].data()),
+                          reinterpret_cast<const rvec*>(totalVirials[sample].data()),
+                          reinterpret_cast<rvec*>(pressures[sample].data()));
+        surfaceTensions[sample] =
+                surfaceTension(reinterpret_cast<const rvec*>(pressures[sample].data()), box);
+    }
+
+    // 动能和温度先写回延后的能量样本，再补维里和压力，最后整体记账能量；顺序不能交换。
+    completeDeferredGpuKineticSamples(kineticTensorSamples, temperatures, groupTemperatures);
+    completeDeferredGpuVirialSamples(totalVirials, pressures, scalarPressures, surfaceTensions);
+    completeDeferredGpuEnergySamples(energySamples);
+}
+
+void EnergyOutput::completeDeferredGpuEnergySamples(gmx::ArrayRef<const std::array<real, F_NRE>> deviceEnergySamples)
+{
     std::vector<real> completedSamples;
     completedSamples.reserve(deviceEnergySamples.size() * F_NRE);
     for (gmx::Index sampleIndex = 0; sampleIndex < deviceEnergySamples.ssize(); ++sampleIndex)
@@ -1211,18 +1293,7 @@ void EnergyOutput::completeDeferredGpuVirialSamples(gmx::ArrayRef<const std::arr
                                                     gmx::ArrayRef<const real> scalarPressureSamples,
                                                     gmx::ArrayRef<const real> surfaceTensionSamples)
 {
-    const int numSamples = virialSamples.ssize();
-    GMX_RELEASE_ASSERT(numSamples == deferredGpuVirialSampleCount_ && pressureSamples.ssize() == numSamples
-                               && scalarPressureSamples.ssize() == numSamples
-                               && surfaceTensionSamples.ssize() == numSamples,
-                       "All deferred GPU virial sample counts must match");
-    GMX_RELEASE_ASSERT(deferredGpuEnergySamples_.size() == virialSamples.size(),
-                       "Deferred GPU energy and virial samples must cover the same steps");
-    if (numSamples == 0)
-    {
-        return;
-    }
-
+    const int         numSamples = virialSamples.ssize();
     std::vector<real> flatVirial;
     std::vector<real> flatPressure;
     flatVirial.reserve(numSamples * DIM * DIM);
@@ -1238,7 +1309,6 @@ void EnergyOutput::completeDeferredGpuVirialSamples(gmx::ArrayRef<const std::arr
     add_ebin_deferred(ebin_, ivir_, DIM * DIM, flatVirial, numSamples);
     add_ebin_deferred(ebin_, ipres_, DIM * DIM, flatPressure, numSamples);
     add_ebin_deferred(ebin_, isurft_, 1, surfaceTensionSamples, numSamples);
-    deferredGpuVirialSampleCount_ = 0;
 }
 
 void EnergyOutput::completeDeferredGpuKineticSamples(gmx::ArrayRef<const std::array<real, DIM * DIM>> kineticTensorSamples,
@@ -1246,16 +1316,6 @@ void EnergyOutput::completeDeferredGpuKineticSamples(gmx::ArrayRef<const std::ar
                                                      gmx::ArrayRef<const real> groupTemperatureSamples)
 {
     const int numSamples = kineticTensorSamples.ssize();
-    GMX_RELEASE_ASSERT(numSamples == deferredGpuKineticSampleCount_ && temperatureSamples.ssize() == numSamples
-                               && groupTemperatureSamples.ssize() == numSamples * nTC_,
-                       "All deferred GPU kinetic sample counts must match");
-    GMX_RELEASE_ASSERT(deferredGpuEnergySamples_.size() == kineticTensorSamples.size(),
-                       "Deferred GPU energy and kinetic samples must cover the same steps");
-    if (numSamples == 0)
-    {
-        return;
-    }
-
     for (int sample = 0; sample < numSamples; ++sample)
     {
         const real kineticEnergy = kineticTensorSamples[sample][XX * DIM + XX]
@@ -1268,7 +1328,6 @@ void EnergyOutput::completeDeferredGpuKineticSamples(gmx::ArrayRef<const std::ar
         deferredGpuEnergySamples_[sample][F_ECONSERVED] += kineticCorrection;
     }
     add_ebin_deferred(ebin_, itemp_, nTC_, groupTemperatureSamples, numSamples);
-    deferredGpuKineticSampleCount_ = 0;
 }
 
 void EnergyOutput::recordNonEnergyStep()

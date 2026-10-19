@@ -2083,85 +2083,22 @@ void gmx::LegacySimulator::do_md()
                     {
                         const GaMDHistoryBatch deferredHistory =
                                 gaMDModule_->gpuExecutor()->takeHistory();
-                        const auto& deferredEnergySamples     = deferredHistory.energySamples;
-                        const auto& deferredForceVirials      = deferredHistory.forceVirials;
-                        const auto& deferredConstraintVirials = deferredHistory.constraintVirials;
+                        // 温度、压力、表面张力和三类样本的回放顺序都由 EnergyOutput 负责。
+                        energyOutput.completeDeferredGpuSamples(
+                                deferredHistory.energySamples,
+                                deferredHistory.forceVirials,
+                                deferredHistory.constraintVirials,
+                                deferredHistory.kineticEnergy.totalTensors,
+                                deferredHistory.kineticEnergy.groupKineticEnergies,
+                                deferredPressureBoxes);
                         GMX_RELEASE_ASSERT(
-                                deferredForceVirials.size() == deferredPressureBoxes.size(),
-                                "Deferred GaMD force and host pressure sample counts must match");
-
-                        const auto& deferredKineticHistory = deferredHistory.kineticEnergy;
-                        GMX_RELEASE_ASSERT(deferredKineticHistory.numGroups == ir->opts.ngtc,
-                                           "Deferred GPU kinetic temperature groups must match");
-                        const auto& pressureKineticTensors = deferredKineticHistory.totalTensors;
-                        std::vector<real> deferredGroupTemperatures(
-                                deferredForceVirials.size() * deferredKineticHistory.numGroups);
-                        std::vector<real> deferredTemperatures(deferredForceVirials.size());
-                        for (std::size_t sample = 0; sample < deferredForceVirials.size(); ++sample)
-                        {
-                            real weightedTemperature   = 0;
-                            real totalDegreesOfFreedom = 0;
-                            for (int group = 0; group < deferredKineticHistory.numGroups; ++group)
-                            {
-                                const real groupTemperature = calc_temp(
-                                        deferredKineticHistory.groupKineticEnergies
-                                                [sample * deferredKineticHistory.numGroups + group],
-                                        ir->opts.nrdf[group]);
-                                deferredGroupTemperatures[sample * deferredKineticHistory.numGroups + group] =
-                                        groupTemperature;
-                                weightedTemperature += ir->opts.nrdf[group] * groupTemperature;
-                                totalDegreesOfFreedom += ir->opts.nrdf[group];
-                            }
-                            if (totalDegreesOfFreedom > 0)
-                            {
-                                deferredTemperatures[sample] = weightedTemperature / totalDegreesOfFreedom;
-                            }
-                            else
-                            {
-                                deferredTemperatures[sample] = 0;
-                            }
-                        }
-                        energyOutput.completeDeferredGpuKineticSamples(
-                                pressureKineticTensors, deferredTemperatures, deferredGroupTemperatures);
-
-                        std::vector<std::array<real, DIM * DIM>> deferredTotalVirials(
-                                deferredForceVirials.size());
-                        std::vector<std::array<real, DIM * DIM>> deferredPressures(
-                                deferredForceVirials.size());
-                        std::vector<real> deferredScalarPressures(deferredForceVirials.size());
-                        std::vector<real> deferredSurfaceTensions(deferredForceVirials.size());
-                        for (std::size_t sample = 0; sample < deferredForceVirials.size(); ++sample)
-                        {
-                            for (int component = 0; component < DIM * DIM; ++component)
-                            {
-                                deferredTotalVirials[sample][component] =
-                                        deferredForceVirials[sample][component]
-                                        + deferredConstraintVirials[sample][component];
-                            }
-                            deferredScalarPressures[sample] = calc_pres(
-                                    fr_->pbcType,
-                                    ir->nwall,
-                                    reinterpret_cast<const rvec*>(deferredPressureBoxes[sample].data()),
-                                    reinterpret_cast<const rvec*>(pressureKineticTensors[sample].data()),
-                                    reinterpret_cast<const rvec*>(deferredTotalVirials[sample].data()),
-                                    reinterpret_cast<rvec*>(deferredPressures[sample].data()));
-                            const auto& pressure = deferredPressures[sample];
-                            const auto& box      = deferredPressureBoxes[sample];
-                            deferredSurfaceTensions[sample] =
-                                    (pressure[ZZ * DIM + ZZ]
-                                     - (pressure[XX * DIM + XX] + pressure[YY * DIM + YY]) * 0.5_real)
-                                    * box[ZZ * DIM + ZZ];
-                        }
-                        energyOutput.completeDeferredGpuVirialSamples(deferredTotalVirials,
-                                                                      deferredPressures,
-                                                                      deferredScalarPressures,
-                                                                      deferredSurfaceTensions);
-                        energyOutput.completeDeferredGpuEnergySamples(deferredEnergySamples);
-                        GMX_RELEASE_ASSERT(
-                                deferredGamdOutputSteps.size() == deferredEnergySamples.size(),
+                                deferredGamdOutputSteps.size() == deferredHistory.energySamples.size(),
                                 "Buffered GaMD output steps and energy samples must match");
-                        gaMDModule_->writeBufferedProductionOutput(
-                                deferredGamdOutputSteps, deferredEnergySamples, step, cr_->nodeid, wallCycleCounters_);
+                        gaMDModule_->writeBufferedProductionOutput(deferredGamdOutputSteps,
+                                                                   deferredHistory.energySamples,
+                                                                   step,
+                                                                   cr_->nodeid,
+                                                                   wallCycleCounters_);
                         deferredGamdOutputSteps.clear();
                         deferredPressureBoxes.clear();
                     }
