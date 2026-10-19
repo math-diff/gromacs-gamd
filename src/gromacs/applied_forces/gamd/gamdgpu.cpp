@@ -39,8 +39,6 @@
 
 #include "gmxpre.h"
 
-#include <cstdlib>
-
 #include <algorithm>
 
 #include "gromacs/gpu_utils/device_stream.h"
@@ -76,6 +74,8 @@ bool hasPerturbedEntries(const InteractionDefinitions& interactionDefinitions, i
 } // namespace
 
 GaMDGpuExecutor::Impl::Impl(const bool           useGpuResidentGaMD,
+                            const bool           dihedralShadowEnabled,
+                            const bool           energyShadowEnabled,
                             const DeviceContext& deviceContext,
                             const DeviceStream&  deviceStream,
                             gmx_wallcycle*       wallCycleCounters) :
@@ -90,11 +90,8 @@ GaMDGpuExecutor::Impl::Impl(const bool           useGpuResidentGaMD,
     matrix box = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } };
     setPbcAiuc(0, box, &pbcAiuc_);
 
-    // 输出最终 GPU 力时复用影子检查的回传，确保读取已经修正的设备数据。
-    gamdDihedralShadowEnabled_ = std::getenv("GMX_GAMD_GPU_DIH_SHADOW") != nullptr
-                                 || std::getenv("GMX_GAMD_FORCE_DEBUG_FILE") != nullptr;
-    gamdEnergyShadowDiagnosticsEnabled_ = std::getenv("GMX_GAMD_GPU_ENERGY_SHADOW") != nullptr;
-
+    gamdDihedralShadowEnabled_          = dihedralShadowEnabled;
+    gamdEnergyShadowDiagnosticsEnabled_ = energyShadowEnabled;
 
     if (useGpuResidentGaMD_)
     {
@@ -530,10 +527,17 @@ GpuEventSynchronizer* GaMDGpuExecutor::Impl::gamdForcesReadyEvent()
 }
 
 GaMDGpuExecutor::GaMDGpuExecutor(const bool           useGpuResidentGaMD,
+                                 const bool           dihedralShadowEnabled,
+                                 const bool           energyShadowEnabled,
                                  const DeviceContext& deviceContext,
                                  const DeviceStream&  deviceStream,
                                  gmx_wallcycle*       wallCycleCounters) :
-    impl_(std::make_unique<Impl>(useGpuResidentGaMD, deviceContext, deviceStream, wallCycleCounters))
+    impl_(std::make_unique<Impl>(useGpuResidentGaMD,
+                                 dihedralShadowEnabled,
+                                 energyShadowEnabled,
+                                 deviceContext,
+                                 deviceStream,
+                                 wallCycleCounters))
 {
 }
 

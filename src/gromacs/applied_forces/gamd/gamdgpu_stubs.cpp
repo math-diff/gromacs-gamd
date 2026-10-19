@@ -52,7 +52,7 @@ class GaMDGpuExecutor::Impl
 {
 };
 
-GaMDGpuExecutor::GaMDGpuExecutor(bool, const DeviceContext&, const DeviceStream&, gmx_wallcycle*) :
+GaMDGpuExecutor::GaMDGpuExecutor(bool, bool, bool, const DeviceContext&, const DeviceStream&, gmx_wallcycle*) :
     impl_(nullptr)
 {
     // 非 CUDA 构建保留完整接口，但绝不能进入 CUDA 专用执行路径。

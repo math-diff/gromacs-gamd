@@ -102,8 +102,15 @@ public:
     const GaMDStepResult& stepResult() const;
     //! Returns the current bias parameters shared by the CPU and GPU evaluators.
     GaMDBiasParameters biasParameters() const;
-    //! Creates the optional executor that owns the GaMD device state.
+    /*! \brief Creates the optional executor that owns the GaMD device state.
+     *
+     * Stops with a fatal input error before dynamics when the GPU dihedral shadow
+     * of a CPU-update run is combined with DD atom ordering or virtual sites.
+     * Errors do not propagate, because the caller has already created GPU objects.
+     */
     void initializeGpuExecutor(bool                 useGpuResidentGaMD,
+                               bool                 haveDDAtomOrdering,
+                               bool                 haveVirtualSites,
                                const DeviceContext& deviceContext,
                                const DeviceStream&  deviceStream,
                                gmx_wallcycle*       wallCycleCounters);

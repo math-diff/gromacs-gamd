@@ -47,9 +47,10 @@ namespace gmx
 
 class GaMDMDModule;
 
-//! Selects where current-step GaMD force correction is executed.
+//! Whether current-step GaMD is enabled and where its force correction is executed.
 enum class GaMDExecutionMode
 {
+    Disabled,
     CpuReference,
     GpuResident
 };
@@ -197,7 +198,9 @@ public:
     //! If F buffer operations are allowed on GPU (actual use depends on other activities that step).
     bool useGpuFBufferOpsWhenAllowed = false;
     //! Current-step GaMD execution mode selected for this simulation.
-    GaMDExecutionMode gamdExecutionMode = GaMDExecutionMode::CpuReference;
+    GaMDExecutionMode gamdExecutionMode = GaMDExecutionMode::Disabled;
+    //! Whether current-step GaMD is enabled for this simulation.
+    bool useGaMD() const { return gamdExecutionMode != GaMDExecutionMode::Disabled; }
     //! Whether the complete GPU-resident GaMD feature bundle is active.
     bool useGpuResidentGaMD() const { return gamdExecutionMode == GaMDExecutionMode::GpuResident; }
     //! Whether filler particles are part of the local state
@@ -241,7 +244,7 @@ public:
 class MdrunScheduleWorkload
 {
 public:
-    //! Non-owning access to the built-in GaMD module for integration bridges.
+    //! Non-owning access to the built-in GaMD module; set only when GaMD is enabled.
     GaMDMDModule* gaMDModule = nullptr;
 
     //! Workload descriptor for information constant for an entire run

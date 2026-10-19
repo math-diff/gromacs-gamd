@@ -57,6 +57,8 @@ class GaMDGpuExecutor::Impl
 public:
     //! Allocates the enabled device resources on the supplied stream.
     Impl(bool                 useGpuResidentGaMD,
+         bool                 dihedralShadowEnabled,
+         bool                 energyShadowEnabled,
          const DeviceContext& deviceContext,
          const DeviceStream&  deviceStream,
          gmx_wallcycle*       wallCycleCounters);

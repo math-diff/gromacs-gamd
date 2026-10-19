@@ -166,6 +166,13 @@ public:
     void finishDihedralStep(int64_t step, bool isMainRank);
     //! Writes the selected final-force buffer in its current atom order.
     void dumpFinalForces(int64_t step, ArrayRef<const RVec> forces, bool isMainRank);
+    //! Whether a final-force snapshot file was requested.
+    bool finalForceOutputRequested() const { return finalForceFile_ != nullptr; }
+
+    //! Whether GMX_GAMD_GPU_DIH_SHADOW requests the GPU dihedral and correction shadow.
+    bool gpuDihedralShadowRequested() const { return gpuDihedralShadowRequested_; }
+    //! Whether GMX_GAMD_GPU_ENERGY_SHADOW requests the GPU energy shadow.
+    bool gpuEnergyShadowRequested() const { return gpuEnergyShadowRequested_; }
 
     //! Logs resident host-staging conditions once on the main rank.
     void logResidentEnergy(bool useBufferedOutput, bool isMainRank);
@@ -202,6 +209,8 @@ private:
     bool residentEnergyMessagePrinted_  = false;
     bool gpuWorkloadDiagnosticsEnabled_ = false;
     bool gpuWorkloadDiagnosticsPrinted_ = false;
+    bool gpuDihedralShadowRequested_    = false;
+    bool gpuEnergyShadowRequested_      = false;
 };
 
 //! \}

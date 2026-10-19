@@ -101,9 +101,12 @@ during stage four. ``irest_gamd=1`` resumes initialized parameters in production
 Input, output, and continuation
 -------------------------------
 
-Set ``gamd = yes`` in the MDP used by ``grompp``. The TPR currently stores only
-the activation flag; detailed parameters are read from ``gamd.in`` in the
-``mdrun`` working directory. Preserve that file together with the TPR.
+Set ``gamd = yes`` in the MDP used by ``grompp``. This TPR flag is the only
+switch that enables GaMD; there is no environment-variable alternative, so a
+TPR written without it, including one from an unmodified ``grompp``, must be
+regenerated with this branch. The TPR currently stores only the activation
+flag; detailed parameters are read from ``gamd.in`` in the ``mdrun`` working
+directory. Preserve that file together with the TPR.
 
 The strict legacy parser rejects unknown/duplicate keys, missing values,
 trailing non-comment tokens, invalid ranges, and unaligned averaging windows.
@@ -166,7 +169,11 @@ Explicit numeric diagnostic environment variables use the existing GROMACS
 strict converters. Empty, non-numeric, trailing-text, overflow, and non-finite
 force override values are errors rather than implicit zeroes. Integer debug
 indices and steps also use checked conversion. These switches select optional
-diagnostics; production mode selection remains automatic.
+diagnostics; production mode selection remains automatic. All diagnostic
+variables, including ``GMX_GAMD_GPU_DIH_SHADOW`` and
+``GMX_GAMD_GPU_ENERGY_SHADOW``, are read once when ``mdrun`` starts. With
+``-update cpu`` the GPU dihedral shadow does not support DD-style atom ordering
+or virtual sites; such runs stop before dynamics.
 
 GaMD information messages and successful CPU/GPU shadow comparisons use the
 standard simulation logger. With ``-deffnm run`` they are recorded in

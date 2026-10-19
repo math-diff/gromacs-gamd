@@ -37,10 +37,6 @@
 
 #include "config.h"
 
-#include <cstdlib>
-
-#include <optional>
-#include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -52,50 +48,12 @@
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/logger.h"
 
-#include "testutils/setenv.h"
-
 namespace gmx
 {
 namespace test
 {
 namespace
 {
-
-class ScopedEnvironmentVariable
-{
-public:
-    ScopedEnvironmentVariable(const char* name, const char* value) : name_(name)
-    {
-        if (const char* originalValue = std::getenv(name))
-        {
-            originalValue_ = originalValue;
-        }
-        if (value == nullptr)
-        {
-            gmxUnsetenv(name);
-        }
-        else
-        {
-            gmxSetenv(name, value, 1);
-        }
-    }
-
-    ~ScopedEnvironmentVariable()
-    {
-        if (originalValue_.has_value())
-        {
-            gmxSetenv(name_.c_str(), originalValue_->c_str(), 1);
-        }
-        else
-        {
-            gmxUnsetenv(name_.c_str());
-        }
-    }
-
-private:
-    std::string                name_;
-    std::optional<std::string> originalValue_;
-};
 
 TEST(DecideSimulationWorkloadTest, UsesGpuForceBufferOpsOnForceOnlySteps)
 {
@@ -194,6 +152,7 @@ TEST(DecideSimulationWorkloadTest, CpuUpdateGaMDUsesReferenceModeWithoutMdGpuGra
                                                                          false,
                                                                          false);
         EXPECT_TRUE(baselineWork.useMdGpuGraph);
+        EXPECT_FALSE(baselineWork.useGaMD());
     }
 
     inputrec.bDoGaMD                  = true;
@@ -222,12 +181,12 @@ TEST(DecideSimulationWorkloadTest, CpuUpdateGaMDUsesReferenceModeWithoutMdGpuGra
 }
 
 #if GMX_GPU_CUDA
-TEST(DecideSimulationWorkloadTest, EnvironmentGaMDRejectsCpuBondedWithGpuUpdate)
+TEST(DecideSimulationWorkloadTest, GpuUpdateGaMDRejectsCpuBonded)
 {
-    const ScopedEnvironmentVariable enableGaMD("GMX_USE_GAMD", "1");
-    const MDLogger                  logger;
-    const DevelopmentFeatureFlags   devFlags;
-    t_inputrec                      inputrec;
+    const MDLogger                logger;
+    const DevelopmentFeatureFlags devFlags;
+    t_inputrec                    inputrec;
+    inputrec.bDoGaMD       = true;
     inputrec.nstcalcenergy = 1;
 
     // 从真实入口请求旧的混合路径，应当直接拒绝，而不是退回 CPU 修正。

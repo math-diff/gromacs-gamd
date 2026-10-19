@@ -60,6 +60,7 @@
 #include <variant>
 #include <vector>
 
+#include "gromacs/applied_forces/gamd/gamddiagnostics.h"
 #include "gromacs/applied_forces/gamd/gamdmdmodule.h"
 #include "gromacs/commandline/filenm.h"
 #include "gromacs/domdec/builder.h"
@@ -1910,15 +1911,18 @@ int Mdrunner::mdrunner()
             GMX_RELEASE_ASSERT(deviceStreamManager != nullptr,
                                "GPU device stream manager should be valid in order to use GPU "
                                "version of bonded forces.");
-            const bool useGaMDGpuExecutor =
-                    runScheduleWork.simulationWork.useGpuResidentGaMD()
-                    || ((inputrec->bDoGaMD || std::getenv("GMX_USE_GAMD") != nullptr)
-                        && (std::getenv("GMX_GAMD_GPU_DIH_SHADOW") != nullptr
-                            || std::getenv("GMX_GAMD_GPU_ENERGY_SHADOW") != nullptr));
+            // resident 路径总要 GaMD executor；CPU 更新只在请求 GPU 影子诊断时才创建它。
+            const GaMDDiagnostics& gaMDDiagnostics = mdModules_->gaMDModule()->diagnostics();
+            const bool useGaMDGpuExecutor = runScheduleWork.simulationWork.useGpuResidentGaMD()
+                                            || (runScheduleWork.simulationWork.useGaMD()
+                                                && (gaMDDiagnostics.gpuDihedralShadowRequested()
+                                                    || gaMDDiagnostics.gpuEnergyShadowRequested()));
             if (useGaMDGpuExecutor)
             {
                 mdModules_->gaMDModule()->initializeGpuExecutor(
                         runScheduleWork.simulationWork.useGpuResidentGaMD(),
+                        haveDDAtomOrdering(*cr),
+                        gmx_mtop_interaction_count(mtop, IF_VSITE) > 0,
                         deviceStreamManager->context(),
                         deviceStreamManager->bondedStream(),
                         wcycle.get());

@@ -104,14 +104,42 @@ GaMDBiasParameters GaMDMDModule::biasParameters() const
 }
 
 void GaMDMDModule::initializeGpuExecutor(const bool           useGpuResidentGaMD,
+                                         const bool           haveDDAtomOrdering,
+                                         const bool           haveVirtualSites,
                                          const DeviceContext& deviceContext,
                                          const DeviceStream&  deviceStream,
                                          gmx_wallcycle*       wallCycleCounters)
 {
     GMX_RELEASE_ASSERT(gpuExecutor_ == nullptr,
                        "The GaMD GPU executor can only be initialized once");
-    gpuExecutor_ = std::make_unique<GaMDGpuExecutor>(
-            useGpuResidentGaMD, deviceContext, deviceStream, wallCycleCounters);
+    // runner 此时已创建 GPU 非键对象；异常若继续展开，会在设备流销毁后才释放它们而崩溃，
+    // 所以在这个入口就把错误转成致命退出。
+    try
+    {
+        // 输出最终 GPU 力时复用二面角影子的回传，确保读取已经修正的设备数据。
+        const bool dihedralShadowEnabled = diagnostics_->gpuDihedralShadowRequested()
+                                           || diagnostics_->finalForceOutputRequested();
+        // CPU 更新时影子要和 CPU 修正逐原子对照，还不支持 DD 原子排序和虚拟位点。
+        if (!useGpuResidentGaMD && dihedralShadowEnabled && haveDDAtomOrdering)
+        {
+            GMX_THROW(InconsistentInputError(
+                    "GMX_GAMD_GPU_DIH_SHADOW currently supports only one rank without domain "
+                    "decomposition."));
+        }
+        if (!useGpuResidentGaMD && dihedralShadowEnabled && haveVirtualSites)
+        {
+            GMX_THROW(InconsistentInputError(
+                    "GMX_GAMD_GPU_DIH_SHADOW does not yet apply virtual-site force spreading on "
+                    "the device."));
+        }
+        gpuExecutor_ = std::make_unique<GaMDGpuExecutor>(useGpuResidentGaMD,
+                                                         dihedralShadowEnabled,
+                                                         diagnostics_->gpuEnergyShadowRequested(),
+                                                         deviceContext,
+                                                         deviceStream,
+                                                         wallCycleCounters);
+    }
+    GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
 }
 
 GaMDGpuExecutor* GaMDMDModule::gpuExecutor()

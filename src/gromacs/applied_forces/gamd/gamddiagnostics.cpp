@@ -442,6 +442,9 @@ GaMDDiagnostics::GaMDDiagnostics()
     finalForceFile_    = openGaMDDiagnosticFile(
             "GMX_GAMD_FORCE_DEBUG_FILE", "# step atom fx fy fz |f|\n", &finalForceFilename_);
     gpuWorkloadDiagnosticsEnabled_ = std::getenv("GMX_GAMD_GPU_DIAGNOSTICS") != nullptr;
+    // GPU 影子开关也只在这里读取；runner 和 GPU executor 都向本对象查询。
+    gpuDihedralShadowRequested_ = std::getenv("GMX_GAMD_GPU_DIH_SHADOW") != nullptr;
+    gpuEnergyShadowRequested_   = std::getenv("GMX_GAMD_GPU_ENERGY_SHADOW") != nullptr;
 }
 
 GaMDDiagnostics::~GaMDDiagnostics()

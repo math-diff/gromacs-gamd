@@ -97,10 +97,13 @@ must inspect the configured simulation log, normally ``run.log`` with
 
 Internal parsing, I/O and numerical checks use the native input, file and
 simulation-instability exception types. The module's legacy MD entry points,
-the force-correction entry, diagnostic output callbacks and the GPU buffer
-binding entry contain exceptions with the existing fatal-error adapter. GPU
-buffer binding can be called after asynchronous interaction-list uploads, and
-raw bonded diagnostics can execute inside OpenMP; neither may unwind its caller.
+the force-correction entry, diagnostic output callbacks, the GPU executor
+initialization and the GPU buffer binding entry contain exceptions with the
+existing fatal-error adapter. GPU buffer binding can be called after
+asynchronous interaction-list uploads, and raw bonded diagnostics can execute
+inside OpenMP; neither may unwind its caller. Executor initialization runs after
+the runner has created GPU nonbonded objects; unwinding through
+``Mdrunner::mdrunner`` would release them after the device stream and crash.
 Destructors also contain close errors. Reinitialize an internal runtime after
 failed input preparation; retrying a partially prepared instance is unsupported.
 
@@ -155,6 +158,13 @@ already enforced by native GPU update and PME (virtual sites, whole-molecule
 transforms, screw PBC) are not duplicated; relaxing one of those native rules
 requires a matching GaMD check. Topology limits of the GPU force path need the
 local topology and stay at GPU listed-force buffer binding.
+GaMD is enabled only by the TPR flag. The execution mode (``Disabled``,
+``CpuReference`` or ``GpuResident``) is the single source for whether and where
+GaMD runs; the force path receives the module pointer only when GaMD is
+enabled, so a non-null pointer means GaMD is active. ``GaMDDiagnostics`` reads
+every diagnostic environment variable once, and the GPU executor receives the
+shadow switches through its constructor. GPU-shadow combinations that a
+CPU-update run cannot support are rejected when the executor is created.
 The current-step correction entry performs energy accounting, then calls the
 separate CPU or GPU sequence in ``gamdexecution.cpp``.
 ``sim_util.cpp`` retains the call at the original force-processing boundary.

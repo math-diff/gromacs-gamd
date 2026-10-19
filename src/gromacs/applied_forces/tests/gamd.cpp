@@ -107,7 +107,6 @@ private:
 //! 选择器的运行时开关；默认值是受支持的 GPU-resident 组合。
 struct GaMDRuntimeChoices
 {
-    bool useGaMD                   = true;
     bool useGpuNonbonded           = true;
     bool useGpuPme                 = true;
     bool useGpuBonded              = true;
@@ -122,7 +121,6 @@ struct GaMDRuntimeChoices
 GaMDExecutionMode selectExecutionMode(const t_inputrec& inputrec, const GaMDRuntimeChoices& choices)
 {
     return selectGaMDExecutionMode(inputrec,
-                                   choices.useGaMD,
                                    choices.useGpuNonbonded,
                                    choices.useGpuPme,
                                    choices.useGpuBonded,
@@ -131,6 +129,13 @@ GaMDExecutionMode selectExecutionMode(const t_inputrec& inputrec, const GaMDRunt
                                    choices.haveDDAtomOrdering,
                                    choices.haveSeparatePmeRank,
                                    choices.doRerun);
+}
+
+//! 打开 GaMD，并满足两条路径共同的输入要求：md 积分器（默认值）且每步计算能量。
+void setSupportedGaMDInput(t_inputrec* inputrec)
+{
+    inputrec->bDoGaMD       = true;
+    inputrec->nstcalcenergy = 1;
 }
 
 //! 设置温度耦合组数；done_inputrec 会逐组释放退火数组，所以要一起分配。
@@ -737,6 +742,21 @@ TEST(GaMDModuleOwnershipTest, DiagnosticsAndHostWorkspaceAreInstanceOwned)
     EXPECT_TRUE(secondModule.diagnostics().hostWorkspace().cpuDihedralForces.empty());
 }
 
+TEST(GaMDDiagnosticsTest, GpuShadowRequestsAreReadAtConstruction)
+{
+    gmxSetenv("GMX_GAMD_GPU_DIH_SHADOW", "1", 1);
+    gmxUnsetenv("GMX_GAMD_GPU_ENERGY_SHADOW");
+    const GaMDDiagnostics diagnostics;
+    // 构造之后再改环境变量，查询结果仍是构造时读到的值。
+    gmxUnsetenv("GMX_GAMD_GPU_DIH_SHADOW");
+    gmxSetenv("GMX_GAMD_GPU_ENERGY_SHADOW", "1", 1);
+
+    EXPECT_TRUE(diagnostics.gpuDihedralShadowRequested());
+    EXPECT_FALSE(diagnostics.gpuEnergyShadowRequested());
+    EXPECT_FALSE(diagnostics.finalForceOutputRequested());
+    gmxUnsetenv("GMX_GAMD_GPU_ENERGY_SHADOW");
+}
+
 TEST_F(GaMDTest, Stage4PotentialStatisticsUseBoostedTotalPotential)
 {
     TestFileManager fileManager;
@@ -1010,7 +1030,7 @@ TEST_F(GaMDTest, GaMDCpuUpdateSelectsCpuReference)
 {
     // 压力耦合、力输出、DD 原子排序和温度组数只限制 GPU 路径，不影响 CPU 更新。
     t_inputrec inputrec;
-    inputrec.nstcalcenergy                = 1;
+    setSupportedGaMDInput(&inputrec);
     inputrec.nstfout                      = 1;
     inputrec.pressureCouplingOptions.epc  = PressureCoupling::ParrinelloRahman;
     inputrec.pressureCouplingOptions.epct = PressureCouplingType::Anisotropic;
@@ -1028,7 +1048,7 @@ TEST_F(GaMDTest, GaMDCpuUpdateSelectsCpuReference)
 TEST_F(GaMDTest, CpuGaMDRejectsDomainDecompositionAndMts)
 {
     t_inputrec inputrec;
-    inputrec.nstcalcenergy = 1;
+    setSupportedGaMDInput(&inputrec);
     GaMDRuntimeChoices choices;
     choices.useGpuUpdate              = false;
     choices.havePpDomainDecomposition = true;
@@ -1046,8 +1066,8 @@ TEST_F(GaMDTest, GaMDRejectsIntegratorsOtherThanMd)
          { IntegrationAlgorithm::Steep, IntegrationAlgorithm::SD1, IntegrationAlgorithm::VV })
     {
         t_inputrec inputrec;
-        inputrec.eI            = integrator;
-        inputrec.nstcalcenergy = 1;
+        setSupportedGaMDInput(&inputrec);
+        inputrec.eI = integrator;
         GaMDRuntimeChoices choices;
         choices.useGpuUpdate = false;
         EXPECT_THROW_GMX(selectExecutionMode(inputrec, choices), InconsistentInputError);
@@ -1057,7 +1077,7 @@ TEST_F(GaMDTest, GaMDRejectsIntegratorsOtherThanMd)
 TEST_F(GaMDTest, GaMDRejectsRerun)
 {
     t_inputrec inputrec;
-    inputrec.nstcalcenergy = 1;
+    setSupportedGaMDInput(&inputrec);
     GaMDRuntimeChoices choices;
     choices.useGpuUpdate = false;
     choices.doRerun      = true;
@@ -1067,22 +1087,22 @@ TEST_F(GaMDTest, GaMDRejectsRerun)
 TEST_F(GaMDTest, GaMDRequiresEnergiesEveryStep)
 {
     t_inputrec inputrec;
+    setSupportedGaMDInput(&inputrec);
     inputrec.nstcalcenergy = 10;
     GaMDRuntimeChoices choices;
     choices.useGpuUpdate = false;
     EXPECT_THROW_GMX(selectExecutionMode(inputrec, choices), InconsistentInputError);
 }
 
-TEST_F(GaMDTest, NonGaMDGpuUpdateRetainsNormalExecutionMode)
+TEST_F(GaMDTest, NonGaMDSelectsDisabledAndIgnoresGaMDLimits)
 {
-    // 不启用 GaMD 时，GaMD 的限制不能拒绝任何输入；这里的 nstcalcenergy 保持默认值 0。
+    // TPR 没有 gamd 开关时选择 Disabled，GaMD 的限制不能拒绝任何输入；nstcalcenergy 保持默认值 0。
     t_inputrec inputrec;
     inputrec.nstfout                      = 1;
     inputrec.useMts                       = true;
     inputrec.pressureCouplingOptions.epc  = PressureCoupling::ParrinelloRahman;
     inputrec.pressureCouplingOptions.epct = PressureCouplingType::Anisotropic;
     GaMDRuntimeChoices choices;
-    choices.useGaMD                   = false;
     choices.useGpuNonbonded           = false;
     choices.useGpuPme                 = false;
     choices.useGpuBonded              = false;
@@ -1091,14 +1111,15 @@ TEST_F(GaMDTest, NonGaMDGpuUpdateRetainsNormalExecutionMode)
     choices.haveSeparatePmeRank       = true;
     choices.doRerun                   = true;
 
-    EXPECT_EQ(GaMDExecutionMode::CpuReference, selectExecutionMode(inputrec, choices));
+    EXPECT_EQ(GaMDExecutionMode::Disabled, selectExecutionMode(inputrec, choices));
+    EXPECT_STREQ("disabled", gaMDExecutionModeName(GaMDExecutionMode::Disabled));
 }
 
 #if GMX_GPU_CUDA
 TEST_F(GaMDTest, GaMDGpuExecutionModeSelectsResidentPathAutomatically)
 {
     t_inputrec inputrec;
-    inputrec.nstcalcenergy = 1;
+    setSupportedGaMDInput(&inputrec);
     setTemperatureCouplingGroupCount(&inputrec, 2);
     EXPECT_EQ(GaMDExecutionMode::GpuResident, selectExecutionMode(inputrec, GaMDRuntimeChoices()));
     EXPECT_STREQ("GPU resident", gaMDExecutionModeName(GaMDExecutionMode::GpuResident));
@@ -1108,7 +1129,7 @@ TEST_F(GaMDTest, GaMDGpuExecutionModeRejectsUnsupportedWorkloads)
 {
     // 每个块都在受支持的组合上只改一项。
     t_inputrec supportedInput;
-    supportedInput.nstcalcenergy = 1;
+    setSupportedGaMDInput(&supportedInput);
     {
         GaMDRuntimeChoices choices;
         choices.useGpuNonbonded = false;
@@ -1141,26 +1162,26 @@ TEST_F(GaMDTest, GaMDGpuExecutionModeRejectsUnsupportedWorkloads)
     }
     {
         t_inputrec inputrec;
-        inputrec.nstcalcenergy               = 1;
+        setSupportedGaMDInput(&inputrec);
         inputrec.pressureCouplingOptions.epc = PressureCoupling::ParrinelloRahman;
         EXPECT_THROW_GMX(selectExecutionMode(inputrec, GaMDRuntimeChoices()), InconsistentInputError);
     }
     {
         t_inputrec inputrec;
-        inputrec.nstcalcenergy                = 1;
+        setSupportedGaMDInput(&inputrec);
         inputrec.pressureCouplingOptions.epc  = PressureCoupling::CRescale;
         inputrec.pressureCouplingOptions.epct = PressureCouplingType::Anisotropic;
         EXPECT_THROW_GMX(selectExecutionMode(inputrec, GaMDRuntimeChoices()), InconsistentInputError);
     }
     {
         t_inputrec inputrec;
-        inputrec.nstcalcenergy = 1;
-        inputrec.nstfout       = 10;
+        setSupportedGaMDInput(&inputrec);
+        inputrec.nstfout = 10;
         EXPECT_THROW_GMX(selectExecutionMode(inputrec, GaMDRuntimeChoices()), InconsistentInputError);
     }
     {
         t_inputrec inputrec;
-        inputrec.nstcalcenergy = 1;
+        setSupportedGaMDInput(&inputrec);
         setTemperatureCouplingGroupCount(&inputrec, 3);
         EXPECT_THROW_GMX(selectExecutionMode(inputrec, GaMDRuntimeChoices()), InconsistentInputError);
     }
@@ -1171,7 +1192,7 @@ TEST_F(GaMDTest, GaMDGpuExecutionModeAcceptsSupportedCRescaleTypes)
     for (const auto type : { PressureCouplingType::Isotropic, PressureCouplingType::SemiIsotropic })
     {
         t_inputrec inputrec;
-        inputrec.nstcalcenergy                = 1;
+        setSupportedGaMDInput(&inputrec);
         inputrec.pressureCouplingOptions.epc  = PressureCoupling::CRescale;
         inputrec.pressureCouplingOptions.epct = type;
         EXPECT_EQ(GaMDExecutionMode::GpuResident, selectExecutionMode(inputrec, GaMDRuntimeChoices()));
@@ -1181,7 +1202,7 @@ TEST_F(GaMDTest, GaMDGpuExecutionModeAcceptsSupportedCRescaleTypes)
 TEST_F(GaMDTest, GaMDGpuExecutionModeRejectsNonCudaBuild)
 {
     t_inputrec inputrec;
-    inputrec.nstcalcenergy = 1;
+    setSupportedGaMDInput(&inputrec);
     EXPECT_THROW_GMX(selectExecutionMode(inputrec, GaMDRuntimeChoices()), InconsistentInputError);
 }
 #endif

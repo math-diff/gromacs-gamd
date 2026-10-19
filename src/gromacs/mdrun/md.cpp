@@ -359,7 +359,11 @@ void gmx::LegacySimulator::do_md()
     gmx_global_stat_t gstat = global_stat_init(ir);
 
     GMX_RELEASE_ASSERT(gaMDModule_ != nullptr, "MDModules must provide the built-in GaMD module");
-    runScheduleWork_->gaMDModule = gaMDModule_;
+    // 只在 GaMD 启用时把模块交给求力流程；求力流程里指针非空就表示 GaMD 开着。
+    if (runScheduleWork_->simulationWork.useGaMD())
+    {
+        runScheduleWork_->gaMDModule = gaMDModule_;
+    }
 
     const auto& simulationWork     = runScheduleWork_->simulationWork;
     const bool  useGpuForPme       = simulationWork.useGpuPme;
@@ -889,7 +893,7 @@ void gmx::LegacySimulator::do_md()
     }
 
     bool       usedMdGpuGraphLastStep = false;
-    const bool useCurrentStepGaMD     = ir->bDoGaMD || getenv("GMX_USE_GAMD") != nullptr;
+    const bool useCurrentStepGaMD     = simulationWork.useGaMD();
     const bool useGpuResidentGaMD     = simulationWork.useGpuResidentGaMD();
     gaMDModule_->setBufferedProductionOutputEnabled(useGpuResidentGaMD);
     if (useCurrentStepGaMD)
@@ -1194,7 +1198,7 @@ void gmx::LegacySimulator::do_md()
         runScheduleWork_->stepWork = setupStepWorkload(
                 legacyForceFlags, ir->mtsLevels, step, runScheduleWork_->domainWork, simulationWork);
 
-        if (useCurrentStepGaMD && useGpuResidentGaMD)
+        if (useGpuResidentGaMD)
         {
             const bool diagnosticHostState = gaMDModule_->gpuExecutor()->energyDiagnosticsEnabled()
                                              || gaMDModule_->gpuExecutor()->dihedralShadowEnabled();
@@ -1209,8 +1213,8 @@ void gmx::LegacySimulator::do_md()
         }
 
         // 本步可延后主机统计和回传；CUDA Graph 是否执行仍由下面的条件决定。
-        const bool deferGaMDHostWork = useCurrentStepGaMD && useGpuResidentGaMD
-                                       && !runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost;
+        const bool deferGaMDHostWork =
+                useGpuResidentGaMD && !runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost;
 
         const bool doTemperatureScaling = (ir->etc != TemperatureCoupling::No
                                            && do_per_step(step + ir->nsttcouple - 1, ir->nsttcouple));
@@ -1692,8 +1696,7 @@ void gmx::LegacySimulator::do_md()
                                      : stateGpu->getLocalForcesReadyOnDeviceEvent(
                                                runScheduleWork_->stepWork, runScheduleWork_->simulationWork));
 
-                    if (useCurrentStepGaMD && useGpuResidentGaMD
-                        && runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost
+                    if (useGpuResidentGaMD && runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost
                         && !deferredPressureBoxes.empty())
                     {
                         const auto previousHalfKinetic =
@@ -2074,7 +2077,7 @@ void gmx::LegacySimulator::do_md()
             {
                 const bool outputDHDL = (computeDHDL && do_per_step(step, ir->fepvals->nstdhdl));
 
-                if (useCurrentStepGaMD && useGpuResidentGaMD)
+                if (useGpuResidentGaMD)
                 {
                     if (runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost)
                     {

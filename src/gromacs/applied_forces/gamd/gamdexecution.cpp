@@ -404,21 +404,10 @@ void applyGaMDCpuForceCorrection(const t_commrec&              communicationReco
 
     const bool writesDihedralForces =
             MAIN(&communicationRecord) && module.diagnostics().dihedralForceOutputRequested(step);
+    // 影子与 DD 原子排序、虚拟位点的组合已在创建 GPU executor 时拒绝。
     const bool gpuShadowEnabled = (forceRecord->listedForcesGpu != nullptr && gpuExecutor != nullptr
                                    && gpuExecutor->dihedralShadowEnabled());
     const bool usesDomainAtomOrdering = haveDDAtomOrdering(communicationRecord);
-    if (gpuShadowEnabled && usesDomainAtomOrdering)
-    {
-        GMX_THROW(InconsistentInputError(
-                "GMX_GAMD_GPU_DIH_SHADOW currently supports only one rank without domain "
-                "decomposition."));
-    }
-    if (gpuShadowEnabled && virtualSites != nullptr)
-    {
-        GMX_THROW(InconsistentInputError(
-                "GMX_GAMD_GPU_DIH_SHADOW does not yet apply virtual-site force spreading on "
-                "the device."));
-    }
     bool&                   correctionShadowCompared = gaMDHostWorkspace.correctionShadowCompared;
     std::vector<gmx::RVec>& rawForcesForGpuShadow = gaMDHostWorkspace.rawForcesForCorrectionShadow;
     std::vector<gmx::RVec>& correctedGpuShadowForces = gaMDHostWorkspace.correctedForcesForShadow;
@@ -591,6 +580,7 @@ const char* gaMDExecutionModeName(GaMDExecutionMode mode)
 {
     switch (mode)
     {
+        case GaMDExecutionMode::Disabled: return "disabled";
         case GaMDExecutionMode::CpuReference: return "CPU reference";
         case GaMDExecutionMode::GpuResident: return "GPU resident";
     }
@@ -598,7 +588,6 @@ const char* gaMDExecutionModeName(GaMDExecutionMode mode)
 }
 
 GaMDExecutionMode selectGaMDExecutionMode(const t_inputrec& inputrec,
-                                          bool              useGaMD,
                                           bool              useGpuNonbonded,
                                           bool              useGpuPme,
                                           bool              useGpuBonded,
@@ -608,9 +597,10 @@ GaMDExecutionMode selectGaMDExecutionMode(const t_inputrec& inputrec,
                                           bool              haveSeparatePmeRank,
                                           bool              doRerun)
 {
-    if (!useGaMD)
+    // 只有 TPR 里的 gamd 开关能启用 GaMD。
+    if (!inputrec.bDoGaMD)
     {
-        return GaMDExecutionMode::CpuReference;
+        return GaMDExecutionMode::Disabled;
     }
 
     // CPU 和 GPU 路径都必须先拒绝尚未实现的全局能量/力归约。
@@ -730,9 +720,8 @@ void applyGaMDCurrentStepCorrection(const t_commrec&              communicationR
     // GaMD 校验可能抛异常；不能把异常带出仍可能有设备工作的 legacy 求力入口。
     try
     {
-        GaMDMDModule* module = runScheduleWork.gaMDModule;
-        GMX_RELEASE_ASSERT(module != nullptr, "Current-step GaMD requires the built-in GaMD module");
-        const auto& simulationWork = runScheduleWork.simulationWork;
+        GaMDMDModule* module         = runScheduleWork.gaMDModule;
+        const auto&   simulationWork = runScheduleWork.simulationWork;
         const auto& stepWork       = runScheduleWork.stepWork;
 
         // 不支持的配置已在 selectGaMDExecutionMode 里于动力学开始前拒绝。

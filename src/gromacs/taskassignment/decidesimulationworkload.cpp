@@ -131,9 +131,7 @@ SimulationWorkload createSimulationWorkload(const gmx::MDLogger& mdlog,
     simulationWorkload.useGpuPmeDecomposition       = useGpuPmeDecomposition;
     simulationWorkload.haveEwaldSurfaceContribution = haveEwaldSurfaceContribution(inputrec);
     simulationWorkload.useMts                       = inputrec.useMts;
-    const bool useCurrentStepGaMD        = inputrec.bDoGaMD || getenv("GMX_USE_GAMD") != nullptr;
     simulationWorkload.gamdExecutionMode = selectGaMDExecutionMode(inputrec,
-                                                                   useCurrentStepGaMD,
                                                                    useGpuForNonbonded,
                                                                    simulationWorkload.useGpuPme,
                                                                    useGpuForBonded,
@@ -142,7 +140,7 @@ SimulationWorkload createSimulationWorkload(const gmx::MDLogger& mdlog,
                                                                    haveDDAtomOrdering,
                                                                    haveSeparatePmeRank,
                                                                    doRerun);
-    if (useCurrentStepGaMD)
+    if (simulationWorkload.useGaMD())
     {
         GMX_LOG(mdlog.info)
                 .asParagraph()
@@ -181,7 +179,8 @@ SimulationWorkload createSimulationWorkload(const gmx::MDLogger& mdlog,
     const bool enableMdGpuGraph =
             devFlags.enableCudaGraphs || (useGpuResidentGaMD && GMX_HAVE_GPU_GRAPH_SUPPORT);
     simulationWorkload.useMdGpuGraph =
-            enableMdGpuGraph && useGpuForUpdate && (!useCurrentStepGaMD || useGpuResidentGaMD)
+            enableMdGpuGraph && useGpuForUpdate
+            && simulationWorkload.gamdExecutionMode != GaMDExecutionMode::CpuReference
             && (simulationWorkload.haveSeparatePmeRank ? simulationWorkload.useGpuPmePpCommunication : true)
             && (havePpDomainDecomposition ? simulationWorkload.useGpuHaloExchange : true)
             && (havePpDomainDecomposition ? (GMX_THREAD_MPI > 0) : true)

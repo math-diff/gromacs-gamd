@@ -2705,7 +2705,7 @@ void do_force(FILE*                         fplog,
                              inputrec.mtsLevels[1].stepFactor);
         }
 
-        if (inputrec.bDoGaMD || std::getenv("GMX_USE_GAMD") != nullptr)
+        if (runScheduleWork.gaMDModule != nullptr)
         {
             applyGaMDCurrentStepCorrection(*cr,
                                            step,

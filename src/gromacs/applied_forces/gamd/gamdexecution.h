@@ -65,8 +65,10 @@ class VirtualSitesHandler;
 
 /*! \brief Selects the GaMD execution mode or throws InconsistentInputError.
  *
- * This is the single setup-time check of the supported GaMD configurations,
- * so unsupported input is rejected before the first dynamics step.
+ * GaMD is enabled only by the gamd flag stored in the input record; without it
+ * the mode is Disabled and no GaMD restriction applies. This is the single
+ * setup-time check of the supported GaMD configurations, so unsupported input
+ * is rejected before the first dynamics step.
  *
  * Some limitations of the GPU path are not repeated here because no run can
  * reach them: GPU update already rejects virtual sites, Ewald surface
@@ -74,11 +76,10 @@ class VirtualSitesHandler;
  * transforms), and PME rejects screw PBC. Topology support of the GPU force
  * path (FOURDIHS, perturbed dihedrals) needs the local topology and is checked
  * when the listed-force buffers are bound, before the first force evaluation.
- * Combinations with the GPU shadow diagnostics are checked where the
- * diagnostics run.
+ * Combinations with the GPU shadow diagnostics are checked when the GPU
+ * executor is created.
  */
 GaMDExecutionMode selectGaMDExecutionMode(const t_inputrec& inputrec,
-                                          bool              useGaMD,
                                           bool              useGpuNonbonded,
                                           bool              useGpuPme,
                                           bool              useGpuBonded,

@@ -112,8 +112,10 @@ public:
     //! 主机调度和所有设备历史缓冲共用此容量，满后必须先回传整批记录。
     static constexpr int sc_historyCapacity = 4096;
 
-    //! Constructs the CUDA executor, or reports an unavailable backend.
+    //! Constructs the CUDA executor with the diagnostic shadows already decided, or reports an unavailable backend.
     GaMDGpuExecutor(bool                 useGpuResidentGaMD,
+                    bool                 dihedralShadowEnabled,
+                    bool                 energyShadowEnabled,
                     const DeviceContext& deviceContext,
                     const DeviceStream&  deviceStream,
                     gmx_wallcycle*       wallCycleCounters);
