@@ -62,7 +62,9 @@ namespace gmx
 
 class GaMDGpuExecutor;
 class GaMDDiagnostics;
+class GaMDForceShadow;
 class GaMDRuntime;
+struct GaMDDihedralForceBuffers;
 
 /*! \libinternal
  * \brief Owns the GaMD runtime for one simulation.
@@ -104,7 +106,8 @@ public:
     GaMDBiasParameters biasParameters() const;
     /*! \brief Creates the optional executor that owns the GaMD device state.
      *
-     * Stops with a fatal input error before dynamics when the GPU dihedral shadow
+     * Also creates the force-correction shadow when the GPU dihedral shadow is
+     * enabled. Stops with a fatal input error before dynamics when that shadow
      * of a CPU-update run is combined with DD atom ordering or virtual sites.
      * Errors do not propagate, because the caller has already created GPU objects.
      */
@@ -118,10 +121,14 @@ public:
     GaMDGpuExecutor* gpuExecutor();
     //! Returns the optional executor without allowing modification.
     const GaMDGpuExecutor* gpuExecutor() const;
-    //! Returns diagnostics and host scratch state owned by this simulation module.
+    //! Returns the diagnostics owned by this simulation module.
     GaMDDiagnostics& diagnostics();
     //! Returns the per-instance diagnostics without allowing modification.
     const GaMDDiagnostics& diagnostics() const;
+    //! Returns the reusable host buffers of the CPU dihedral force correction.
+    GaMDDihedralForceBuffers& cpuDihedralForceBuffers();
+    //! Returns the force-correction shadow, or nullptr when the GPU dihedral shadow is disabled.
+    GaMDForceShadow* forceShadow();
     //! Updates host statistics and the host step result from current raw energies.
     void finalizeCurrentStep(int64_t        step,
                              int            rank,
@@ -150,9 +157,11 @@ public:
     void resetStateForTesting();
 
 private:
-    std::unique_ptr<GaMDDiagnostics> diagnostics_;
-    std::unique_ptr<GaMDRuntime>     runtime_;
-    std::unique_ptr<GaMDGpuExecutor> gpuExecutor_;
+    std::unique_ptr<GaMDDiagnostics>          diagnostics_;
+    std::unique_ptr<GaMDRuntime>              runtime_;
+    std::unique_ptr<GaMDDihedralForceBuffers> cpuDihedralForceBuffers_;
+    std::unique_ptr<GaMDGpuExecutor>          gpuExecutor_;
+    std::unique_ptr<GaMDForceShadow>          forceShadow_;
 };
 
 //! Constructs the built-in GaMD module.

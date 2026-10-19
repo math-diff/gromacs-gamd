@@ -60,6 +60,7 @@
 #endif
 
 #include "gromacs/applied_forces/gamd/gamddiagnostics.h"
+#include "gromacs/applied_forces/gamd/gamddihedralforces.h"
 #include "gromacs/applied_forces/gamd/gamdexecution.h"
 #include "gromacs/applied_forces/gamd/gamdmdmodule.h"
 #include "gromacs/applied_forces/gamd/gamdruntime.h"
@@ -723,7 +724,7 @@ TEST_F(GaMDTest, ForceOverrideSnapshotGovernsStagingAndHostResult)
     EXPECT_TRUE(gaMDModule_.prepareStep(1, 0).requiresHostEnergy);
 }
 
-TEST(GaMDModuleOwnershipTest, DiagnosticsAndHostWorkspaceAreInstanceOwned)
+TEST(GaMDModuleOwnershipTest, DiagnosticsAndDihedralBuffersAreInstanceOwned)
 {
     LoggerTestHelper firstLog;
     LoggerTestHelper secondLog;
@@ -738,8 +739,10 @@ TEST(GaMDModuleOwnershipTest, DiagnosticsAndHostWorkspaceAreInstanceOwned)
     firstModule.diagnostics().logResidentEnergy(false, true);
     secondModule.diagnostics().logResidentEnergy(true, true);
 
-    firstModule.diagnostics().hostWorkspace().cpuDihedralForces.resize(1);
-    EXPECT_TRUE(secondModule.diagnostics().hostWorkspace().cpuDihedralForces.empty());
+    firstModule.cpuDihedralForceBuffers().forces.resize(1);
+    EXPECT_TRUE(secondModule.cpuDihedralForceBuffers().forces.empty());
+    // 没有 GPU executor 时也就没有影子对象。
+    EXPECT_EQ(firstModule.forceShadow(), nullptr);
 }
 
 TEST(GaMDDiagnosticsTest, GpuShadowRequestsAreReadAtConstruction)

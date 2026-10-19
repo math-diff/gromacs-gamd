@@ -32,7 +32,7 @@
  * the research papers on the package. Check out https://www.gromacs.org.
  */
 /*! \libinternal \file
- * \brief Declares GaMD diagnostics, logging and reusable host buffers.
+ * \brief Declares GaMD diagnostics, logging and CPU/GPU comparison checks.
  *
  * \inlibraryapi
  * \ingroup module_applied_forces
@@ -45,7 +45,6 @@
 
 #include <array>
 #include <string>
-#include <vector>
 
 #include "gromacs/math/vectypes.h"
 #include "gromacs/utility/arrayref.h"
@@ -82,41 +81,6 @@ void validateGaMDGpuShadowForces(const MDLogger&      logger,
                                  double               rmsTolerance);
 
 /*! \libinternal
- * \brief Reusable host buffers whose lifetime is tied to one GaMD simulation.
- */
-struct GaMDHostWorkspace
-{
-    //! CPU dihedral reference for live GPU validation.
-    std::vector<RVec> gpuModeDihedralForces;
-    //! Periodic shift-force reference for the dihedral virial.
-    std::vector<RVec> gpuModeDihedralShiftForces;
-    //! Downloaded device dihedral forces for validation or snapshots.
-    std::vector<RVec> gpuShadowDihedralForces;
-    //! CPU combination of raw and dihedral forces for comparison.
-    std::vector<RVec> referenceCorrectedForces;
-    //! Downloaded corrected device forces.
-    std::vector<RVec> liveGpuCorrectedForces;
-    //! Device-reduced forces captured before live correction.
-    std::vector<RVec> rawReducedForcesForShadow;
-
-    //! Raw CPU forces supplied to the GPU shadow correction.
-    std::vector<RVec> rawForcesForCorrectionShadow;
-    //! GPU shadow result compared with corrected CPU forces.
-    std::vector<RVec> correctedForcesForShadow;
-    //! Whether the one-time CPU-path force comparison has run.
-    bool correctionShadowCompared = false;
-
-    //! Reusable raw dihedral buffer for CPU force correction.
-    std::vector<RVec> cpuDihedralForces;
-    //! Reusable shift forces for CPU dihedral virial correction.
-    std::vector<RVec> cpuDihedralShiftForces;
-    //! Device dihedral reference used by the CPU execution path.
-    std::vector<RVec> gpuDihedralForcesForShadow;
-    //! Whether the one-time CPU-path dihedral comparison has run.
-    bool dihedralShadowCompared = false;
-};
-
-/*! \libinternal
  * \brief Owns optional GaMD diagnostics for one simulation instance.
  */
 class GaMDDiagnostics final
@@ -136,9 +100,6 @@ public:
     void setLogger(const MDLogger& logger);
     //! 返回当前模拟的日志接口。
     const MDLogger& logger() const { return logger_; }
-
-    //! Returns reusable force buffers owned by this simulation instance.
-    GaMDHostWorkspace& hostWorkspace();
 
     //! Read once on first GaMD use; ordinary simulations never request overrides.
     const GaMDForceOverrides& forceOverrides();
@@ -183,8 +144,7 @@ private:
     //! Writes one raw CPU force contribution, throwing on write failure.
     void addRawDihedralForce(int atomIndex, const rvec force);
 
-    GaMDHostWorkspace hostWorkspace_;
-    MDLogger          logger_;
+    MDLogger logger_;
 
     bool               forceOverridesRead_ = false;
     GaMDForceOverrides forceOverrides_;

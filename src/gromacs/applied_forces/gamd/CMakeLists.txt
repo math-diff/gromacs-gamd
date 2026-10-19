@@ -39,6 +39,8 @@ gmx_add_libgromacs_sources(
     gamdmath.cpp
     gamddiagnostics.cpp
     gamdexecution.cpp
+    gamddihedralforces.cpp
+    gamdforceshadow.cpp
 )
 
 if(GMX_GPU_CUDA)

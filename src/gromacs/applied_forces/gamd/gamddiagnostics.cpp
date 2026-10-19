@@ -46,6 +46,7 @@
 #include <cstring>
 
 #include <algorithm>
+#include <vector>
 
 #include "gromacs/math/vec.h"
 #include "gromacs/utility/exceptions.h"
@@ -462,11 +463,6 @@ GaMDDiagnostics::~GaMDDiagnostics()
 void GaMDDiagnostics::setLogger(const MDLogger& logger)
 {
     logger_ = logger;
-}
-
-GaMDHostWorkspace& GaMDDiagnostics::hostWorkspace()
-{
-    return hostWorkspace_;
 }
 
 const GaMDForceOverrides& GaMDDiagnostics::forceOverrides()

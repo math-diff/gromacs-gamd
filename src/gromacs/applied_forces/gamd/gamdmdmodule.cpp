@@ -47,6 +47,8 @@
 #include "gromacs/utility/gmxassert.h"
 
 #include "gamddiagnostics.h"
+#include "gamddihedralforces.h"
+#include "gamdforceshadow.h"
 #include "gamdgpu.h"
 #include "gamdruntime.h"
 
@@ -56,7 +58,8 @@ namespace gmx
 
 GaMDMDModule::GaMDMDModule() :
     diagnostics_(std::make_unique<GaMDDiagnostics>()),
-    runtime_(std::make_unique<GaMDRuntime>(*diagnostics_))
+    runtime_(std::make_unique<GaMDRuntime>(*diagnostics_)),
+    cpuDihedralForceBuffers_(std::make_unique<GaMDDihedralForceBuffers>())
 {
 }
 
@@ -138,6 +141,11 @@ void GaMDMDModule::initializeGpuExecutor(const bool           useGpuResidentGaMD
                                                          deviceContext,
                                                          deviceStream,
                                                          wallCycleCounters);
+        // 影子对象和 executor 的影子开关来自同一个判断。
+        if (dihedralShadowEnabled)
+        {
+            forceShadow_ = std::make_unique<GaMDForceShadow>();
+        }
     }
     GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
 }
@@ -160,6 +168,16 @@ GaMDDiagnostics& GaMDMDModule::diagnostics()
 const GaMDDiagnostics& GaMDMDModule::diagnostics() const
 {
     return *diagnostics_;
+}
+
+GaMDDihedralForceBuffers& GaMDMDModule::cpuDihedralForceBuffers()
+{
+    return *cpuDihedralForceBuffers_;
+}
+
+GaMDForceShadow* GaMDMDModule::forceShadow()
+{
+    return forceShadow_.get();
 }
 
 void GaMDMDModule::finalizeCurrentStep(int64_t        step,

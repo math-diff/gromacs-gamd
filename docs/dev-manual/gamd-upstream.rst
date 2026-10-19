@@ -66,7 +66,14 @@ and the optional GPU executor. Keep that single ownership chain.
      - Existing device-state layout and launch wrapper around the shared math.
    * - ``gamdexecution.h/.cpp``
      - Execution selection and the legacy current-step correction entry. The
-       CPU dihedral recomputation and CPU/GPU force sequences are private here.
+       CPU/GPU force sequences are private here.
+   * - ``gamddihedralforces.h/.cpp``
+     - CPU recomputation of the dihedral-partition forces with the native bonded
+       kernels and its reusable buffers, shared by the CPU correction and the
+       GPU shadow. Internal to the module.
+   * - ``gamdforceshadow.h/.cpp``
+     - CPU/GPU comparisons beside the force correction. The module creates the
+       shadow only when the GPU dihedral shadow is enabled.
    * - ``gamdgpu.*`` and ``gamddiagnostics.*``
      - Device buffers/events/launches and instance-owned diagnostics.
 
@@ -170,9 +177,19 @@ CPU-update run cannot support are rejected when the executor is created.
 The current-step correction entry performs energy accounting, then calls the
 separate CPU or GPU sequence in ``gamdexecution.cpp``.
 ``sim_util.cpp`` retains the call at the original force-processing boundary.
-The private CPU dihedral helper reuses the native bonded kernels and overwrites
-its output buffer completely; only its accumulation buffers need clearing.
-Numerical
+The CPU dihedral helper in ``gamddihedralforces.cpp`` reuses the native bonded
+kernels and overwrites its output buffers completely. The module owns the
+buffers of the CPU correction and the shadow owns its own, so no scratch state
+is thread-local.
+
+Each sequence applies the correction without interruption. When the module
+owns a ``GaMDForceShadow``, the sequence calls one capture entry before and one
+compare entry after the correction. On the GPU path these positions keep the
+shadow-mode event contract: ``sim_util.cpp`` expects two consumers of the
+reduced-force event, and the executor creates its forces-ready event with two
+consumers. The capture waits for the raw forces before the correction consumes
+them; the compare restores one expected consumer and waits for the corrected
+forces, which GPU update also consumes. Numerical
 energy, force, and virial comparisons live in ``gamddiagnostics.cpp`` and reject
 non-finite values before aggregating errors. CPU bonded kernels produce raw
 forces; the GaMD correction owns the final weights. Preserve the distinction
@@ -187,7 +204,8 @@ point to the definition, and a unit test locks it.
 
 Dihedral snapshots are emitted once from completed CPU/GPU force data through
 ``GaMDDiagnostics::dumpDihedralForces``. The CPU caller passes its topology atom
-mapping; the GPU caller reuses ``copyDihedralForces``. Snapshot requests stage
+mapping; the GPU caller copies the device forces with ``copyDihedralForces``
+only at the selected step, independently of the shadow. Snapshot requests stage
 current host weights at their selected step without enabling the full shadow
 comparison. Bonded callbacks only retain the separately labelled raw CPU trace.
 The diagnostics implementation shares checked stdio output for dihedral and
