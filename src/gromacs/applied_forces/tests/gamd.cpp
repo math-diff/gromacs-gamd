@@ -252,8 +252,8 @@ TEST_F(GaMDTest, NativeReaderPreservesAttachedRestartComments)
         input << "debug 0#input comment\n";
     }
     const GaMDStepPlan& plan = gaMDModule_.prepareStep(0, 0);
-    EXPECT_EQ(plan.stage, GaMDStage::Production);
-    EXPECT_DOUBLE_EQ(plan.thresholdP, 10.0);
+    EXPECT_EQ(plan.bias.stage, GaMDStage::Production);
+    EXPECT_DOUBLE_EQ(plan.bias.thresholdP, 10.0);
 }
 
 TEST_F(GaMDTest, RuntimeInputErrorsUseProjectExceptions)
@@ -600,8 +600,8 @@ TEST_F(GaMDTest, ProductionRestartMayIgnoreZeroStageInput)
         input << "ntcmdprep 0\nntcmd 0\nntebprep 0\nnteb 0\nntave 0\n";
     }
     const GaMDStepPlan& plan = gaMDModule_.prepareStep(0, 0);
-    EXPECT_EQ(plan.stage, GaMDStage::Production);
-    EXPECT_DOUBLE_EQ(plan.thresholdP, 10.0);
+    EXPECT_EQ(plan.bias.stage, GaMDStage::Production);
+    EXPECT_DOUBLE_EQ(plan.bias.thresholdP, 10.0);
 }
 
 TEST_F(GaMDTest, StageTransitionsPreserveNumericOutput)
@@ -620,7 +620,7 @@ TEST_F(GaMDTest, StageTransitionsPreserveNumericOutput)
     for (Index stepIndex = 0; stepIndex < ssize(expectedStages); ++stepIndex)
     {
         const GaMDStepPlan& plan = gaMDModule_.prepareStep(stepIndex, 0);
-        EXPECT_EQ(static_cast<int>(plan.stage), expectedStages[stepIndex]);
+        EXPECT_EQ(static_cast<int>(plan.bias.stage), expectedStages[stepIndex]);
         gaMDModule_.finalizeCurrentStep(stepIndex, 0, stepIndex, 0);
     }
     const auto rows = readNumericRows("gamd-para.dat");
@@ -980,11 +980,13 @@ TEST_F(GaMDTest, ResidentProductionEnergyStagesOnlyForHostConsumers)
     gaMDModule_.prepareStep(49, 0);
     EXPECT_FALSE(gaMDModule_.requiresHostEnergyThisStep(49));
 
+    // 输出节奏本身不要求暂存：只有 resident 路径查询这个结果，而它总是缓冲生产文本输出。
     gaMDModule_.prepareStep(50, 0);
-    EXPECT_TRUE(gaMDModule_.requiresHostEnergyThisStep(50));
+    EXPECT_FALSE(gaMDModule_.requiresHostEnergyThisStep(50));
 
-    gaMDModule_.prepareStep(51, 0);
+    // 与 md.cpp 相同的顺序：先记录检查点决定，再准备这一步。
     gaMDModule_.setCheckpointingThisStep(true);
+    gaMDModule_.prepareStep(51, 0);
     EXPECT_TRUE(gaMDModule_.requiresHostEnergyThisStep(51));
     gaMDModule_.setCheckpointingThisStep(false);
 }
@@ -1412,8 +1414,8 @@ TEST_F(GaMDTest, RestartReadsAllSupportedVersions)
         writeGaMDProductionInput(restart);
         gaMDModule_.resetStateForTesting();
         const GaMDStepPlan& plan = gaMDModule_.prepareStep(0, 0);
-        EXPECT_EQ(plan.stage, GaMDStage::Production);
-        EXPECT_DOUBLE_EQ(plan.thresholdP, 10.0);
+        EXPECT_EQ(plan.bias.stage, GaMDStage::Production);
+        EXPECT_DOUBLE_EQ(plan.bias.thresholdP, 10.0);
     }
 }
 
@@ -1429,8 +1431,8 @@ TEST_F(GaMDTest, RestartSelectsOnlyAValidatedMatchingSnapshot)
         previous << c_validGaMDRestart;
     }
     const GaMDStepPlan& recovered = gaMDModule_.prepareStep(10, 0);
-    EXPECT_EQ(recovered.stage, GaMDStage::Production);
-    EXPECT_DOUBLE_EQ(recovered.thresholdP, 10.0);
+    EXPECT_EQ(recovered.bias.stage, GaMDStage::Production);
+    EXPECT_DOUBLE_EQ(recovered.bias.thresholdP, 10.0);
 
     // 当前快照有效且匹配时，无关的旧备份不能阻止正常续跑。
     gaMDModule_.resetStateForTesting();
@@ -1439,7 +1441,7 @@ TEST_F(GaMDTest, RestartSelectsOnlyAValidatedMatchingSnapshot)
         std::ofstream previous("gamd-restart-prev.dat");
         previous << "corrupted backup\n";
     }
-    EXPECT_EQ(gaMDModule_.prepareStep(10, 0).stage, GaMDStage::Production);
+    EXPECT_EQ(gaMDModule_.prepareStep(10, 0).bias.stage, GaMDStage::Production);
 }
 
 TEST_F(GaMDTest, RestartRetains64BitCounters)

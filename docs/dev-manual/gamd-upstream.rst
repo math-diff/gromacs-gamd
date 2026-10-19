@@ -70,9 +70,11 @@ and the optional GPU executor. Keep that single ownership chain.
    * - ``gamdgpu.*`` and ``gamddiagnostics.*``
      - Device buffers/events/launches and instance-owned diagnostics.
 
-``GaMDBiasParameters`` is the shared immutable bias input. ``GaMDStepResult``
-is reused for live and deferred results; no second six-field output record or
-new strategy/factory hierarchy is needed.
+``GaMDBiasParameters`` is the shared immutable bias input. ``GaMDStepPlan``
+holds only the step, that bias input and the host-staging decision; output
+cadence stays in the text writers. ``GaMDStepResult`` is reused for live and
+deferred results; no second six-field output record or new strategy/factory
+hierarchy is needed.
 
 Resource ownership, errors and documentation
 ---------------------------------------------

@@ -142,7 +142,7 @@ public:
                                        int64_t        currentStep,
                                        int            rank,
                                        gmx_wallcycle* wallCycle);
-    //! Mirrors the MD checkpoint decision and updates host-staging requirements.
+    //! Records the MD checkpoint decision; the MD loop calls this before prepareStep().
     void setCheckpointingThisStep(bool checkpointingThisStep);
     //! Commits eligible restart state before the MD energy buffers are reset.
     void writeRestartState(int64_t step);
@@ -193,7 +193,6 @@ private:
 
     GaMDStepPlan   stepPlan_;
     GaMDStepResult stepResult_;
-    int64_t        lastPreparedStep_  = -1;
     int64_t        lastAccountedStep_ = -1;
 
     bool    restartLoadAttempted_            = false;

@@ -86,35 +86,6 @@ enum GaMDDeviceStateIndex
 };
 
 /*! \libinternal
- * \brief Work description prepared at the start of one GaMD step.
- */
-struct GaMDStepPlan
-{
-    //! Simulation step represented by this work description.
-    int64_t step = -1;
-    //! Legacy boost selection: potential, dihedral or dual (1, 2 or 3).
-    int boostType = 0;
-    //! Stage controlling statistics and bias application.
-    GaMDStage stage = GaMDStage::Inactive;
-    //! Potential threshold in kJ/mol.
-    double thresholdP = 0;
-    //! Potential force constant in inverse kJ/mol.
-    double kP = 0;
-    //! Dihedral threshold in kJ/mol.
-    double thresholdD = 0;
-    //! Dihedral force constant in inverse kJ/mol.
-    double kD = 0;
-    //! Whether this prepared plan enables GaMD.
-    bool enabled = false;
-    //! Whether the parameter cadence selects this step.
-    bool writesParameters = false;
-    //! Whether the reweight cadence selects this step.
-    bool writesReweight = false;
-    //! Whether host state must account for this step.
-    bool requiresHostEnergy = false;
-};
-
-/*! \libinternal
  * \brief Host result produced after current-step GaMD energy accounting.
  */
 struct GaMDStepResult
@@ -153,6 +124,19 @@ struct GaMDBiasParameters
     double thresholdD = 0;
     //! Dihedral force constant in inverse kJ/mol.
     double kD = 0;
+};
+
+/*! \libinternal
+ * \brief Work description prepared at the start of one GaMD step.
+ */
+struct GaMDStepPlan
+{
+    //! Simulation step represented by this work description.
+    int64_t step = -1;
+    //! Bias parameters of this step.
+    GaMDBiasParameters bias;
+    //! Whether host state must account for this step.
+    bool requiresHostEnergy = false;
 };
 
 /*! \libinternal

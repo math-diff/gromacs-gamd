@@ -61,10 +61,6 @@ namespace gmx
 void GaMDRuntime::setCheckpointingThisStep(bool checkpointingThisStep)
 {
     checkpointingThisStep_ = checkpointingThisStep;
-    if (checkpointingThisStep && stepPlan_.enabled)
-    {
-        stepPlan_.requiresHostEnergy = true;
-    }
 }
 
 GaMDStage GaMDRuntime::determineStage(int64_t step) const
@@ -96,55 +92,39 @@ GaMDStage GaMDRuntime::determineStage(int64_t step) const
 
 const GaMDStepPlan& GaMDRuntime::prepareStep(int64_t step, int rank, bool pressureCouplingThisStep)
 {
-    if (lastPreparedStep_ == step)
+    if (stepPlan_.step == step)
     {
         return stepPlan_;
     }
-    lastPreparedStep_ = step;
 
     currentRank_ = rank;
 
+    // 严格校验保证 igamd 为 1、2 或 3，之后各处都不再检查“未启用”。
     loadParameters(rank);
     loadRestartStateIfNeeded(step, rank);
 
-    // Default to a neutral state. Current-step GaMD applies the final force
-    // correction later in do_force(), after raw energies and raw listed forces
-    // for the current coordinates are available.
-    stepResult_         = {};
-    stepPlan_           = {};
-    stepPlan_.step      = step;
-    stepPlan_.boostType = parameters_.boostType;
+    // Current-step GaMD applies the final force correction later in do_force(),
+    // after raw energies and raw listed forces for the current coordinates are available.
+    stepResult_               = {};
+    stepPlan_.step            = step;
+    stepPlan_.bias.boostType  = parameters_.boostType;
+    stepPlan_.bias.stage      = determineStage(step);
+    stepPlan_.bias.thresholdP = potentialStatistics_.threshold;
+    stepPlan_.bias.kP         = potentialStatistics_.forceConstant;
+    stepPlan_.bias.thresholdD = dihedralStatistics_.threshold;
+    stepPlan_.bias.kD         = dihedralStatistics_.forceConstant;
 
-    if (parameters_.boostType == 0)
-    {
-        return stepPlan_;
-    }
-
-    stepPlan_.enabled       = true;
-    stepPlan_.stage         = determineStage(step);
-    stepPlan_.thresholdP    = potentialStatistics_.threshold;
-    stepPlan_.kP            = potentialStatistics_.forceConstant;
-    stepPlan_.thresholdD    = dihedralStatistics_.threshold;
-    stepPlan_.kD            = dihedralStatistics_.forceConstant;
-    stepPlan_.writesParameters =
-            parameters_.parameterInterval > 0 && step % parameters_.parameterInterval == 0;
-    stepPlan_.writesReweight =
-            step > 0 && parameters_.reweightInterval > 0 && step % parameters_.reweightInterval == 0;
-
-    const bool forcedScale            = diagnostics_.forceOverrides().enabled;
-    const bool writesDihedralForces   = diagnostics_.dihedralForceOutputRequested(step);
-    const bool writesUnbufferedOutput = (stepPlan_.writesParameters || stepPlan_.writesReweight)
-                                        && !bufferedProductionOutputEnabled();
-    stepPlan_.requiresHostEnergy = stepPlan_.stage != GaMDStage::Production
-                                   || checkpointingThisStep_ || pressureCouplingThisStep
-                                   || forcedScale || writesUnbufferedOutput || writesDihedralForces;
+    // 只有 resident 路径会查询这个结果，而它总是缓冲生产文本输出，所以输出节奏本身不要求暂存。
+    const bool forcedScale          = diagnostics_.forceOverrides().enabled;
+    const bool writesDihedralForces = diagnostics_.dihedralForceOutputRequested(step);
+    stepPlan_.requiresHostEnergy = stepPlan_.bias.stage != GaMDStage::Production || checkpointingThisStep_
+                                   || pressureCouplingThisStep || forcedScale || writesDihedralForces;
     return stepPlan_;
 }
 
 GaMDBiasParameters GaMDRuntime::biasParameters() const
 {
-    return { stepPlan_.boostType, stepPlan_.stage,      stepPlan_.thresholdP,
-             stepPlan_.kP,        stepPlan_.thresholdD, stepPlan_.kD };
+    return stepPlan_.bias;
 }
 
 bool GaMDRuntime::requiresHostEnergyThisStep(int64_t step) const
@@ -172,8 +152,7 @@ void GaMDRuntime::warnIfRunTooShort(int64_t initStep, int64_t nsteps, int rank)
     }
     warnedAboutRunLength_ = true;
 
-    if (!parametersLoaded_ || parameters_.boostType == 0 || rank != 0 || nsteps < 0
-        || parameters_.restartMode != 0 || forceProductionRestart_)
+    if (!parametersLoaded_ || rank != 0 || nsteps < 0 || parameters_.restartMode != 0 || forceProductionRestart_)
     {
         return;
     }
@@ -256,7 +235,7 @@ void GaMDRuntime::finalizeCurrentStep(int64_t        step,
                                       double         dihedralEnergy,
                                       gmx_wallcycle* wallCycle)
 {
-    if (parameters_.boostType == 0 || lastAccountedStep_ == step)
+    if (lastAccountedStep_ == step)
     {
         return;
     }
@@ -291,11 +270,11 @@ void GaMDRuntime::finalizeCurrentStep(int64_t        step,
         return;
     }
 
-    const bool updateStat = (stepPlan_.stage == GaMDStage::ConventionalStatistics
-                             || stepPlan_.stage == GaMDStage::BoostStatistics);
+    const bool updateStat = (stepPlan_.bias.stage == GaMDStage::ConventionalStatistics
+                             || stepPlan_.bias.stage == GaMDStage::BoostStatistics);
     stepResult_ = evaluateGaMDBias(biasParameters(), totalPotentialEnergy, dihedralEnergy);
 
-    if (stepPlan_.stage >= GaMDStage::BoostPreparation)
+    if (stepPlan_.bias.stage >= GaMDStage::BoostPreparation)
     {
         double totalEnergyForPotentialBoost = totalPotentialEnergy;
         if (parameters_.boostType == 3)
@@ -325,7 +304,7 @@ void GaMDRuntime::finalizeCurrentStep(int64_t        step,
     {
         const bool updateAverageWindow    = (step % parameters_.averagingWindow == 0);
         double     totalPotentialForStats = totalPotentialEnergy;
-        if (stepPlan_.stage == GaMDStage::BoostStatistics)
+        if (stepPlan_.bias.stage == GaMDStage::BoostStatistics)
         {
             // 保留原来的相加顺序，避免改变统计量的浮点舍入结果。
             totalPotentialForStats = totalPotentialEnergy + stepResult_.boostP + stepResult_.boostD;
@@ -355,9 +334,9 @@ void GaMDRuntime::finalizeCurrentStep(int64_t        step,
             }
         }
 
-        const bool updateBiasParameters = (stepPlan_.stage == GaMDStage::ConventionalStatistics
+        const bool updateBiasParameters = (stepPlan_.bias.stage == GaMDStage::ConventionalStatistics
                                            && step == parameters_.conventionalEnd)
-                                          || stepPlan_.stage == GaMDStage::BoostStatistics;
+                                          || stepPlan_.bias.stage == GaMDStage::BoostStatistics;
         if (updateBiasParameters)
         {
             if (parameters_.boostType == 1 || parameters_.boostType == 3)
@@ -377,7 +356,7 @@ void GaMDRuntime::finalizeCurrentStep(int64_t        step,
 
     wallcycle_stop(wallCycle, WallCycleCounter::GaMDFinalize);
     wallcycle_start(wallCycle, WallCycleCounter::GaMDOutput);
-    if (!bufferedProductionOutputEnabled() || stepPlan_.stage != GaMDStage::Production)
+    if (!bufferedProductionOutputEnabled() || stepPlan_.bias.stage != GaMDStage::Production)
     {
         writeParameterLine(step, rank, true);
         writeReweightLine(step, rank, true);
@@ -397,7 +376,7 @@ void GaMDRuntime::writeBufferedProductionOutput(ArrayRef<const int64_t> deferred
     }
     GMX_RELEASE_ASSERT(deferredSteps.size() == deferredEnergySamples.size(),
                        "Buffered GaMD output steps and energy samples must match");
-    if (stepPlan_.stage != GaMDStage::Production)
+    if (stepPlan_.bias.stage != GaMDStage::Production)
     {
         GMX_RELEASE_ASSERT(deferredSteps.empty(),
                            "Buffered GaMD output may defer samples only in production stage 5");

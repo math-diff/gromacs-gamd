@@ -266,7 +266,7 @@ void GaMDRuntime::saveRestartState(int64_t step, int rank)
         return;
     }
 
-    if (!parametersLoaded_ || parameters_.boostType == 0)
+    if (!parametersLoaded_)
     {
         return;
     }
@@ -995,12 +995,12 @@ void GaMDRuntime::writeParameterLine(int64_t step, int rank, bool flushOutput)
         return;
     }
 
-    if (parameters_.boostType == 0 || parameters_.parameterInterval <= 0)
+    if (parameters_.parameterInterval <= 0)
     {
         return;
     }
 
-    if (stepPlan_.stage < GaMDStage::ConventionalStatistics || step == 0)
+    if (stepPlan_.bias.stage < GaMDStage::ConventionalStatistics || step == 0)
     {
         return;
     }
@@ -1028,7 +1028,7 @@ void GaMDRuntime::writeParameterLine(int64_t step, int rank, bool flushOutput)
                      "%10" PRId64 " %12" PRId64 " %6d",
                      parameters_.parameterInterval,
                      step,
-                     static_cast<int>(stepPlan_.stage))
+                     static_cast<int>(stepPlan_.bias.stage))
         < 0)
     {
         GMX_THROW(FileIOError(formatString("Failed to write gamd-para.dat at step %" PRId64 ".", step)));
@@ -1048,12 +1048,7 @@ void GaMDRuntime::writeReweightRecord(int64_t step, int rank, const GaMDStepResu
         return;
     }
 
-    if (parameters_.boostType == 0)
-    {
-        return;
-    }
-
-    if (stepPlan_.stage < GaMDStage::BoostPreparation)
+    if (stepPlan_.bias.stage < GaMDStage::BoostPreparation)
     {
         return;
     }
