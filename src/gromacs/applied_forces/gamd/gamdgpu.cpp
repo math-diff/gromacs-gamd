@@ -53,6 +53,7 @@
 #include "gromacs/utility/stringutil.h"
 
 #include "gamdgpu_impl.h"
+#include "gamdmath.h"
 
 //! \cond internal
 namespace gmx
@@ -369,7 +370,8 @@ void GaMDGpuExecutor::Impl::bindListedForceBuffers(ArrayRef<const int> nbnxnAtom
                     "The GaMD GPU force path does not support FOURDIHS. Use -update cpu or "
                     "add CUDA FOURDIHS support before using this topology."));
         }
-        for (const int functionType : { F_PDIHS, F_RBDIHS, F_CMAP })
+        // 按 GaMD 二面角分区逐类检查微扰项；FOURDIHS 已在上面拒绝，空列表直接跳过。
+        for (const int functionType : c_gaMDDihedralInteractionTypes)
         {
             if (!interactionDefinitions.il[functionType].empty()
                 && hasPerturbedEntries(interactionDefinitions, functionType))

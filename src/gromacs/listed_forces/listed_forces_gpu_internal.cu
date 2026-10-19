@@ -1030,6 +1030,8 @@ __global__ void bonded_kernel_gpu(BondedGpuKernelParameters kernelParams,
                                                         sm_fShiftLoc,
                                                         kernelParams.pbcAiuc);
                     break;
+                // accumulateGamdDihedral 只传给 GaMD 二面角分区内有 GPU 内核的类型，
+                // 必须与 gamdmath.h 的 c_gaMDDihedralInteractionTypes 一致。
                 case F_PDIHS:
                     pdihs_gpu<calcVir, calcEner, accumulateGamdDihedral>(fTypeTid,
                                                                          &vtot_loc,

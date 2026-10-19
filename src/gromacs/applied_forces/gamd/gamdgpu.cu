@@ -54,6 +54,7 @@
 
 #include "gromacs/applied_forces/gamd/gamd_scale_gpu.h"
 #include "gromacs/applied_forces/gamd/gamdgpu_impl.h"
+#include "gromacs/applied_forces/gamd/gamdmath.h"
 #include "gromacs/gpu_utils/cuda_arch_utils.cuh"
 #include "gromacs/gpu_utils/cudautils.cuh"
 #include "gromacs/gpu_utils/device_stream.h"
@@ -314,8 +315,7 @@ __global__ void reduceGamdRawEnergiesKernel(const float* gm_nbLJEnergy,
             }
         }
 
-        const float dihedralEnergy = gm_listedEnergies[F_PDIHS] + gm_listedEnergies[F_RBDIHS]
-                                     + gm_listedEnergies[F_FOURDIHS] + gm_listedEnergies[F_CMAP];
+        const float dihedralEnergy             = gaMDDihedralEnergy(gm_listedEnergies);
         gm_gamdEnergies[c_gaMDPotentialEnergy] = totalEnergy;
         gm_gamdEnergies[c_gaMDDihedralEnergy]  = dihedralEnergy;
     }

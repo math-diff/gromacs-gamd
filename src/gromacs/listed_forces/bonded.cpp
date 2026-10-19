@@ -131,6 +131,8 @@ int pbc_rvec_sub(const t_pbc* pbc, const rvec xi, const rvec xj, rvec dx)
 }
 
 // 这里只追踪 CPU 求力调用；加权快照在总力修正流程统一写出。
+// 调用这里的相互作用类型必须与 gamdmath.h 的 c_gaMDDihedralInteractionTypes 一致：
+// PDIHS、RBDIHS、FOURDIHS 经 do_dih_fup 调用，CMAP 在其力分配处直接调用。
 void traceGaMDRawDihedralForces(const t_fcdata* forceCalculationData,
                                 int             atomIndexI,
                                 const rvec      forceI,

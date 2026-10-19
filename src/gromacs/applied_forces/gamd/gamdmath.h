@@ -41,8 +41,11 @@
 
 #include <cstdint>
 
+#include <array>
+
 #include "gromacs/applied_forces/gamd/gamdtypes.h"
 #include "gromacs/compat/pointers.h"
+#include "gromacs/topology/ifunc.h"
 
 namespace gmx
 {
@@ -53,6 +56,31 @@ namespace gmx
 
 //! Existing force-weight safety floor; applied after evaluating the bias.
 constexpr double c_gaMDScaleFloor = 0.01;
+
+/*! \brief Interaction types that form the GaMD dihedral component.
+ *
+ * This is the scientific definition of the dihedral partition: changing it
+ * changes both the bias and the meaning of saved statistics. The CPU
+ * recomputation, the GPU support check and gaMDDihedralEnergy() follow this
+ * table. The GPU listed-force dispatch and the raw CPU trace in the native
+ * bonded code must select the same types; their comments point here.
+ */
+constexpr std::array<int, 4> c_gaMDDihedralInteractionTypes = { F_PDIHS, F_RBDIHS, F_FOURDIHS, F_CMAP };
+
+/*! \brief Returns the dihedral-component energy from per-interaction energy terms.
+ *
+ * Adds the types of c_gaMDDihedralInteractionTypes in table order. The sum is
+ * written out so that host and device code perform the same additions.
+ */
+template<typename Real>
+#if defined(__CUDACC__) || defined(__HIPCC__)
+__host__ __device__
+#endif
+        inline Real
+        gaMDDihedralEnergy(const Real* energies)
+{
+    return energies[F_PDIHS] + energies[F_RBDIHS] + energies[F_FOURDIHS] + energies[F_CMAP];
+}
 
 /*! \brief Evaluate the existing GaMD potential and its raw force weights.
  *

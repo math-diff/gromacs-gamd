@@ -74,6 +74,7 @@
 
 #include "gamddiagnostics.h"
 #include "gamdgpu.h"
+#include "gamdmath.h"
 #include "gamdmdmodule.h"
 
 //! \cond internal
@@ -109,9 +110,7 @@ void calculateGaMDDihedralListedForces(const InteractionDefinitions& interaction
     const real bondedLambda =
             freeEnergyParameters[static_cast<int>(FreeEnergyPerturbationCouplingType::Bonded)];
 
-    const std::array<int, 4> gamdDihedralForceTypes = { F_PDIHS, F_RBDIHS, F_FOURDIHS, F_CMAP };
-
-    for (const int forceType : gamdDihedralForceTypes)
+    for (const int forceType : c_gaMDDihedralInteractionTypes)
     {
         const InteractionList& interactionList = interactionDefinitions.il[forceType];
         if (interactionList.empty())
@@ -731,8 +730,7 @@ void applyGaMDCurrentStepCorrection(const t_commrec&              communicationR
         {
             sum_epot(energyData->grpp, energyData->term.data());
             const double rawPotentialEnergy = energyData->term[F_EPOT];
-            const double rawDihedralEnergy  = energyData->term[F_PDIHS] + energyData->term[F_RBDIHS]
-                                             + energyData->term[F_FOURDIHS] + energyData->term[F_CMAP];
+            const double rawDihedralEnergy  = gaMDDihedralEnergy(energyData->term.data());
             module->finalizeCurrentStep(
                     step, communicationRecord.nodeid, rawPotentialEnergy, rawDihedralEnergy, wallCycle);
             if (forceRecord->listedForcesGpu != nullptr && gpuExecutor != nullptr

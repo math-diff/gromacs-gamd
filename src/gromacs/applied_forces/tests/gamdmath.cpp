@@ -140,6 +140,26 @@ TEST(GaMDMathTest, EvaluatorLeavesSafetyFloorToTheCaller)
     EXPECT_DOUBLE_EQ(c_gaMDScaleFloor, 0.01);
 }
 
+TEST(GaMDMathTest, DihedralEnergySumsExactlyThePartitionTypes)
+{
+    // 二面角分区是科学定义，改动它必须同时有意识地更新这里的期望。
+    const std::array<int, 4> expectedTypes = { F_PDIHS, F_RBDIHS, F_FOURDIHS, F_CMAP };
+    EXPECT_EQ(c_gaMDDihedralInteractionTypes, expectedTypes);
+
+    // 每类能量取不同的 2 的幂，求和结果唯一对应参与求和的类型集合。
+    std::array<double, F_NRE> energies;
+    for (int forceType = 0; forceType < F_NRE; forceType++)
+    {
+        energies[forceType] = std::ldexp(1.0, forceType);
+    }
+    double partitionEnergy = 0.0;
+    for (const int forceType : c_gaMDDihedralInteractionTypes)
+    {
+        partitionEnergy += energies[forceType];
+    }
+    EXPECT_DOUBLE_EQ(gaMDDihedralEnergy(energies.data()), partitionEnergy);
+}
+
 TEST(GaMDMathTest, WindowsUsePopulationVarianceAndCanBeResumed)
 {
     GaMDEnergyStatistics statistics;

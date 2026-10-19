@@ -395,8 +395,7 @@ void GaMDRuntime::writeBufferedProductionOutput(ArrayRef<const int64_t> deferred
                 potentialEnergy += sample[interactionType];
             }
         }
-        const float dihedralEnergy =
-                sample[F_PDIHS] + sample[F_RBDIHS] + sample[F_FOURDIHS] + sample[F_CMAP];
+        const float dihedralEnergy = gaMDDihedralEnergy(sample.data());
 
         GaMDStepResult record = evaluateGaMDBias(biasParameters(), potentialEnergy, dihedralEnergy);
         double         totalEnergyForP = potentialEnergy;

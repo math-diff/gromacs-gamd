@@ -178,6 +178,13 @@ non-finite values before aggregating errors. CPU bonded kernels produce raw
 forces; the GaMD correction owns the final weights. Preserve the distinction
 between single-rank DD-style atom ordering and actual PP domain decomposition.
 
+``c_gaMDDihedralInteractionTypes`` in ``gamdmath.h`` is the single definition
+of the dihedral component: PDIHS, RBDIHS, FOURDIHS and CMAP. The CPU
+recomputation and the GPU topology check iterate it, and every host and device
+energy sum calls ``gaMDDihedralEnergy``. The GPU listed-force dispatch and the
+raw CPU trace in the native bonded code select the same types; their comments
+point to the definition, and a unit test locks it.
+
 Dihedral snapshots are emitted once from completed CPU/GPU force data through
 ``GaMDDiagnostics::dumpDihedralForces``. The CPU caller passes its topology atom
 mapping; the GPU caller reuses ``copyDihedralForces``. Snapshot requests stage
