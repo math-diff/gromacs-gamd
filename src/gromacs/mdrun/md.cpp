@@ -896,11 +896,6 @@ void gmx::LegacySimulator::do_md()
     const bool useCurrentStepGaMD     = simulationWork.useGaMD();
     const bool useGpuResidentGaMD     = simulationWork.useGpuResidentGaMD();
     gaMDModule_->setBufferedProductionOutputEnabled(useGpuResidentGaMD);
-    if (useCurrentStepGaMD)
-    {
-        // bonded 层只保存非拥有指针，所有诊断状态仍由当前 GaMD 模块实例管理。
-        fcdata.gaMDDiagnostics = &gaMDModule_->diagnostics();
-    }
     /* and stop now if we should */
     bLastStep = (bLastStep || (ir->nsteps >= 0 && step_rel > ir->nsteps));
     while (!bLastStep)
@@ -1324,11 +1319,6 @@ void gmx::LegacySimulator::do_md()
                  * Check comments in sim_util.c
                  */
 
-                if (useCurrentStepGaMD)
-                {
-                    gaMDModule_->diagnostics().prepareDihedralStep(step);
-                }
-
                 do_force(fpLog_,
                          cr_,
                          ms_,
@@ -1363,7 +1353,7 @@ void gmx::LegacySimulator::do_md()
             // 文件与诊断错误在 legacy MD 入口统一收口。
             try
             {
-                // 加权二面角快照已在求力流程写出，这里刷出原始调用追踪并核对快照。
+                // 加权二面角快照已在求力流程写出，这里核对请求的那一步确实写出了快照。
                 if (useCurrentStepGaMD)
                 {
                     gaMDModule_->diagnostics().finishDihedralStep(step, MAIN(cr_));

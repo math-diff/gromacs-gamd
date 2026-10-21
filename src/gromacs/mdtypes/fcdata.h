@@ -224,11 +224,6 @@ struct bondedtable_t
     std::vector<real> data;  /* the actual table data, per point there are 4 numbers */
 };
 
-namespace gmx
-{
-class GaMDDiagnostics;
-}
-
 /*
  * Data struct used in the force calculation routines
  * for storing the tables for bonded interactions and
@@ -245,9 +240,6 @@ struct t_fcdata
     // TODO: Convert to C++ and unique_ptr (currently this data is not freed)
     t_disresdata*                 disres = nullptr;
     std::unique_ptr<t_oriresdata> orires;
-
-    // 该指针不拥有对象，只把 bonded 热路径接到当前模拟的 GaMD 诊断实例。
-    gmx::GaMDDiagnostics* gaMDDiagnostics = nullptr;
 };
 
 #endif

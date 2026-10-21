@@ -201,11 +201,11 @@ GPU snapshots read the existing device dihedral-force buffer at the selected
 step. They work without enabling the full GPU shadow comparison. Host staging
 is requested for that step so the snapshot uses its current force weights.
 
-``GMX_GAMD_DIH_RAW_DEBUG_FILE`` retains a trace of raw CPU bonded evaluations.
-Repeated correction or shadow evaluations therefore appear as separate rows.
 ``GMX_GAMD_FORCE_DEBUG_FILE`` retains the final-force dump in its current force
-buffer's atom order. Explicit requests for any of these three files report
-open, write, flush, or close errors instead of silently disabling output.
+buffer's atom order. Explicit requests for either file report open, write,
+flush, or close errors instead of silently disabling output. The former raw CPU
+bonded-evaluation trace ``GMX_GAMD_DIH_RAW_DEBUG_FILE`` has been removed, so
+the native bonded kernels carry no GaMD hooks; the variable is no longer read.
 
 Verification
 ------------

@@ -104,8 +104,6 @@ public:
     //! Read once on first GaMD use; ordinary simulations never request overrides.
     const GaMDForceOverrides& forceOverrides();
 
-    //! Records the step number used by raw CPU evaluation tracing.
-    void prepareDihedralStep(int64_t step);
     //! Tests whether the selected step still needs its one snapshot.
     bool dihedralForceOutputRequested(int64_t step) const;
     //! 写出同一步的加权二面角力；有原子重排序时使用拓扑编号。
@@ -114,16 +112,7 @@ public:
                             double               forceWeight,
                             bool                 isMainRank,
                             ArrayRef<const int>  globalAtomIndices = {});
-    //! Writes four raw CPU contributions; the OpenMP caller must contain I/O errors.
-    void addRawDihedralForces(int        atomIndexI,
-                              const rvec forceI,
-                              int        atomIndexJ,
-                              const rvec forceJ,
-                              int        atomIndexK,
-                              const rvec forceK,
-                              int        atomIndexL,
-                              const rvec forceL);
-    //! Flushes raw tracing and rejects an unfulfilled selected-step snapshot.
+    //! Rejects an unfulfilled selected-step snapshot.
     void finishDihedralStep(int64_t step, bool isMainRank);
     //! Writes the selected final-force buffer in its current atom order.
     void dumpFinalForces(int64_t step, ArrayRef<const RVec> forces, bool isMainRank);
@@ -141,17 +130,10 @@ public:
     bool shouldPrintGpuWorkloadDiagnostics();
 
 private:
-    //! Writes one raw CPU force contribution, throwing on write failure.
-    void addRawDihedralForce(int atomIndex, const rvec force);
-
     MDLogger logger_;
 
     bool               forceOverridesRead_ = false;
     GaMDForceOverrides forceOverrides_;
-
-    FilePtr     rawDihedralFile_;
-    std::string rawDihedralFilename_;
-    int64_t     rawDihedralCurrentStep_ = -1;
 
     FilePtr     dihedralForceFile_;
     std::string dihedralForceFilename_;

@@ -49,8 +49,6 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 
 #include <algorithm>
 #include <array>
@@ -58,7 +56,6 @@
 #include <type_traits>
 #include <vector>
 
-#include "gromacs/applied_forces/gamd/gamddiagnostics.h"
 #include "gromacs/gmxlib/nrnb.h"
 #include "gromacs/listed_forces/disre.h"
 #include "gromacs/listed_forces/orires.h"
@@ -78,7 +75,6 @@
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/enumerationhelpers.h"
-#include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/fatalerror.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/smalloc.h"
@@ -128,32 +124,6 @@ int pbc_rvec_sub(const t_pbc* pbc, const rvec xi, const rvec xj, rvec dx)
         rvec_sub(xi, xj, dx);
         return c_centralShiftIndex;
     }
-}
-
-// 这里只追踪 CPU 求力调用；加权快照在总力修正流程统一写出。
-// 调用这里的相互作用类型必须与 gamdmath.h 的 c_gaMDDihedralInteractionTypes 一致：
-// PDIHS、RBDIHS、FOURDIHS 经 do_dih_fup 调用，CMAP 在其力分配处直接调用。
-void traceGaMDRawDihedralForces(const t_fcdata* forceCalculationData,
-                                int             atomIndexI,
-                                const rvec      forceI,
-                                int             atomIndexJ,
-                                const rvec      forceJ,
-                                int             atomIndexK,
-                                const rvec      forceK,
-                                int             atomIndexL,
-                                const rvec      forceL)
-{
-    if (forceCalculationData == nullptr || forceCalculationData->gaMDDiagnostics == nullptr)
-    {
-        return;
-    }
-    // 此回调会在 OpenMP 区域执行，文件异常不能跨线程传播。
-    try
-    {
-        forceCalculationData->gaMDDiagnostics->addRawDihedralForces(
-                atomIndexI, forceI, atomIndexJ, forceJ, atomIndexK, forceK, atomIndexL, forceL);
-    }
-    GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
 }
 
 } // namespace
@@ -1789,7 +1759,7 @@ inline void dih_angle_simd(const rvec* x,
 
 } // namespace
 
-template<BondedKernelFlavor flavor, bool debugDump = false>
+template<BondedKernelFlavor flavor>
 void do_dih_fup(int          i,
                 int          j,
                 int          k,
@@ -1806,8 +1776,7 @@ void do_dih_fup(int          i,
                 const rvec   x[],
                 int          t1,
                 int          t2,
-                int          t3,
-                t_fcdata*    forceCalculationData = nullptr)
+                int          t3)
 {
     /* 143 FLOPS */
     rvec f_i, f_j, f_k, f_l;
@@ -1841,15 +1810,6 @@ void do_dih_fup(int          i,
         rvec_dec(f[j], f_j);           /*  3	*/
         rvec_dec(f[k], f_k);           /*  3	*/
         rvec_inc(f[l], f_l);           /*  3	*/
-
-        if constexpr (debugDump)
-        {
-            rvec f_j_applied, f_k_applied;
-            svmul(-1.0, f_j, f_j_applied);
-            svmul(-1.0, f_k, f_k_applied);
-            traceGaMDRawDihedralForces(
-                    forceCalculationData, i, f_i, j, f_j_applied, k, f_k_applied, l, f_l);
-        }
 
         if (computeVirial(flavor))
         {
@@ -1959,7 +1919,7 @@ real dopdihs_min(real cpA, real cpB, real phiA, real phiB, int mult, real phi, r
     /* That was 40 flops */
 }
 
-template<BondedKernelFlavor flavor, bool collectGaMDRawDiagnostics>
+template<BondedKernelFlavor flavor>
 std::enable_if_t<flavor != BondedKernelFlavor::ForcesSimdWhenAvailable || !GMX_SIMD_HAVE_REAL, real>
 pdihs(int             nbonds,
       const t_iatom   forceatoms[],
@@ -2012,10 +1972,8 @@ pdihs(int             nbonds,
         } while (i < nbonds && forceatoms[i + 1] == ai && forceatoms[i + 2] == aj
                  && forceatoms[i + 3] == ak && forceatoms[i + 4] == al);
 
-        do_dih_fup<flavor, collectGaMDRawDiagnostics>(
-                ai, aj, ak, al, ddphi_tot, r_ij, r_kj, r_kl, m, n, f, fshift, pbc, x, t1, t2, t3, fcd);
-
-
+        do_dih_fup<flavor>(
+                ai, aj, ak, al, ddphi_tot, r_ij, r_kj, r_kl, m, n, f, fshift, pbc, x, t1, t2, t3); /* 112		*/
     } /* 223 TOTAL  */
 
     return vtot;
@@ -2024,7 +1982,7 @@ pdihs(int             nbonds,
 #if GMX_SIMD_HAVE_REAL
 
 /* As pdihs above, but using SIMD to calculate multiple dihedrals at once */
-template<BondedKernelFlavor flavor, bool collectGaMDRawDiagnostics>
+template<BondedKernelFlavor flavor>
 std::enable_if_t<flavor == BondedKernelFlavor::ForcesSimdWhenAvailable, real>
 pdihs(int              nbonds,
       const t_iatom    forceatoms[],
@@ -2117,8 +2075,8 @@ pdihs(int              nbonds,
         /* Calculate GMX_SIMD_REAL_WIDTH sines at once */
         sincos(mdphi_S, &sin_S, &cos_S);
         mddphi_S = cp_S * mult_S * sin_S;
-        sf_i_S  = mddphi_S * nrkj_m2_S;
-        msf_l_S = mddphi_S * nrkj_n2_S;
+        sf_i_S   = mddphi_S * nrkj_m2_S;
+        msf_l_S  = mddphi_S * nrkj_n2_S;
 
         /* After this m?_S will contain f[i] */
         mx_S = sf_i_S * mx_S;
@@ -3031,10 +2989,8 @@ rbdihs(int             nbonds,
         dvdl_term += cosfac * rbpBA;
 
         ddphi = -ddphi * sin_phi; /*  11		*/
-        do_dih_fup<flavor, true>(
-                ai, aj, ak, al, ddphi, r_ij, r_kj, r_kl, m, n, f, fshift, pbc, x, t1, t2, t3, fcd); /* 112
-                                                                                                     */
 
+        do_dih_fup<flavor>(ai, aj, ak, al, ddphi, r_ij, r_kj, r_kl, m, n, f, fshift, pbc, x, t1, t2, t3); /* 112		*/
         vtot += v;
     }
     *dvdlambda += dvdl_term;
@@ -3132,8 +3088,7 @@ void accumulateCmapForces(const rvec      x[],
                           const int       al,
                           const real      df,
                           const int       t1,
-                          const int       t2,
-                          t_fcdata*       forceCalculationData)
+                          const int       t2)
 {
     const real fg  = iprod(r_ij, r_kj);
     const real hg  = iprod(r_kl, r_kj);
@@ -3156,7 +3111,6 @@ void accumulateCmapForces(const rvec      x[],
     rvec_inc(f[aj], f_j);
     rvec_inc(f[ak], f_k);
     rvec_inc(f[al], f_l);
-    traceGaMDRawDihedralForces(forceCalculationData, ai, f_i, aj, f_j, ak, f_k, al, f_l);
 
     /* Shift forces */
     if (fshift != nullptr)
@@ -3434,11 +3388,11 @@ real cmap_dihs(int                 nbonds,
 
         /* Do forces - first torsion */
         accumulateCmapForces(
-                x, f, fshift, pbc, r1_ij, r1_kj, r1_kl, a1, b1, h1, ra2r1, rb2r1, rgr1, rg1, a1i, a1j, a1k, a1l, df1, t11, t21, fcd);
+                x, f, fshift, pbc, r1_ij, r1_kj, r1_kl, a1, b1, h1, ra2r1, rb2r1, rgr1, rg1, a1i, a1j, a1k, a1l, df1, t11, t21);
 
         /* Do forces - second torsion */
         accumulateCmapForces(
-                x, f, fshift, pbc, r2_ij, r2_kj, r2_kl, a2, b2, h2, ra2r2, rb2r2, rgr2, rg2, a2i, a2j, a2k, a2l, df2, t12, t22, fcd);
+                x, f, fshift, pbc, r2_ij, r2_kj, r2_kl, a2, b2, h2, ra2r2, rb2r2, rgr2, rg2, a2i, a2j, a2k, a2l, df2, t12, t22);
     }
     return vtot;
 }
@@ -4039,13 +3993,13 @@ constexpr std::array<BondedInteractions, F_NRE> c_bondedInteractionFunctions = {
     BondedInteractions{ urey_bradley<flavor>, eNR_UREY_BRADLEY },         // F_UREY_BRADLEY
     BondedInteractions{ quartic_angles<flavor>, eNR_QANGLES },            // F_QUARTIC_ANGLES
     BondedInteractions{ tab_angles<flavor>, eNR_TABANGLES },              // F_TABANGLES
-    BondedInteractions{ pdihs<flavor, true>, eNR_PROPER },                // F_PDIHS
+    BondedInteractions{ pdihs<flavor>, eNR_PROPER },                      // F_PDIHS
     BondedInteractions{ rbdihs<flavor>, eNR_RB },                         // F_RBDIHS
     BondedInteractions{ restrdihs<flavor>, eNR_PROPER },                  // F_RESTRDIHS
     BondedInteractions{ cbtdihs<flavor>, eNR_RB },                        // F_CBTDIHS
     BondedInteractions{ rbdihs<flavor>, eNR_FOURDIH },                    // F_FOURDIHS
     BondedInteractions{ idihs<flavor>, eNR_IMPROPER },                    // F_IDIHS
-    BondedInteractions{ pdihs<flavor, false>, eNR_IMPROPER },             // F_PIDIHS
+    BondedInteractions{ pdihs<flavor>, eNR_IMPROPER },                    // F_PIDIHS
     BondedInteractions{ tab_dihs<flavor>, eNR_TABDIHS },                  // F_TABDIHS
     BondedInteractions{ unimplemented, eNR_CMAP },                        // F_CMAP
     BondedInteractions{ unimplemented, -1 },                              // F_GB12_NOLONGERUSED
@@ -4126,6 +4080,7 @@ constexpr gmx::EnumerationArray<BondedKernelFlavor, std::array<BondedInteraction
 //! \endcond
 
 } // namespace
+
 real calculateSimpleBond(const int                 ftype,
                          const int                 numForceatoms,
                          const t_iatom             forceatoms[],

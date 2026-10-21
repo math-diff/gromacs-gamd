@@ -278,8 +278,7 @@ TEST(GaMDDiagnosticsTest, RequestedOutputOpenErrorsAreReported)
     const auto      directory =
             fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory           workingDirectory(directory);
-    const std::array<const char*, 3> fileVariables = { "GMX_GAMD_DIH_RAW_DEBUG_FILE",
-                                                       "GMX_GAMD_DIH_FORCE_DEBUG_FILE",
+    const std::array<const char*, 2> fileVariables = { "GMX_GAMD_DIH_FORCE_DEBUG_FILE",
                                                        "GMX_GAMD_FORCE_DEBUG_FILE" };
     for (Index fileIndex = 0; fileIndex < ssize(fileVariables); ++fileIndex)
     {
@@ -298,8 +297,7 @@ TEST(GaMDDiagnosticsTest, RequestedOutputWriteErrorsAreReported)
     {
         GTEST_SKIP() << "The /dev/full device is unavailable.";
     }
-    const std::array<const char*, 3> fileVariables = { "GMX_GAMD_DIH_RAW_DEBUG_FILE",
-                                                       "GMX_GAMD_DIH_FORCE_DEBUG_FILE",
+    const std::array<const char*, 2> fileVariables = { "GMX_GAMD_DIH_FORCE_DEBUG_FILE",
                                                        "GMX_GAMD_FORCE_DEBUG_FILE" };
     for (Index fileIndex = 0; fileIndex < ssize(fileVariables); ++fileIndex)
     {
@@ -320,17 +318,10 @@ TEST(GaMDDiagnosticsTest, DihedralSnapshotIsWeightedOrderedAndWrittenOnce)
     gmxSetenv("GMX_GAMD_DIH_FORCE_DEBUG_STEP", "7", 1);
     gmxSetenv("GMX_GAMD_DIH_FORCE_DEBUG_BEGIN", "1", 1);
     gmxSetenv("GMX_GAMD_DIH_FORCE_DEBUG_COUNT", "2147483647", 1);
-    gmxSetenv("GMX_GAMD_DIH_RAW_DEBUG_FILE", "raw-calls.dat", 1);
     {
         GaMDDiagnostics           diagnostics;
         const std::array<RVec, 3> rawForces = { RVec(4, 0, 0), RVec(0, 8, 0), RVec(0, 0, 12) };
         const std::array<int, 3>  topologyIndices = { 2, 0, 1 };
-        diagnostics.prepareDihedralStep(7);
-        // 原始调用可以出现多次，但不能再改变加权快照的数值。
-        diagnostics.addRawDihedralForces(
-                0, rawForces[0], 1, rawForces[1], 2, rawForces[2], 0, rawForces[0]);
-        diagnostics.addRawDihedralForces(
-                0, rawForces[0], 1, rawForces[1], 2, rawForces[2], 0, rawForces[0]);
         EXPECT_FALSE(diagnostics.dihedralForceOutputRequested(6));
         EXPECT_TRUE(diagnostics.dihedralForceOutputRequested(7));
         diagnostics.dumpDihedralForces(7, rawForces, 0.25, false, topologyIndices);
@@ -347,7 +338,6 @@ TEST(GaMDDiagnosticsTest, DihedralSnapshotIsWeightedOrderedAndWrittenOnce)
     gmxUnsetenv("GMX_GAMD_DIH_FORCE_DEBUG_STEP");
     gmxUnsetenv("GMX_GAMD_DIH_FORCE_DEBUG_BEGIN");
     gmxUnsetenv("GMX_GAMD_DIH_FORCE_DEBUG_COUNT");
-    gmxUnsetenv("GMX_GAMD_DIH_RAW_DEBUG_FILE");
     const auto rows = readNumericRows("dihedral.dat");
     ASSERT_EQ(rows.size(), 2U);
     ASSERT_EQ(rows[0].size(), 6U);
@@ -359,7 +349,6 @@ TEST(GaMDDiagnosticsTest, DihedralSnapshotIsWeightedOrderedAndWrittenOnce)
     EXPECT_EQ(rows[1][1], 2);
     EXPECT_EQ(rows[1][2], 1);
     EXPECT_EQ(rows[1][5], 1);
-    EXPECT_EQ(readNumericRows("raw-calls.dat").size(), 8U);
 }
 
 TEST(GaMDDiagnosticsTest, MissingRequestedDihedralSnapshotIsRejected)

@@ -109,10 +109,10 @@ simulation-instability exception types. The module's legacy MD entry points,
 the force-correction entry, diagnostic output callbacks, the GPU executor
 initialization and the GPU buffer binding entry contain exceptions with the
 existing fatal-error adapter. GPU buffer binding can be called after
-asynchronous interaction-list uploads, and raw bonded diagnostics can execute
-inside OpenMP; neither may unwind its caller. Executor initialization runs after
-the runner has created GPU nonbonded objects; unwinding through
-``Mdrunner::mdrunner`` would release them after the device stream and crash.
+asynchronous interaction-list uploads and must not unwind its caller. Executor
+initialization runs after the runner has created GPU nonbonded objects;
+unwinding through ``Mdrunner::mdrunner`` would release them after the device
+stream and crash.
 Destructors also contain close errors. Reinitialize an internal runtime after
 failed input preparation; retrying a partially prepared instance is unsupported.
 
@@ -198,18 +198,20 @@ between single-rank DD-style atom ordering and actual PP domain decomposition.
 ``c_gaMDDihedralInteractionTypes`` in ``gamdmath.h`` is the single definition
 of the dihedral component: PDIHS, RBDIHS, FOURDIHS and CMAP. The CPU
 recomputation and the GPU topology check iterate it, and every host and device
-energy sum calls ``gaMDDihedralEnergy``. The GPU listed-force dispatch and the
-raw CPU trace in the native bonded code select the same types; their comments
-point to the definition, and a unit test locks it.
+energy sum calls ``gaMDDihedralEnergy``. The GPU listed-force dispatch selects
+the same types; its comment points to the definition, and a unit test locks it.
 
 Dihedral snapshots are emitted once from completed CPU/GPU force data through
 ``GaMDDiagnostics::dumpDihedralForces``. The CPU caller passes its topology atom
 mapping; the GPU caller copies the device forces with ``copyDihedralForces``
 only at the selected step, independently of the shadow. Snapshot requests stage
 current host weights at their selected step without enabling the full shadow
-comparison. Bonded callbacks only retain the separately labelled raw CPU trace.
-The diagnostics implementation shares checked stdio output for dihedral and
-final-force snapshots and reports requested-file failures explicitly.
+comparison. The native CPU bonded kernels carry no GaMD hooks: the former raw
+trace ``GMX_GAMD_DIH_RAW_DEBUG_FILE`` was removed, and ``bonded.cpp`` differs
+from the release only by the shared CMAP coefficient table used by the GPU
+kernel. The diagnostics implementation shares checked stdio output for the
+dihedral and final-force snapshots and reports requested-file failures
+explicitly.
 
 ``EnergyOutput::deferGpuSamples`` marks energy, virial and kinetic bins together.
 The MD loop passes the device history and its host boxes as plain arrays to

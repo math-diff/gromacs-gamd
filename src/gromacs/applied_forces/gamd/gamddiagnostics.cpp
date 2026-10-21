@@ -432,10 +432,6 @@ GaMDDiagnostics::GaMDDiagnostics()
     {
         finalForceCount_ = intFromString(configuredCount);
     }
-    rawDihedralFile_   = openGaMDDiagnosticFile("GMX_GAMD_DIH_RAW_DEBUG_FILE",
-                                              "# step atom fx fy fz (raw CPU dihedral evaluation "
-                                                "contributions; recomputations included)\n",
-                                              &rawDihedralFilename_);
     dihedralForceFile_ = openGaMDDiagnosticFile("GMX_GAMD_DIH_FORCE_DEBUG_FILE",
                                                 "# step atom fx fy fz |f| (scaleP * scaleD * raw "
                                                 "dihedral force; zero-based topology atom index)\n",
@@ -453,7 +449,6 @@ GaMDDiagnostics::~GaMDDiagnostics()
     // 析构函数不能传播异常；关闭失败仍通过引擎的统一错误出口报告。
     try
     {
-        closeGaMDDiagnosticFile(rawDihedralFile_.release(), rawDihedralFilename_);
         closeGaMDDiagnosticFile(dihedralForceFile_.release(), dihedralForceFilename_);
         closeGaMDDiagnosticFile(finalForceFile_.release(), finalForceFilename_);
     }
@@ -485,11 +480,6 @@ const GaMDForceOverrides& GaMDDiagnostics::forceOverrides()
     return forceOverrides_;
 }
 
-void GaMDDiagnostics::prepareDihedralStep(const int64_t step)
-{
-    rawDihedralCurrentStep_ = step;
-}
-
 bool GaMDDiagnostics::dihedralForceOutputRequested(const int64_t step) const
 {
     return dihedralForceFile_ != nullptr && dihedralForceStep_ >= 0 && step == dihedralForceStep_
@@ -518,48 +508,8 @@ void GaMDDiagnostics::dumpDihedralForces(const int64_t        step,
     dihedralForceWrittenStep_ = step;
 }
 
-void GaMDDiagnostics::addRawDihedralForce(const int atomIndex, const rvec force)
-{
-    if (rawDihedralFile_ == nullptr)
-    {
-        return;
-    }
-    if (std::fprintf(rawDihedralFile_.get(),
-                     "%lld %d %.9e %.9e %.9e\n",
-                     static_cast<long long>(rawDihedralCurrentStep_),
-                     atomIndex,
-                     static_cast<double>(force[XX]),
-                     static_cast<double>(force[YY]),
-                     static_cast<double>(force[ZZ]))
-        < 0)
-    {
-        GMX_THROW(FileIOError(formatString("Failed to write GaMD diagnostic file '%s': %s.",
-                                           rawDihedralFilename_.c_str(),
-                                           std::strerror(errno))));
-    }
-}
-
-void GaMDDiagnostics::addRawDihedralForces(const int  atomIndexI,
-                                           const rvec forceI,
-                                           const int  atomIndexJ,
-                                           const rvec forceJ,
-                                           const int  atomIndexK,
-                                           const rvec forceK,
-                                           const int  atomIndexL,
-                                           const rvec forceL)
-{
-    addRawDihedralForce(atomIndexI, forceI);
-    addRawDihedralForce(atomIndexJ, forceJ);
-    addRawDihedralForce(atomIndexK, forceK);
-    addRawDihedralForce(atomIndexL, forceL);
-}
-
 void GaMDDiagnostics::finishDihedralStep(const int64_t step, const bool isMainRank)
 {
-    if (rawDihedralFile_ != nullptr)
-    {
-        flushGaMDDiagnosticFile(rawDihedralFile_.get(), rawDihedralFilename_);
-    }
     // 到达了请求的步号却没有样本时，不能把空文件当成有效诊断结果。
     if (isMainRank && dihedralForceOutputRequested(step))
     {

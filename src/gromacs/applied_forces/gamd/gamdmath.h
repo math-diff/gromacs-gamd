@@ -62,8 +62,8 @@ constexpr double c_gaMDScaleFloor = 0.01;
  * This is the scientific definition of the dihedral partition: changing it
  * changes both the bias and the meaning of saved statistics. The CPU
  * recomputation, the GPU support check and gaMDDihedralEnergy() follow this
- * table. The GPU listed-force dispatch and the raw CPU trace in the native
- * bonded code must select the same types; their comments point here.
+ * table. The GPU listed-force dispatch must select the same types; its
+ * comment points here.
  */
 constexpr std::array<int, 4> c_gaMDDihedralInteractionTypes = { F_PDIHS, F_RBDIHS, F_FOURDIHS, F_CMAP };
 
