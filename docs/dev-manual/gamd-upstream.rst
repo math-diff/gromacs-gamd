@@ -288,8 +288,9 @@ Proposed review sequence
   performance evidence; other backends follow the agreed support policy.
 
 Keep each change independently reviewable and state its prerequisite commits.
-The baseline itself differs from pristine GROMACS in 81 files, so a refactor
-inside the module does not by itself make the full feature a small merge request.
+The ``5ff664c`` baseline already differed from pristine GROMACS in 81 files, so
+a refactor inside the module does not by itself make the full feature a small
+merge request.
 Do not erase useful local development history to pretend it is an upstream series.
 Prepare the series separately after agreeing on its boundaries.
 

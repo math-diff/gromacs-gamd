@@ -180,9 +180,11 @@ UpdateConstrainGpu::Impl::Impl(const t_inputrec&    ir,
                                const DeviceContext& deviceContext,
                                const DeviceStream&  deviceStream,
                                gmx_wallcycle*       wcycle) :
-    deviceContext_(deviceContext), deviceStream_(deviceStream), wcycle_(wcycle)
+    deviceContext_(deviceContext),
+    deviceStream_(deviceStream),
+    gaMDGpuExecutor_(gaMDGpuExecutor),
+    wcycle_(wcycle)
 {
-    gaMDGpuExecutor_ = gaMDGpuExecutor;
     integrator_ = std::make_unique<LeapFrogGpu>(deviceContext_, deviceStream_, numTempScaleValues);
     if (sc_haveGpuConstraintSupport)
     {

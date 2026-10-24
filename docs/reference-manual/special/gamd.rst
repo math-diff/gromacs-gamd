@@ -115,6 +115,9 @@ stage lengths must be ordered and window-aligned, and ``ntcmd + nteb`` must fit
 in a signed 64-bit step counter. Invalid restart windows are rejected.
 With ``irest_gamd=1``, stage controls in ``gamd.in`` may still be omitted or zero;
 the validated restart supplies their stored values.
+The legacy ``debug`` key must be 0 or 1. It is only echoed in the logged
+parameter summary and enables no diagnostics; those use the environment
+variables described below.
 ``sigma0P`` and ``sigma0D`` are provided in kcal/mol and converted to kJ/mol.
 ``gamd-para.dat`` uses kJ/mol; ``gamd-reweight.dat`` uses kcal/mol. The two boost
 columns are separate contributions and must be combined when a total bias is

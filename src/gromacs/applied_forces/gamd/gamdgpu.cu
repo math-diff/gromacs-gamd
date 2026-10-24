@@ -34,13 +34,6 @@
 /*! \internal \file
  * \brief CUDA force, energy, virial and kinetic-history operations for GaMD.
  *
- * \author Jon Vincent <jvincent@nvidia.com>
- * \author Magnus Lundborg <lundborg.magnus@gmail.com>
- * \author Berk Hess <hess@kth.se>
- * \author Szilárd Páll <pall.szilard@gmail.com>
- * \author Alan Gray <alang@nvidia.com>
- * \author Mark Abraham <mark.j.abraham@gmail.com>
- *
  * \ingroup module_applied_forces
  */
 

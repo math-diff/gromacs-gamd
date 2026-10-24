@@ -319,6 +319,7 @@ void accumulatePotentialEnergies(gmx_enerdata_t*           enerd,
         enerd->term[F_DVDL] = 0.0;
         for (auto i : gmx::EnumerationWrapper<FreeEnergyPerturbationCouplingType>{})
         {
+            // Skip kinetic terms here, as those are not available here yet
             if (i != FreeEnergyPerturbationCouplingType::Mass)
             {
                 set_dhdl_output(enerd, i, *fepvals);

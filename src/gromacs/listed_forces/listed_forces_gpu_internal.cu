@@ -51,13 +51,9 @@
 
 #include <cassert>
 
-#include <algorithm>
-
 #include "gromacs/applied_forces/gamd/gamdgpu.h"
 #include "gromacs/gpu_utils/cuda_arch_utils.cuh"
 #include "gromacs/gpu_utils/cudautils.cuh"
-#include "gromacs/gpu_utils/devicebuffer.h"
-#include "gromacs/gpu_utils/gpueventsynchronizer.h"
 #include "gromacs/gpu_utils/typecasts_cuda_hip.h"
 #include "gromacs/gpu_utils/vectype_ops_cuda.h"
 #include "gromacs/listed_forces/listed_forces_gpu.h"
@@ -1154,6 +1150,10 @@ __global__ void bonded_kernel_gpu(BondedGpuKernelParameters kernelParams,
     }
 }
 
+
+/*-------------------------------- End CUDA kernels-----------------------------*/
+
+
 template<bool calcVir, bool calcEner>
 void ListedForcesGpu::Impl::launchKernel()
 {
@@ -1176,8 +1176,12 @@ void ListedForcesGpu::Impl::launchKernel()
         gaMDBuffers = gaMDGpuExecutor_->prepareBondedForceAccumulation();
     }
 
-    auto               kernelPtr = gaMDBuffers.enabled ? bonded_kernel_gpu<calcVir, calcEner, true>
-                                                       : bonded_kernel_gpu<calcVir, calcEner, false>;
+    // GaMD 要单独累加二面角力时，换成同时写出这部分力的内核版本。
+    auto kernelPtr = bonded_kernel_gpu<calcVir, calcEner, false>;
+    if (gaMDBuffers.enabled)
+    {
+        kernelPtr = bonded_kernel_gpu<calcVir, calcEner, true>;
+    }
     KernelLaunchConfig launchConfig = kernelLaunchConfig_;
     if (gaMDBuffers.enabled && calcVir)
     {

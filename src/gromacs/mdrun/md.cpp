@@ -1325,7 +1325,6 @@ void gmx::LegacySimulator::do_md()
                  * This is parallellized as well, and does communication too.
                  * Check comments in sim_util.c
                  */
-
                 do_force(fpLog_,
                          cr_,
                          ms_,
@@ -1496,8 +1495,6 @@ void gmx::LegacySimulator::do_md()
                     bGStat ? (bSumEkinhOld ? EkindataState::UsedNeedToReduce
                                            : EkindataState::UsedDoNotNeedToReduce)
                            : EkindataState::NotUsed;
-
-
             do_md_trajectory_writing(fpLog_,
                                      cr_,
                                      nFile_,
@@ -1687,11 +1684,17 @@ void gmx::LegacySimulator::do_md()
                             (ir->etc != TemperatureCoupling::No
                              && do_per_step(step + ir->nsttcouple - 1, ir->nsttcouple));
 
-                    GpuEventSynchronizer* forcesReadyForUpdate =
-                            (simulationWork.gamdExecutionMode == gmx::GaMDExecutionMode::GpuResident
-                                     ? gaMDModule_->gpuExecutor()->forcesReadyEvent()
-                                     : stateGpu->getLocalForcesReadyOnDeviceEvent(
-                                               runScheduleWork_->stepWork, runScheduleWork_->simulationWork));
+                    // GPU 驻留的 GaMD 会在设备上修正力，更新要等修正做完，所以改等执行器的事件。
+                    GpuEventSynchronizer* forcesReadyForUpdate = nullptr;
+                    if (useGpuResidentGaMD)
+                    {
+                        forcesReadyForUpdate = gaMDModule_->gpuExecutor()->forcesReadyEvent();
+                    }
+                    else
+                    {
+                        forcesReadyForUpdate = stateGpu->getLocalForcesReadyOnDeviceEvent(
+                                runScheduleWork_->stepWork, runScheduleWork_->simulationWork);
+                    }
 
                     if (useGpuResidentGaMD && runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost
                         && !deferredPressureBoxes.empty())
@@ -2068,8 +2071,6 @@ void gmx::LegacySimulator::do_md()
                                           ir->nstlog,
                                           step);
             }
-
-
             if (bCalcEner)
             {
                 const bool outputDHDL = (computeDHDL && do_per_step(step, ir->fepvals->nstdhdl));

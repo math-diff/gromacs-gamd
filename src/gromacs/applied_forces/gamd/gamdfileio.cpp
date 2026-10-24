@@ -1008,26 +1008,27 @@ void GaMDRuntime::writeReweightRecord(int64_t step, const GaMDStepResult& record
 
     FILE* fp = openGaMDTextOutput(&reweightFile_, "gamd-reweight.dat", c_reweightFileHeader);
 
-    constexpr double kJ_to_kcal = 1.0 / c_cal2Joule;
+    // 重加权文件按 kcal/mol 记录能量，先把 kJ/mol 换算过来。
+    constexpr double c_kJToKcal = 1.0 / c_cal2Joule;
 
-    const double VP_kcal           = record.potentialEnergy * kJ_to_kcal;
-    const double VD_kcal           = record.dihedralEnergy * kJ_to_kcal;
-    const double boostP_kcal       = record.boostP * kJ_to_kcal;
-    const double boostD_kcal       = record.boostD * kJ_to_kcal;
-    const double effectiveDihScale = record.scaleP * record.scaleD;
+    const double potentialEnergyKcal    = record.potentialEnergy * c_kJToKcal;
+    const double dihedralEnergyKcal     = record.dihedralEnergy * c_kJToKcal;
+    const double potentialBoostKcal     = record.boostP * c_kJToKcal;
+    const double dihedralBoostKcal      = record.boostD * c_kJToKcal;
+    const double effectiveDihedralScale = record.scaleP * record.scaleD;
 
     if (std::fprintf(fp,
                      "%10" PRId64 " %12" PRId64
                      " %20.9f %20.9f %14.9f %14.9f %14.9f %20.9f %20.9f\n",
                      parameters_.reweightInterval,
                      step,
-                     VP_kcal,
-                     VD_kcal,
+                     potentialEnergyKcal,
+                     dihedralEnergyKcal,
                      record.scaleP,
                      record.scaleD,
-                     effectiveDihScale,
-                     boostP_kcal,
-                     boostD_kcal)
+                     effectiveDihedralScale,
+                     potentialBoostKcal,
+                     dihedralBoostKcal)
                 < 0
         || (flushOutput && std::fflush(fp) != 0))
     {

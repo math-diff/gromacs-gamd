@@ -45,20 +45,16 @@
 
 #include "gmxpre.h"
 
-#include <cstring>
-
 #include "gromacs/applied_forces/gamd/gamdgpu.h"
 #include "gromacs/gpu_utils/device_context.h"
 #include "gromacs/gpu_utils/device_stream.h"
 #include "gromacs/gpu_utils/devicebuffer.h"
-#include "gromacs/gpu_utils/gpueventsynchronizer.h"
 #include "gromacs/hardware/device_information.h"
 #include "gromacs/mdlib/gmx_omp_nthreads.h"
 #include "gromacs/mdtypes/enerdata.h"
 #include "gromacs/nbnxm/gpu_types_common.h"
 #include "gromacs/timing/wallcycle.h"
 #include "gromacs/topology/forcefieldparameters.h"
-#include "gromacs/utility/fatalerror.h"
 
 #include "cmap_coefficients.h"
 #include "listed_forces_gpu_impl.h"
@@ -176,7 +172,6 @@ ListedForcesGpu::Impl::Impl(const gmx_ffparams_t& ffparams,
 
     wcycle_ = wcycle;
 
-
     allocateDeviceBuffer(&d_forceParams_, ffparams.numTypes(), deviceContext_);
     // This could be an async transfer (if the source is pinned), so
     // long as it uses the same stream as the kernels and we are happy
@@ -252,10 +247,7 @@ ListedForcesGpu::Impl::~Impl()
 
     freeDeviceBuffer(&d_forceParams_);
     freeDeviceBuffer(&d_vTot_);
-    if (d_cmapCoefficients_ != nullptr)
-    {
-        freeDeviceBuffer(&d_cmapCoefficients_);
-    }
+    freeDeviceBuffer(&d_cmapCoefficients_);
 }
 
 //! Return whether function type \p fType in \p idef has perturbed interactions
@@ -345,8 +337,6 @@ void ListedForcesGpu::Impl::updateInteractionListsAndDeviceBuffers(ArrayRef<cons
                                                                    DeviceBuffer<float> d_nbElecEnergyPtr)
 {
     wallcycle_sub_start(wcycle_, WallCycleSubCounter::GpuBondedListUpdate);
-
-
     bool haveGpuInteractions = false;
     int  fTypesCounter       = 0;
 
@@ -500,7 +490,6 @@ void ListedForcesGpu::Impl::clearEnergies()
     wallcycle_stop(wcycle_, WallCycleCounter::LaunchGpuPp);
 }
 
-
 // ---- ListedForcesGpu
 
 ListedForcesGpu::ListedForcesGpu(const gmx_ffparams_t& ffparams,
@@ -573,6 +562,5 @@ void ListedForcesGpu::clearEnergies()
 {
     impl_->clearEnergies();
 }
-
 
 } // namespace gmx

@@ -44,8 +44,6 @@
 #include "gromacs/gpu_utils/device_stream.h"
 #include "gromacs/gpu_utils/devicebuffer.h"
 #include "gromacs/gpu_utils/gpueventsynchronizer.h"
-#include "gromacs/mdtypes/fcdata.h"
-#include "gromacs/timing/wallcycle.h"
 #include "gromacs/topology/ifunc.h"
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/exceptions.h"

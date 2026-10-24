@@ -73,7 +73,6 @@
 #include "gromacs/gmxlib/nrnb.h"
 #include "gromacs/gpu_utils/devicebuffer_datatype.h"
 #include "gromacs/gpu_utils/gpu_utils.h"
-#include "gromacs/gpu_utils/gpueventsynchronizer.h"
 #include "gromacs/imd/imd.h"
 #include "gromacs/listed_forces/disre.h"
 #include "gromacs/listed_forces/listed_forces.h"
@@ -147,7 +146,6 @@
 #include "gromacs/utility/sysinfo.h"
 
 #include "gpuforcereduction.h"
-
 
 class GpuEventSynchronizer;
 struct gmx_edsam;

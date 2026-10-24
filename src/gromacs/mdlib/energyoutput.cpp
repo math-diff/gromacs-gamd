@@ -1276,11 +1276,15 @@ void EnergyOutput::completeDeferredGpuEnergySamples(gmx::ArrayRef<const std::arr
             ebin_, ie_, gmx::ArrayRef<bool>(bEner_), completedSamples, deviceEnergySamples.ssize());
     if (conservedEnergyTracker_)
     {
+        // 与逐步路径相同：有守恒能量项就记守恒能量，否则记总能量。
+        int conservedTerm = F_ETOT;
+        if (bEner_[F_ECONSERVED])
+        {
+            conservedTerm = F_ECONSERVED;
+        }
         for (gmx::Index sample = 0; sample < deviceEnergySamples.ssize(); ++sample)
         {
-            const auto& completed = completedSamples;
-            const real  conserved =
-                    completed[sample * F_NRE + (bEner_[F_ECONSERVED] ? F_ECONSERVED : F_ETOT)];
+            const real conserved = completedSamples[sample * F_NRE + conservedTerm];
             conservedEnergyTracker_->addPoint(deferredGpuEnergyTimes_[sample], conserved);
         }
     }
