@@ -1126,8 +1126,12 @@ void gmx::LegacySimulator::do_md()
             const bool cRescaleCouplingThisStep =
                     ir->pressureCouplingOptions.epc == PressureCoupling::CRescale
                     && do_per_step(step, ir->pressureCouplingOptions.nstpcouple);
-            gaMDModule_->prepareStep(step, cr_->nodeid, cRescaleCouplingThisStep);
-            gaMDModule_->warnIfRunTooShort(ir->init_step, ir->nsteps, cr_->nodeid);
+            gaMDModule_->prepareStep(step, cRescaleCouplingThisStep);
+            // 运行长度提示只需在第一步、参数读入之后检查一次。
+            if (bFirstStep)
+            {
+                gaMDModule_->warnIfRunTooShort(ir->init_step, ir->nsteps);
+            }
         }
 
         /* Determine the energy and pressure:
@@ -1204,7 +1208,10 @@ void gmx::LegacySimulator::do_md()
                                         || gaMDModule_->requiresHostEnergyThisStep(step);
             runScheduleWork_->stepWork.stageGpuEnergyAndVirialToHost = needHostEnergy;
 
-            gaMDModule_->diagnostics().logResidentEnergy(useGpuResidentGaMD, cr_->nodeid == 0);
+            if (bFirstStep)
+            {
+                gaMDModule_->diagnostics().logResidentEnergy();
+            }
         }
 
         // 本步可延后主机统计和回传；CUDA Graph 是否执行仍由下面的条件决定。
@@ -1356,13 +1363,13 @@ void gmx::LegacySimulator::do_md()
                 // 加权二面角快照已在求力流程写出，这里核对请求的那一步确实写出了快照。
                 if (useCurrentStepGaMD)
                 {
-                    gaMDModule_->diagnostics().finishDihedralStep(step, MAIN(cr_));
+                    gaMDModule_->diagnostics().finishDihedralStep(step);
                 }
 
                 // 最终总力诊断也由模块实例写出，避免跨模拟共享文件句柄和步号。
                 if (!useGpuResidentGaMD)
                 {
-                    gaMDModule_->diagnostics().dumpFinalForces(step, f.view().force(), MAIN(cr_));
+                    gaMDModule_->diagnostics().dumpFinalForces(step, f.view().force());
                 }
             }
             GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
@@ -2081,14 +2088,8 @@ void gmx::LegacySimulator::do_md()
                                 deferredHistory.kineticEnergy.totalTensors,
                                 deferredHistory.kineticEnergy.groupKineticEnergies,
                                 deferredPressureBoxes);
-                        GMX_RELEASE_ASSERT(
-                                deferredGamdOutputSteps.size() == deferredHistory.energySamples.size(),
-                                "Buffered GaMD output steps and energy samples must match");
-                        gaMDModule_->writeBufferedProductionOutput(deferredGamdOutputSteps,
-                                                                   deferredHistory.energySamples,
-                                                                   step,
-                                                                   cr_->nodeid,
-                                                                   wallCycleCounters_);
+                        gaMDModule_->writeBufferedProductionOutput(
+                                deferredGamdOutputSteps, deferredHistory.energySamples, step, wallCycleCounters_);
                         deferredGamdOutputSteps.clear();
                         deferredPressureBoxes.clear();
                     }

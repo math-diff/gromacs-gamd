@@ -206,6 +206,8 @@ buffer's atom order. Explicit requests for either file report open, write,
 flush, or close errors instead of silently disabling output. The former raw CPU
 bonded-evaluation trace ``GMX_GAMD_DIH_RAW_DEBUG_FILE`` has been removed, so
 the native bonded kernels carry no GaMD hooks; the variable is no longer read.
+The one-time workload printout ``GMX_GAMD_GPU_DIAGNOSTICS`` has also been
+removed and is no longer read.
 
 Verification
 ------------

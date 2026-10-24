@@ -51,7 +51,13 @@ namespace gmx
 //! \addtogroup module_applied_forces
 //! \{
 
-/*! \internal \brief Private CUDA storage and launch implementation for GaMD. */
+/*! \internal \brief Private CUDA storage and launch implementation for GaMD.
+ *
+ * Call-order and mode preconditions use GMX_ASSERT. GMX_RELEASE_ASSERT guards
+ * only conditions whose violation would read or write out of bounds or
+ * silently corrupt data: history capacity, matching sample counts, the
+ * temperature-group layout and host/device copy sizes.
+ */
 class GaMDGpuExecutor::Impl
 {
 public:
@@ -72,8 +78,6 @@ public:
     bool energyEnabled() const;
     //! \copydoc GaMDGpuExecutor::energyDiagnosticsEnabled
     bool energyDiagnosticsEnabled() const;
-    //! \copydoc GaMDGpuExecutor::scaleFromDeviceEnabled
-    bool scaleFromDeviceEnabled() const;
 
     //! \copydoc GaMDGpuExecutor::bindListedForceBuffers
     void bindListedForceBuffers(ArrayRef<const int>           nbnxnAtomOrder,
@@ -90,22 +94,22 @@ public:
     //! \copydoc GaMDGpuExecutor::prepareBondedForceAccumulation
     GaMDBondedDeviceBuffers prepareBondedForceAccumulation();
     //! \copydoc GaMDGpuExecutor::finishBondedForceAccumulation
-    void finishGamdDihedralBuffers();
+    void finishBondedForceAccumulation();
 
     //! \copydoc GaMDGpuExecutor::pmeEnergyStagingBuffer
-    DeviceBuffer<float> gamdPmeEnergyStagingBuffer();
+    DeviceBuffer<float> pmeEnergyStagingBuffer();
     //! \copydoc GaMDGpuExecutor::pmeEnergyReadyEvent
-    GpuEventSynchronizer* gamdPmeEnergyReadyEvent();
+    GpuEventSynchronizer* pmeEnergyReadyEvent();
     //! \copydoc GaMDGpuExecutor::launchEnergyReduction
-    void launchGamdEnergyReduction(const GaMDBiasParameters& parameters,
-                                   const GaMDForceOverrides& forceOverrides,
-                                   bool                      recordEnergySample);
+    void launchEnergyReduction(const GaMDBiasParameters& parameters,
+                               const GaMDForceOverrides& forceOverrides,
+                               bool                      recordEnergySample);
     //! \copydoc GaMDGpuExecutor::energyDiagnostics
-    GaMDStepResult gamdDiagnosticState();
+    GaMDStepResult energyDiagnostics();
     //! \copydoc GaMDGpuExecutor::takeHistory
     GaMDHistoryBatch takeHistory();
     //! \copydoc GaMDGpuExecutor::recordForceVirialSample
-    void recordGamdForceVirialSample();
+    void recordForceVirialSample();
 
     //! \copydoc GaMDGpuExecutor::initializeUpdateHistory
     void initializeUpdateHistory(int numTemperatureGroups, const DeviceStream& updateStream);
@@ -114,37 +118,34 @@ public:
                            ArrayRef<const real>           masses,
                            ArrayRef<const unsigned short> temperatureGroups);
     //! \copydoc GaMDGpuExecutor::recordConstraintVirial
-    void recordUpdateConstraintVirial(DeviceBuffer<float> lincsVirial,
-                                      bool                haveLincs,
-                                      DeviceBuffer<float> settleVirial,
-                                      bool                haveSettles,
-                                      real                scaleFactor);
+    void recordConstraintVirial(DeviceBuffer<float> lincsVirial,
+                                bool                haveLincs,
+                                DeviceBuffer<float> settleVirial,
+                                bool                haveSettles,
+                                real                scaleFactor);
     //! \copydoc GaMDGpuExecutor::recordKineticEnergy
-    void recordUpdateKineticEnergy(bool recordSample);
+    void recordKineticEnergy(bool recordSample);
     //! \copydoc GaMDGpuExecutor::previousHalfStepKineticEnergy
-    std::vector<std::array<real, DIM * DIM>> takePreviousHalfStepKineticEnergy();
+    std::vector<std::array<real, DIM * DIM>> previousHalfStepKineticEnergy();
 
     //! \copydoc GaMDGpuExecutor::copyDihedralForces
-    void copyGamdDihedralForces(ArrayRef<RVec> forces);
+    void copyDihedralForces(ArrayRef<RVec> forces);
     //! \copydoc GaMDGpuExecutor::copyDihedralVirial
-    void copyGamdDihedralVirial(std::array<real, DIM * DIM>* virial);
+    void copyDihedralVirial(tensor virial);
     //! \copydoc GaMDGpuExecutor::launchShortRangeVirialReduction
-    void launchGamdShortRangeVirialReduction();
+    void launchShortRangeVirialReduction();
     //! \copydoc GaMDGpuExecutor::copyShortRangeVirial
-    void copyGamdShortRangeVirial(std::array<real, DIM * DIM>* virial);
+    void copyShortRangeVirial(tensor virial);
 
     //! \copydoc GaMDGpuExecutor::applyForceCorrectionShadow
-    void applyGamdForceCorrectionShadow(ArrayRef<const RVec> rawForces,
-                                        real                 totalScale,
-                                        real                 dihedralCorrectionScale,
-                                        ArrayRef<RVec>       correctedForces);
+    void applyForceCorrectionShadow(ArrayRef<const RVec> rawForces,
+                                    real                 totalScale,
+                                    real                 dihedralCorrectionScale,
+                                    ArrayRef<RVec>       correctedForces);
     //! \copydoc GaMDGpuExecutor::applyForceCorrection
-    void applyGamdForceCorrection(DeviceBuffer<RVec>    forces,
-                                  real                  totalScale,
-                                  real                  dihedralCorrectionScale,
-                                  GpuEventSynchronizer* rawForcesReady);
+    void applyForceCorrection(DeviceBuffer<RVec> forces, GpuEventSynchronizer* rawForcesReady);
     //! \copydoc GaMDGpuExecutor::forcesReadyEvent
-    GpuEventSynchronizer* gamdForcesReadyEvent();
+    GpuEventSynchronizer* forcesReadyEvent();
 
     //! Queues correction of the diagnostic copy of CPU forces.
     void launchGamdForceCorrectionShadowKernel(real totalScale, real dihedralCorrectionScale);
@@ -153,11 +154,8 @@ public:
                                          DeviceBuffer<Float3> shiftForces,
                                          DeviceBuffer<float>* virial,
                                          const char*          kernelName);
-    //! Queues live correction after the raw-force dependency event.
-    void launchGamdForceCorrectionKernel(DeviceBuffer<Float3>  forces,
-                                         real                  totalScale,
-                                         real                  dihedralCorrectionScale,
-                                         GpuEventSynchronizer* rawForcesReady);
+    //! Queues live correction with the device bias state after the raw-force dependency event.
+    void launchGamdForceCorrectionKernel(DeviceBuffer<Float3> forces, GpuEventSynchronizer* rawForcesReady);
 
 private:
     std::vector<std::array<real, F_NRE>>     takeGamdEnergyHistory();

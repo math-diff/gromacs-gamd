@@ -47,6 +47,7 @@
 #include <vector>
 
 #include "gromacs/applied_forces/gamd/gamdmath.h"
+#include "gromacs/math/units.h"
 #include "gromacs/topology/ifunc.h"
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/fileptr.h"
@@ -91,9 +92,9 @@ struct GaMDParameters
     //! Logical parameter-output interval; zero disables it.
     int64_t parameterInterval = 0;
     //! Potential-boost deviation limit in kJ/mol.
-    double potentialSigmaLimit = 6.0 * 4.184;
+    double potentialSigmaLimit = 6.0 * c_cal2Joule;
     //! Dihedral-boost deviation limit in kJ/mol.
-    double dihedralSigmaLimit = 6.0 * 4.184;
+    double dihedralSigmaLimit = 6.0 * c_cal2Joule;
 };
 
 //! 输入和重启文件共用阶段校验；空字符串表示这些计数可以安全使用。
@@ -119,14 +120,13 @@ public:
     GaMDRuntime& operator=(const GaMDRuntime&) = delete;
 
     //! Loads validated input and prepares one step; throws on invalid input or I/O.
-    const GaMDStepPlan& prepareStep(int64_t step, int rank, bool pressureCouplingThisStep);
+    const GaMDStepPlan& prepareStep(int64_t step, bool pressureCouplingThisStep);
     //! Returns the result from current-step host accounting.
     const GaMDStepResult& stepResult() const { return stepResult_; }
     //! Returns the immutable parameters used by CPU, CUDA and deferred output.
     GaMDBiasParameters biasParameters() const;
     //! Updates statistics once per step and evaluates the current bias.
     void finalizeCurrentStep(int64_t        step,
-                             int            rank,
                              double         totalPotentialEnergy,
                              double         dihedralEnergy,
                              gmx_wallcycle* wallCycle);
@@ -140,35 +140,28 @@ public:
     void writeBufferedProductionOutput(ArrayRef<const int64_t> deferredSteps,
                                        ArrayRef<const std::array<real, F_NRE>> deferredEnergySamples,
                                        int64_t        currentStep,
-                                       int            rank,
                                        gmx_wallcycle* wallCycle);
     //! Records the MD checkpoint decision; the MD loop calls this before prepareStep().
     void setCheckpointingThisStep(bool checkpointingThisStep);
     //! Commits eligible restart state before the MD energy buffers are reset.
     void writeRestartState(int64_t step);
-    //! Logs once if the requested run cannot reach production.
-    void warnIfRunTooShort(int64_t initStep, int64_t numSteps, int rank);
+    //! Logs if the requested run cannot reach production; the MD loop calls it on its first step.
+    void warnIfRunTooShort(int64_t initStep, int64_t numSteps);
 
 private:
     //! Reads gamd.in with strict conversion; throws FileIOError or InvalidInputError.
-    void loadParameters(int rank);
+    void loadParameters();
     //! Selects a valid matching restart snapshot before restoring state.
-    void loadRestartStateIfNeeded(int64_t step, int rank);
+    void loadRestartStateIfNeeded(int64_t step);
     //! Flushes outputs and atomically replaces the restart commit record.
-    void saveRestartState(int64_t step, int rank);
+    void saveRestartState(int64_t step);
     //! Maps a validated step to a GaMD stage, including production restart.
     GaMDStage determineStage(int64_t step) const;
 
-    //! Returns the borrowed handle for main-rank reweight output.
-    FILE* reweightFile(int rank);
-    //! Returns the borrowed handle for main-rank parameter output.
-    FILE* parameterFile(int rank);
     //! Writes one eligible parameter row in the legacy units and order.
-    void writeParameterLine(int64_t step, int rank, bool flushOutput);
+    void writeParameterLine(int64_t step, bool flushOutput);
     //! Writes one eligible bias record with energies converted to kcal/mol.
-    void writeReweightRecord(int64_t step, int rank, const GaMDStepResult& record, bool flushOutput);
-    //! Writes the current host result at the configured output cadence.
-    void writeReweightLine(int64_t step, int rank, bool flushOutput);
+    void writeReweightRecord(int64_t step, const GaMDStepResult& record, bool flushOutput);
     //! Reports whether checkpoint reconciliation already retained this row.
     bool suppressTextOutputForStep(int64_t step) const;
     //! Closes owned outputs and throws FileIOError if closing fails.
@@ -180,8 +173,9 @@ private:
                                  double                      energy,
                                  const GaMDEnergyStatistics& statistics,
                                  int64_t                     step,
-                                 int                         rank,
                                  bool*                       warnedAtFloor);
+    //! Evaluates the current bias and, once boosting has started, validates and clamps both weights.
+    GaMDStepResult evaluateClampedBias(int64_t step, double potentialEnergy, double dihedralEnergy);
 
     GaMDDiagnostics&     diagnostics_;
     GaMDParameters       parameters_;
@@ -197,13 +191,11 @@ private:
 
     bool    restartLoadAttempted_            = false;
     bool    forceProductionRestart_          = false;
-    int     currentRank_                     = 0;
     bool    checkpointingThisStep_           = false;
     bool    bufferedProductionOutputEnabled_ = false;
     int64_t suppressTextOutputStep_          = -1;
     bool    warnedPotentialScaleFloor_       = false;
     bool    warnedDihedralScaleFloor_        = false;
-    bool    warnedAboutRunLength_            = false;
     int     debug_                           = 0;
 
     FilePtr reweightFile_;

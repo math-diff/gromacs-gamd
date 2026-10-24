@@ -81,11 +81,6 @@ bool GaMDGpuExecutor::energyDiagnosticsEnabled() const
     return false;
 }
 
-bool GaMDGpuExecutor::scaleFromDeviceEnabled() const
-{
-    return false;
-}
-
 void GaMDGpuExecutor::bindListedForceBuffers(ArrayRef<const int>,
                                              const InteractionDefinitions&,
                                              DeviceBuffer<Float4>,
@@ -153,17 +148,17 @@ std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::previousHalfStepKineti
 
 void GaMDGpuExecutor::copyDihedralForces(ArrayRef<RVec>) {}
 
-void GaMDGpuExecutor::copyDihedralVirial(std::array<real, DIM * DIM>*) {}
+void GaMDGpuExecutor::copyDihedralVirial(tensor) {}
 
 void GaMDGpuExecutor::launchShortRangeVirialReduction() {}
 
-void GaMDGpuExecutor::copyShortRangeVirial(std::array<real, DIM * DIM>*) {}
+void GaMDGpuExecutor::copyShortRangeVirial(tensor) {}
 
 void GaMDGpuExecutor::applyForceCorrectionShadow(ArrayRef<const RVec>, real, real, ArrayRef<RVec>)
 {
 }
 
-void GaMDGpuExecutor::applyForceCorrection(DeviceBuffer<RVec>, real, real, GpuEventSynchronizer*) {}
+void GaMDGpuExecutor::applyForceCorrection(DeviceBuffer<RVec>, GpuEventSynchronizer*) {}
 
 GpuEventSynchronizer* GaMDGpuExecutor::forcesReadyEvent()
 {

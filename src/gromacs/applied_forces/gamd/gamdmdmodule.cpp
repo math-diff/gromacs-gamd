@@ -87,11 +87,11 @@ void GaMDMDModule::subscribeToSimulationSetupNotifications(MDModulesNotifiers* n
 
 void GaMDMDModule::subscribeToPreProcessingNotifications(MDModulesNotifiers* /* notifiers */) {}
 
-const GaMDStepPlan& GaMDMDModule::prepareStep(int64_t step, int rank, bool pressureCouplingThisStep)
+const GaMDStepPlan& GaMDMDModule::prepareStep(int64_t step, bool pressureCouplingThisStep)
 {
     try
     {
-        return runtime_->prepareStep(step, rank, pressureCouplingThisStep);
+        return runtime_->prepareStep(step, pressureCouplingThisStep);
     }
     GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
 }
@@ -181,14 +181,13 @@ GaMDForceShadow* GaMDMDModule::forceShadow()
 }
 
 void GaMDMDModule::finalizeCurrentStep(int64_t        step,
-                                       int            rank,
                                        double         totalPotentialEnergy,
                                        double         dihedralEnergy,
                                        gmx_wallcycle* wallCycle)
 {
     try
     {
-        runtime_->finalizeCurrentStep(step, rank, totalPotentialEnergy, dihedralEnergy, wallCycle);
+        runtime_->finalizeCurrentStep(step, totalPotentialEnergy, dihedralEnergy, wallCycle);
     }
     GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
 }
@@ -211,13 +210,11 @@ bool GaMDMDModule::bufferedProductionOutputEnabled() const
 void GaMDMDModule::writeBufferedProductionOutput(ArrayRef<const int64_t> deferredSteps,
                                                  ArrayRef<const std::array<real, F_NRE>> deferredEnergySamples,
                                                  int64_t        currentStep,
-                                                 int            rank,
                                                  gmx_wallcycle* wallCycle)
 {
     try
     {
-        runtime_->writeBufferedProductionOutput(
-                deferredSteps, deferredEnergySamples, currentStep, rank, wallCycle);
+        runtime_->writeBufferedProductionOutput(deferredSteps, deferredEnergySamples, currentStep, wallCycle);
     }
     GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
 }
@@ -236,25 +233,13 @@ void GaMDMDModule::writeRestartState(int64_t step)
     GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
 }
 
-void GaMDMDModule::warnIfRunTooShort(int64_t initStep, int64_t numSteps, int rank)
+void GaMDMDModule::warnIfRunTooShort(int64_t initStep, int64_t numSteps)
 {
     try
     {
-        runtime_->warnIfRunTooShort(initStep, numSteps, rank);
+        runtime_->warnIfRunTooShort(initStep, numSteps);
     }
     GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
-}
-
-void GaMDMDModule::resetStateForTesting()
-{
-    runtime_.reset();
-    diagnostics_ = std::make_unique<GaMDDiagnostics>();
-    runtime_     = std::make_unique<GaMDRuntime>(*diagnostics_);
-}
-
-std::unique_ptr<GaMDMDModule> createGaMDModule()
-{
-    return std::make_unique<GaMDMDModule>();
 }
 
 } // namespace gmx

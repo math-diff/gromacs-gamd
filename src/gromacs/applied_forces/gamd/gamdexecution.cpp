@@ -95,18 +95,12 @@ void applyGaMDGpuForceCorrection(int64_t                       step,
                                  gmx_wallcycle*                wallCycle,
                                  GaMDMDModule&                 module,
                                  const StepWorkload&           stepWork,
-                                 bool                          isMainRank)
+                                 real                          totalScale,
+                                 real                          dihedralCorrectionScale)
 {
-    GaMDGpuExecutor*      gpuExecutor             = module.gpuExecutor();
-    GaMDForceShadow*      shadow                  = module.forceShadow();
-    const GaMDStepResult& stepResult              = module.stepResult();
-    real                  totalScale              = 1.0_real;
-    real                  dihedralCorrectionScale = 0.0_real;
-    if (stepWork.stageGpuEnergyAndVirialToHost)
-    {
-        totalScale              = static_cast<real>(stepResult.scaleP);
-        dihedralCorrectionScale = static_cast<real>(stepResult.scaleP * (stepResult.scaleD - 1.0));
-    }
+    GaMDGpuExecutor*      gpuExecutor = module.gpuExecutor();
+    GaMDForceShadow*      shadow      = module.forceShadow();
+    const GaMDStepResult& stepResult  = module.stepResult();
 
     GMX_RELEASE_ASSERT(gpuExecutor != nullptr, "GPU GaMD requires its module-owned executor");
     GMX_RELEASE_ASSERT(forceRecord->stateGpu != nullptr && forceRecord->listedForcesGpu != nullptr,
@@ -115,7 +109,7 @@ void applyGaMDGpuForceCorrection(int64_t                       step,
                        "GPU GaMD force correction requires the device dihedral-force buffer");
 
     // 二面角快照只在选中的这一步回传设备二面角力，和影子诊断各自回传。
-    if (isMainRank && module.diagnostics().dihedralForceOutputRequested(step))
+    if (module.diagnostics().dihedralForceOutputRequested(step))
     {
         GMX_RELEASE_ASSERT(stepWork.stageGpuEnergyAndVirialToHost,
                            "GaMD dihedral diagnostics require current host scale values");
@@ -124,8 +118,7 @@ void applyGaMDGpuForceCorrection(int64_t                       step,
         module.diagnostics().dumpDihedralForces(
                 step,
                 makeConstArrayRef(deviceDihedralForces).subArray(0, numLocalAtoms),
-                stepResult.scaleP * stepResult.scaleD,
-                isMainRank);
+                stepResult.scaleP * stepResult.scaleD);
     }
 
     if (stepWork.stageGpuEnergyAndVirialToHost && totalScale != 1.0)
@@ -133,24 +126,20 @@ void applyGaMDGpuForceCorrection(int64_t                       step,
         msmul(forceVirial, totalScale, forceVirial);
     }
 
-    std::array<real, DIM * DIM> deviceDihedralVirial = {};
+    tensor deviceDihedralVirial = { { 0 } };
     if (stepWork.stageGpuEnergyAndVirialToHost && dihedralCorrectionScale != 0.0)
     {
         wallcycle_start(wallCycle, WallCycleCounter::GaMDDihedral);
-        gpuExecutor->copyDihedralVirial(&deviceDihedralVirial);
+        gpuExecutor->copyDihedralVirial(deviceDihedralVirial);
         wallcycle_stop(wallCycle, WallCycleCounter::GaMDDihedral);
 
         if (stepWork.computeVirial)
         {
             wallcycle_start(wallCycle, WallCycleCounter::GaMDForceScale);
-            for (int rowIndex = 0; rowIndex < DIM; ++rowIndex)
-            {
-                for (int columnIndex = 0; columnIndex < DIM; ++columnIndex)
-                {
-                    forceVirial[rowIndex][columnIndex] +=
-                            dihedralCorrectionScale * deviceDihedralVirial[rowIndex * DIM + columnIndex];
-                }
-            }
+            // 二面角修正对维里的贡献也按同一个修正系数加到力维里上。
+            tensor dihedralVirialCorrection;
+            msmul(deviceDihedralVirial, dihedralCorrectionScale, dihedralVirialCorrection);
+            m_add(forceVirial, dihedralVirialCorrection, forceVirial);
             wallcycle_stop(wallCycle, WallCycleCounter::GaMDForceScale);
         }
     }
@@ -186,12 +175,12 @@ void applyGaMDGpuForceCorrection(int64_t                       step,
                                            gpuExecutor,
                                            module.diagnostics().logger());
     }
-    gpuExecutor->applyForceCorrection(
-            forceRecord->stateGpu->getForces(), totalScale, dihedralCorrectionScale, rawForcesReady);
+    // 设备修正读取设备上的偏置状态，主机算出的缩放只用于上面的维里和影子对照。
+    gpuExecutor->applyForceCorrection(forceRecord->stateGpu->getForces(), rawForcesReady);
     if (shadow != nullptr)
     {
         shadow->compareAfterGpuCorrection(
-                step, stepWork, forceRecord->stateGpu, gpuExecutor, &module.diagnostics(), isMainRank);
+                step, stepWork, forceRecord->stateGpu, gpuExecutor, &module.diagnostics());
     }
 }
 
@@ -210,19 +199,13 @@ void applyGaMDCpuForceCorrection(const t_commrec&              communicationReco
                                  t_nrnb*                       operationCounter,
                                  gmx_wallcycle*                wallCycle,
                                  GaMDMDModule&                 module,
-                                 const StepWorkload&           stepWork)
+                                 const StepWorkload&           stepWork,
+                                 real                          totalScale,
+                                 real                          dihedralCorrectionScale)
 {
-    const GaMDStepResult& stepResult              = module.stepResult();
-    real                  totalScale              = 1.0_real;
-    real                  dihedralCorrectionScale = 0.0_real;
-    if (stepWork.stageGpuEnergyAndVirialToHost)
-    {
-        totalScale              = static_cast<real>(stepResult.scaleP);
-        dihedralCorrectionScale = static_cast<real>(stepResult.scaleP * (stepResult.scaleD - 1.0));
-    }
+    const GaMDStepResult& stepResult = module.stepResult();
 
-    const bool writesDihedralForces =
-            MAIN(&communicationRecord) && module.diagnostics().dihedralForceOutputRequested(step);
+    const bool writesDihedralForces   = module.diagnostics().dihedralForceOutputRequested(step);
     const bool usesDomainAtomOrdering = haveDDAtomOrdering(communicationRecord);
     // 影子要用 GPU bonded 算出的设备二面角力；
     // 它与 DD 原子排序、虚拟位点的组合已在创建 GPU executor 时拒绝。
@@ -317,7 +300,6 @@ void applyGaMDCpuForceCorrection(const t_commrec&              communicationReco
                     step,
                     makeConstArrayRef(gamdDihedralForces).subArray(0, numLocalAtoms),
                     stepResult.scaleP * stepResult.scaleD,
-                    MAIN(&communicationRecord),
                     outputAtomIndices);
         }
 
@@ -351,14 +333,9 @@ void applyGaMDCpuForceCorrection(const t_commrec&              communicationReco
                            box);
                 inc_nrnb(operationCounter, eNR_VIRIAL, numLocalAtoms);
 
-                for (int rowIndex = 0; rowIndex < DIM; ++rowIndex)
-                {
-                    for (int columnIndex = 0; columnIndex < DIM; ++columnIndex)
-                    {
-                        forceVirial[rowIndex][columnIndex] +=
-                                dihedralCorrectionScale * dihedralVirial[rowIndex][columnIndex];
-                    }
-                }
+                // 二面角修正对维里的贡献按同一个修正系数加到力维里上。
+                msmul(dihedralVirial, dihedralCorrectionScale, dihedralVirial);
+                m_add(forceVirial, dihedralVirial, forceVirial);
             }
             wallcycle_stop(wallCycle, WallCycleCounter::GaMDForceScale);
         }
@@ -530,14 +507,15 @@ void applyGaMDCurrentStepCorrection(const t_commrec&              communicationR
 
         // 不支持的配置已在 selectGaMDExecutionMode 里于动力学开始前拒绝。
         // 先完成同一步的能量记账，再把力修正交给对应执行分支。
-        GaMDGpuExecutor* gpuExecutor = module->gpuExecutor();
+        GaMDGpuExecutor* gpuExecutor             = module->gpuExecutor();
+        real             totalScale              = 1.0_real;
+        real             dihedralCorrectionScale = 0.0_real;
         if (stepWork.stageGpuEnergyAndVirialToHost)
         {
             sum_epot(energyData->grpp, energyData->term.data());
             const double rawPotentialEnergy = energyData->term[F_EPOT];
             const double rawDihedralEnergy  = gaMDDihedralEnergy(energyData->term.data());
-            module->finalizeCurrentStep(
-                    step, communicationRecord.nodeid, rawPotentialEnergy, rawDihedralEnergy, wallCycle);
+            module->finalizeCurrentStep(step, rawPotentialEnergy, rawDihedralEnergy, wallCycle);
             if (forceRecord->listedForcesGpu != nullptr && gpuExecutor != nullptr
                 && gpuExecutor->energyDiagnosticsEnabled())
             {
@@ -546,13 +524,15 @@ void applyGaMDCurrentStepCorrection(const t_commrec&              communicationR
                                             module->stepResult(),
                                             gpuExecutor->energyDiagnostics());
             }
+            // 两条力修正路径都按本步主机结果算一次缩放：总力乘 scaleP，二面角力再加 scaleP*(scaleD-1)。
+            const GaMDStepResult& stepResult = module->stepResult();
+            totalScale                       = static_cast<real>(stepResult.scaleP);
+            dihedralCorrectionScale = static_cast<real>(stepResult.scaleP * (stepResult.scaleD - 1.0));
         }
         else
         {
-            GMX_RELEASE_ASSERT(
-                    simulationWork.useGpuResidentGaMD() && forceRecord->listedForcesGpu != nullptr
-                            && gpuExecutor != nullptr && gpuExecutor->scaleFromDeviceEnabled(),
-                    "GaMD can skip host energy staging only with device scale correction");
+            GMX_RELEASE_ASSERT(simulationWork.useGpuResidentGaMD(),
+                               "GaMD can skip host energy staging only on the GPU-resident path");
         }
 
         if (simulationWork.useGpuResidentGaMD())
@@ -570,7 +550,8 @@ void applyGaMDCurrentStepCorrection(const t_commrec&              communicationR
                                         wallCycle,
                                         *module,
                                         stepWork,
-                                        MAIN(&communicationRecord));
+                                        totalScale,
+                                        dihedralCorrectionScale);
         }
         else
         {
@@ -588,7 +569,9 @@ void applyGaMDCurrentStepCorrection(const t_commrec&              communicationR
                                         operationCounter,
                                         wallCycle,
                                         *module,
-                                        stepWork);
+                                        stepWork,
+                                        totalScale,
+                                        dihedralCorrectionScale);
         }
     }
     GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;

@@ -50,6 +50,7 @@
 #include <string>
 #include <vector>
 
+#include "gromacs/math/units.h"
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/path.h"
@@ -86,6 +87,48 @@ void flushAndSyncGaMDFile(FILE* fp, const char* filename)
     }
 }
 
+//! Header of a new gamd-reweight.dat.
+const char* const c_reweightFileHeader =
+        "# GaMD reweighting file\n"
+        "# All energy terms stored in units of kcal/mol\n"
+        "# reweight_nst,total_nstep,Unboosted-Potential-Energy,"
+        "Unboosted-Dihedral-Energy,Total-Force-Weight,Dihedral-Force-Weight,"
+        "Effective-Dihedral-Force-Weight,Boost-Energy-Potential,"
+        "Boost-Energy-Dihedral\n";
+
+//! Header of a new gamd-para.dat.
+const char* const c_parameterFileHeader =
+        "# GaMD parameter history\n"
+        "# Energies are in kJ/mol; k0 is dimensionless; k is in (kJ/mol)^-1\n"
+        "# para_nst,total_nstep,stage,"
+        "VmaxP,VminP,VavgP,SigmaVP,EP,k0P,kP,"
+        "VmaxD,VminD,VavgD,SigmaVD,ED,k0D,kD\n";
+
+/*! \internal \brief Opens a legacy text output on first use and returns the borrowed handle.
+ *
+ * Continuations append to the existing file; a new file starts with its header.
+ */
+FILE* openGaMDTextOutput(FilePtr* file, const char* filename, const char* header)
+{
+    if (*file != nullptr)
+    {
+        return file->get();
+    }
+
+    const bool outputFileExists = fileExists(filename);
+    file->reset(std::fopen(filename, "a"));
+    if (*file == nullptr)
+    {
+        GMX_THROW(FileIOError(formatString("Failed to open %s for writing.", filename)));
+    }
+    if (!outputFileExists)
+    {
+        std::fprintf(file->get(), "%s", header);
+        flushAndSyncGaMDFile(file->get(), filename);
+    }
+    return file->get();
+}
+
 /*! \internal \brief Validates a complete legacy output row, including NaN placeholders. */
 bool parseGaMDTextRow(const std::string& line, int expectedColumns, int64_t* step)
 {
@@ -118,9 +161,9 @@ bool parseGaMDTextRow(const std::string& line, int expectedColumns, int64_t* ste
  * rebuilt to contain exactly one complete row per step through savedStep.
  * Re-running this repair after another interruption is safe and idempotent. */
 /*! \internal \brief Atomically retains complete unique output rows through the checkpoint step. */
-void reconcileGaMDTextFile(const char* filename, int expectedColumns, int64_t savedStep, int rank, const MDLogger& logger)
+void reconcileGaMDTextFile(const char* filename, int expectedColumns, int64_t savedStep, const MDLogger& logger)
 {
-    if (rank != 0 || !fileExists(filename))
+    if (!fileExists(filename))
     {
         return;
     }
@@ -259,13 +302,8 @@ GaMDWindowStatistics readWindowStatsLine(ArrayRef<const std::string> columns)
 
 } // namespace
 
-void GaMDRuntime::saveRestartState(int64_t step, int rank)
+void GaMDRuntime::saveRestartState(int64_t step)
 {
-    if (rank != 0)
-    {
-        return;
-    }
-
     if (!parametersLoaded_)
     {
         return;
@@ -587,7 +625,7 @@ std::optional<GaMDRestartState> readGaMDRestartState(const char* filename, std::
 
 } // namespace
 
-void GaMDRuntime::loadRestartStateIfNeeded(int64_t step, int rank)
+void GaMDRuntime::loadRestartStateIfNeeded(int64_t step)
 {
     if (restartLoadAttempted_)
     {
@@ -654,18 +692,15 @@ void GaMDRuntime::loadRestartStateIfNeeded(int64_t step, int rank)
     {
         restartFilename = "gamd-restart-prev.dat";
         selectedState   = &previousState.value();
-        if (rank == 0)
-        {
-            GMX_LOG(diagnostics_.logger().warning)
-                    .asParagraph()
-                    .appendTextFormatted(
-                            "[GaMD WARNING] Current restart does not match checkpoint step %" PRId64
-                            "; using validated %s saved_step=%" PRId64 ". %s\n",
-                            step,
-                            restartFilename,
-                            selectedState->savedStep,
-                            currentError.c_str());
-        }
+        GMX_LOG(diagnostics_.logger().warning)
+                .asParagraph()
+                .appendTextFormatted(
+                        "[GaMD WARNING] Current restart does not match checkpoint step %" PRId64
+                        "; using validated %s saved_step=%" PRId64 ". %s\n",
+                        step,
+                        restartFilename,
+                        selectedState->savedStep,
+                        currentError.c_str());
     }
     else
     {
@@ -725,6 +760,17 @@ void GaMDRuntime::loadRestartStateIfNeeded(int64_t step, int rank)
         dihedralWindowStatistics_  = {};
     }
 
+    // 检查点续跑时把两个文本输出重整到快照步；不带 irest_gamd 的续跑一定走到这里。
+    if (checkpointContinuation)
+    {
+        reconcileGaMDTextFile("gamd-reweight.dat", 9, savedState.savedStep, diagnostics_.logger());
+        reconcileGaMDTextFile("gamd-para.dat", 17, savedState.savedStep, diagnostics_.logger());
+        if (savedState.savedStep == step)
+        {
+            suppressTextOutputStep_ = savedState.savedStep;
+        }
+    }
+
     if (explicitProductionRestart)
     {
         const int64_t restartNtcmd = savedParameters.conventionalEnd;
@@ -754,113 +800,88 @@ void GaMDRuntime::loadRestartStateIfNeeded(int64_t step, int rank)
 
         forceProductionRestart_ = true;
 
+        if (inferredProductionRestart)
+        {
+            GMX_LOG(diagnostics_.logger().info)
+                    .asParagraph()
+                    .appendTextFormatted(
+                            "[GaMD INFO] Inferred production_restart=1 from gamd-restart.dat "
+                            "because saved_step=%" PRId64 " is smaller than ntcmd=%" PRId64
+                            ". "
+                            "This is expected for restart files written by a prior irest_gamd "
+                            "production run.\n",
+                            savedState.savedStep,
+                            restartNtcmd);
+        }
+
+        GMX_LOG(diagnostics_.logger().info)
+                .asParagraph()
+                .appendTextFormatted(
+                        "[GaMD INFO] irest_gamd=%d ignores ntcmdprep/ntcmd/ntebprep/nteb "
+                        "from gamd.in and uses the values stored in gamd-restart.dat.\n",
+                        parameters_.restartMode);
+
+        if (!checkpointContinuation && savedState.savedStep < restartNtcmd + restartNteb)
+        {
+            GMX_LOG(diagnostics_.logger().warning)
+                    .asParagraph()
+                    .appendTextFormatted(
+                            "[GaMD WARNING] irest_gamd=%d loaded saved_step=%" PRId64
+                            " before the "
+                            "adaptive boost-stat stage ended at step=%" PRId64
+                            ". "
+                            "The new simulation will enter production immediately using the "
+                            "latest saved GaMD parameters.\n",
+                            parameters_.restartMode,
+                            savedState.savedStep,
+                            restartNtcmd + restartNteb);
+        }
+
         if (checkpointContinuation)
         {
-            reconcileGaMDTextFile(
-                    "gamd-reweight.dat", 9, savedState.savedStep, rank, diagnostics_.logger());
-            reconcileGaMDTextFile("gamd-para.dat", 17, savedState.savedStep, rank, diagnostics_.logger());
-            if (savedState.savedStep == step)
-            {
-                suppressTextOutputStep_ = savedState.savedStep;
-            }
-        }
-
-        if (rank == 0)
-        {
-            if (inferredProductionRestart)
-            {
-                GMX_LOG(diagnostics_.logger().info)
-                        .asParagraph()
-                        .appendTextFormatted(
-                                "[GaMD INFO] Inferred production_restart=1 from gamd-restart.dat "
-                                "because saved_step=%" PRId64 " is smaller than ntcmd=%" PRId64
-                                ". "
-                                "This is expected for restart files written by a prior irest_gamd "
-                                "production run.\n",
-                                savedState.savedStep,
-                                restartNtcmd);
-            }
-
             GMX_LOG(diagnostics_.logger().info)
                     .asParagraph()
                     .appendTextFormatted(
-                            "[GaMD INFO] irest_gamd=%d ignores ntcmdprep/ntcmd/ntebprep/nteb "
-                            "from gamd.in and uses the values stored in gamd-restart.dat.\n",
-                            parameters_.restartMode);
-
-            if (!checkpointContinuation && savedState.savedStep < restartNtcmd + restartNteb)
-            {
-                GMX_LOG(diagnostics_.logger().warning)
-                        .asParagraph()
-                        .appendTextFormatted(
-                                "[GaMD WARNING] irest_gamd=%d loaded saved_step=%" PRId64
-                                " before the "
-                                "adaptive boost-stat stage ended at step=%" PRId64
-                                ". "
-                                "The new simulation will enter production immediately using the "
-                                "latest saved GaMD parameters.\n",
-                                parameters_.restartMode,
-                                savedState.savedStep,
-                                restartNtcmd + restartNteb);
-            }
-
-            if (checkpointContinuation)
-            {
-                GMX_LOG(diagnostics_.logger().info)
-                        .asParagraph()
-                        .appendTextFormatted(
-                                "[GaMD INFO] Continued irest_gamd production from %s "
-                                "saved_step=%" PRId64 " at checkpoint step=%" PRId64
-                                "; text outputs are "
-                                "reconciled to the checkpoint.\n",
-                                restartFilename,
-                                savedState.savedStep,
-                                step);
-            }
-            else
-            {
-                GMX_LOG(diagnostics_.logger().info)
-                        .asParagraph()
-                        .appendTextFormatted(
-                                "[GaMD INFO] Loaded GaMD restart state from saved_step=%" PRId64
-                                " for a "
-                                "new simulation with irest_gamd=%d; forcing GaMD production stage "
-                                "from step=%" PRId64 ".\n",
-                                savedState.savedStep,
-                                parameters_.restartMode,
-                                step);
-            }
-        }
-    }
-    else
-    {
-        reconcileGaMDTextFile("gamd-reweight.dat", 9, savedState.savedStep, rank, diagnostics_.logger());
-        reconcileGaMDTextFile("gamd-para.dat", 17, savedState.savedStep, rank, diagnostics_.logger());
-
-        if (savedState.savedStep == step)
-        {
-            suppressTextOutputStep_ = savedState.savedStep;
-        }
-
-        if (rank == 0)
-        {
-            GMX_LOG(diagnostics_.logger().info)
-                    .asParagraph()
-                    .appendTextFormatted(
-                            "[GaMD INFO] Loaded GaMD restart state from %s saved_step=%" PRId64
-                            " for "
-                            "continued step=%" PRId64
-                            "; text outputs are reconciled to the checkpoint.\n",
+                            "[GaMD INFO] Continued irest_gamd production from %s "
+                            "saved_step=%" PRId64 " at checkpoint step=%" PRId64
+                            "; text outputs are "
+                            "reconciled to the checkpoint.\n",
                             restartFilename,
                             savedState.savedStep,
                             step);
         }
+        else
+        {
+            GMX_LOG(diagnostics_.logger().info)
+                    .asParagraph()
+                    .appendTextFormatted(
+                            "[GaMD INFO] Loaded GaMD restart state from saved_step=%" PRId64
+                            " for a "
+                            "new simulation with irest_gamd=%d; forcing GaMD production stage "
+                            "from step=%" PRId64 ".\n",
+                            savedState.savedStep,
+                            parameters_.restartMode,
+                            step);
+        }
+    }
+    else
+    {
+        GMX_LOG(diagnostics_.logger().info)
+                .asParagraph()
+                .appendTextFormatted(
+                        "[GaMD INFO] Loaded GaMD restart state from %s saved_step=%" PRId64
+                        " for "
+                        "continued step=%" PRId64
+                        "; text outputs are reconciled to the checkpoint.\n",
+                        restartFilename,
+                        savedState.savedStep,
+                        step);
     }
 }
 
 void GaMDRuntime::writeRestartState(int64_t step)
 {
-    saveRestartState(step, currentRank_);
+    saveRestartState(step);
 }
 
 GaMDRuntime::~GaMDRuntime()
@@ -882,76 +903,6 @@ void GaMDRuntime::closeOutputFiles()
     {
         GMX_THROW(FileIOError("Failed to close gamd-para.dat."));
     }
-}
-
-FILE* GaMDRuntime::reweightFile(int rank)
-{
-    if (rank != 0)
-    {
-        return nullptr;
-    }
-
-    if (reweightFile_ != nullptr)
-    {
-        return reweightFile_.get();
-    }
-
-    const bool outputFileExists = fileExists("gamd-reweight.dat");
-
-    reweightFile_.reset(std::fopen("gamd-reweight.dat", "a"));
-    if (reweightFile_ == nullptr)
-    {
-        GMX_THROW(FileIOError("Failed to open gamd-reweight.dat for writing."));
-    }
-
-    if (!outputFileExists)
-    {
-        std::fprintf(reweightFile_.get(), "# GaMD reweighting file\n");
-        std::fprintf(reweightFile_.get(), "# All energy terms stored in units of kcal/mol\n");
-        std::fprintf(reweightFile_.get(),
-                     "# reweight_nst,total_nstep,Unboosted-Potential-Energy,"
-                     "Unboosted-Dihedral-Energy,Total-Force-Weight,Dihedral-Force-Weight,"
-                     "Effective-Dihedral-Force-Weight,Boost-Energy-Potential,"
-                     "Boost-Energy-Dihedral\n");
-        flushAndSyncGaMDFile(reweightFile_.get(), "gamd-reweight.dat");
-    }
-
-    return reweightFile_.get();
-}
-
-FILE* GaMDRuntime::parameterFile(int rank)
-{
-    if (rank != 0)
-    {
-        return nullptr;
-    }
-
-    if (parameterFile_ != nullptr)
-    {
-        return parameterFile_.get();
-    }
-
-    const bool outputFileExists = fileExists("gamd-para.dat");
-
-    parameterFile_.reset(std::fopen("gamd-para.dat", "a"));
-    if (parameterFile_ == nullptr)
-    {
-        GMX_THROW(FileIOError("Failed to open gamd-para.dat for writing."));
-    }
-
-    if (!outputFileExists)
-    {
-        std::fprintf(parameterFile_.get(), "# GaMD parameter history\n");
-        std::fprintf(parameterFile_.get(),
-                     "# Energies are in kJ/mol; k0 is dimensionless; k is in (kJ/mol)^-1\n");
-        std::fprintf(parameterFile_.get(),
-                     "# para_nst,total_nstep,stage,"
-                     "VmaxP,VminP,VavgP,SigmaVP,EP,k0P,kP,"
-                     "VmaxD,VminD,VavgD,SigmaVD,ED,k0D,kD\n");
-        flushAndSyncGaMDFile(parameterFile_.get(), "gamd-para.dat");
-    }
-
-    return parameterFile_.get();
 }
 
 bool GaMDRuntime::suppressTextOutputForStep(int64_t step) const
@@ -988,13 +939,8 @@ void writeGaMDEnergyStatisticsColumns(FILE* file, bool enabled, const GaMDEnergy
 
 } // namespace
 
-void GaMDRuntime::writeParameterLine(int64_t step, int rank, bool flushOutput)
+void GaMDRuntime::writeParameterLine(int64_t step, bool flushOutput)
 {
-    if (rank != 0)
-    {
-        return;
-    }
-
     if (parameters_.parameterInterval <= 0)
     {
         return;
@@ -1015,11 +961,7 @@ void GaMDRuntime::writeParameterLine(int64_t step, int rank, bool flushOutput)
         return;
     }
 
-    FILE* fp = parameterFile(rank);
-    if (fp == nullptr)
-    {
-        return;
-    }
+    FILE* fp = openGaMDTextOutput(&parameterFile_, "gamd-para.dat", c_parameterFileHeader);
 
     const bool hasP = (parameters_.boostType == 1 || parameters_.boostType == 3);
     const bool hasD = (parameters_.boostType == 2 || parameters_.boostType == 3);
@@ -1041,13 +983,8 @@ void GaMDRuntime::writeParameterLine(int64_t step, int rank, bool flushOutput)
     }
 }
 
-void GaMDRuntime::writeReweightRecord(int64_t step, int rank, const GaMDStepResult& record, bool flushOutput)
+void GaMDRuntime::writeReweightRecord(int64_t step, const GaMDStepResult& record, bool flushOutput)
 {
-    if (rank != 0)
-    {
-        return;
-    }
-
     if (stepPlan_.bias.stage < GaMDStage::BoostPreparation)
     {
         return;
@@ -1058,11 +995,7 @@ void GaMDRuntime::writeReweightRecord(int64_t step, int rank, const GaMDStepResu
         return;
     }
 
-    if (parameters_.reweightInterval <= 0)
-    {
-        return;
-    }
-
+    // 输入校验已保证 reweight_nst 为正，取余前不必再检查。
     if (step % parameters_.reweightInterval != 0)
     {
         return;
@@ -1073,13 +1006,9 @@ void GaMDRuntime::writeReweightRecord(int64_t step, int rank, const GaMDStepResu
         return;
     }
 
-    FILE* fp = reweightFile(rank);
-    if (fp == nullptr)
-    {
-        return;
-    }
+    FILE* fp = openGaMDTextOutput(&reweightFile_, "gamd-reweight.dat", c_reweightFileHeader);
 
-    constexpr double kJ_to_kcal = 1.0 / 4.184;
+    constexpr double kJ_to_kcal = 1.0 / c_cal2Joule;
 
     const double VP_kcal           = record.potentialEnergy * kJ_to_kcal;
     const double VD_kcal           = record.dihedralEnergy * kJ_to_kcal;
@@ -1105,11 +1034,6 @@ void GaMDRuntime::writeReweightRecord(int64_t step, int rank, const GaMDStepResu
         GMX_THROW(FileIOError(formatString(
                 "Failed to write or flush gamd-reweight.dat at step %" PRId64 ".", step)));
     }
-}
-
-void GaMDRuntime::writeReweightLine(int64_t step, int rank, bool flushOutput)
-{
-    writeReweightRecord(step, rank, stepResult_, flushOutput);
 }
 
 } // namespace gmx

@@ -135,8 +135,6 @@ public:
     bool energyEnabled() const;
     //! Reports whether the host/device energy comparison is enabled.
     bool energyDiagnosticsEnabled() const;
-    //! Reports whether force correction consumes the device bias state.
-    bool scaleFromDeviceEnabled() const;
 
     /*! \brief Binds borrowed views and updates the atom-order mapping.
      * Contains errors at this legacy boundary because the caller may have
@@ -195,22 +193,19 @@ public:
     //! Synchronously copies raw dihedral forces in state atom order.
     void copyDihedralForces(ArrayRef<RVec> forces);
     //! Synchronously copies the completed dihedral virial.
-    void copyDihedralVirial(std::array<real, DIM * DIM>* virial);
+    void copyDihedralVirial(tensor virial);
     //! Queues short-range virial reduction on the force stream.
     void launchShortRangeVirialReduction();
     //! Synchronously copies the short-range virial.
-    void copyShortRangeVirial(std::array<real, DIM * DIM>* virial);
+    void copyShortRangeVirial(tensor virial);
 
-    //! Evaluates a GPU correction of CPU reference forces for diagnostics.
+    //! Evaluates a GPU correction of CPU reference forces with host weights for diagnostics.
     void applyForceCorrectionShadow(ArrayRef<const RVec> rawForces,
                                     real                 totalScale,
                                     real                 dihedralCorrectionScale,
                                     ArrayRef<RVec>       correctedForces);
-    //! Waits for raw forces, corrects the live device buffer and records readiness.
-    void applyForceCorrection(DeviceBuffer<RVec>    forces,
-                              real                  totalScale,
-                              real                  dihedralCorrectionScale,
-                              GpuEventSynchronizer* rawForcesReady);
+    //! Waits for raw forces, corrects the live device buffer with the device bias state and records readiness.
+    void applyForceCorrection(DeviceBuffer<RVec> forces, GpuEventSynchronizer* rawForcesReady);
     //! Returns the post-correction event consumed by GPU update.
     GpuEventSynchronizer* forcesReadyEvent();
 

@@ -90,18 +90,16 @@ GaMDStage GaMDRuntime::determineStage(int64_t step) const
     return GaMDStage::Production;
 }
 
-const GaMDStepPlan& GaMDRuntime::prepareStep(int64_t step, int rank, bool pressureCouplingThisStep)
+const GaMDStepPlan& GaMDRuntime::prepareStep(int64_t step, bool pressureCouplingThisStep)
 {
     if (stepPlan_.step == step)
     {
         return stepPlan_;
     }
 
-    currentRank_ = rank;
-
     // 严格校验保证 igamd 为 1、2 或 3，之后各处都不再检查“未启用”。
-    loadParameters(rank);
-    loadRestartStateIfNeeded(step, rank);
+    loadParameters();
+    loadRestartStateIfNeeded(step);
 
     // Current-step GaMD applies the final force correction later in do_force(),
     // after raw energies and raw listed forces for the current coordinates are available.
@@ -144,15 +142,9 @@ void GaMDRuntime::setBufferedProductionOutputEnabled(bool enabled)
     bufferedProductionOutputEnabled_ = enabled;
 }
 
-void GaMDRuntime::warnIfRunTooShort(int64_t initStep, int64_t nsteps, int rank)
+void GaMDRuntime::warnIfRunTooShort(int64_t initStep, int64_t nsteps)
 {
-    if (warnedAboutRunLength_)
-    {
-        return;
-    }
-    warnedAboutRunLength_ = true;
-
-    if (!parametersLoaded_ || rank != 0 || nsteps < 0 || parameters_.restartMode != 0 || forceProductionRestart_)
+    if (!parametersLoaded_ || nsteps < 0 || parameters_.restartMode != 0 || forceProductionRestart_)
     {
         return;
     }
@@ -186,7 +178,6 @@ double GaMDRuntime::validateAndClampScale(const char*                 label,
                                           double                      energy,
                                           const GaMDEnergyStatistics& stat,
                                           int64_t                     step,
-                                          int                         rank,
                                           bool*                       warnedAtFloor)
 {
     if (!std::isfinite(rawScale) || !std::isfinite(energy) || !std::isfinite(stat.threshold)
@@ -206,31 +197,60 @@ double GaMDRuntime::validateAndClampScale(const char*                 label,
 
     if (rawScale <= c_gaMDScaleFloor && !*warnedAtFloor)
     {
-        if (rank == 0)
-        {
-            GMX_LOG(diagnostics_.logger().warning)
-                    .asParagraph()
-                    .appendTextFormatted(
-                            "\n[GaMD WARNING] %s raw force weight reached the 0.01 safety floor "
-                            "at step %" PRId64
-                            ": raw_weight=%.17g, energy=%.17g kJ/mol, E=%.17g "
-                            "kJ/mol, k=%.17g (kJ/mol)^-1. The applied weight is clamped to "
-                            "0.01. Inspect equilibration and GaMD parameters before using this "
-                            "trajectory for production analysis.\n\n",
-                            label,
-                            step,
-                            rawScale,
-                            energy,
-                            stat.threshold,
-                            stat.forceConstant);
-        }
+        GMX_LOG(diagnostics_.logger().warning)
+                .asParagraph()
+                .appendTextFormatted(
+                        "\n[GaMD WARNING] %s raw force weight reached the 0.01 safety floor "
+                        "at step %" PRId64
+                        ": raw_weight=%.17g, energy=%.17g kJ/mol, E=%.17g "
+                        "kJ/mol, k=%.17g (kJ/mol)^-1. The applied weight is clamped to "
+                        "0.01. Inspect equilibration and GaMD parameters before using this "
+                        "trajectory for production analysis.\n\n",
+                        label,
+                        step,
+                        rawScale,
+                        energy,
+                        stat.threshold,
+                        stat.forceConstant);
         *warnedAtFloor = true;
     }
     return std::max(c_gaMDScaleFloor, rawScale);
 }
 
+GaMDStepResult GaMDRuntime::evaluateClampedBias(int64_t step, double potentialEnergy, double dihedralEnergy)
+{
+    GaMDStepResult result = evaluateGaMDBias(biasParameters(), potentialEnergy, dihedralEnergy);
+    if (stepPlan_.bias.stage < GaMDStage::BoostPreparation)
+    {
+        return result;
+    }
+
+    // 双重偏置时总势能偏置作用在加上二面角偏置后的能量上，下限诊断也报告这个能量。
+    double totalEnergyForPotentialBoost = potentialEnergy;
+    if (parameters_.boostType == 3)
+    {
+        totalEnergyForPotentialBoost += result.boostD;
+    }
+    if (!std::isfinite(result.boostP) || !std::isfinite(result.boostD))
+    {
+        GMX_THROW(SimulationInstabilityError(formatString(
+                "Non-finite GaMD boost energy at step %" PRId64 ": boostP=%g boostD=%g.",
+                step,
+                result.boostP,
+                result.boostD)));
+    }
+    result.scaleP = validateAndClampScale("total-potential",
+                                          result.scaleP,
+                                          totalEnergyForPotentialBoost,
+                                          potentialStatistics_,
+                                          step,
+                                          &warnedPotentialScaleFloor_);
+    result.scaleD = validateAndClampScale(
+            "dihedral", result.scaleD, dihedralEnergy, dihedralStatistics_, step, &warnedDihedralScaleFloor_);
+    return result;
+}
+
 void GaMDRuntime::finalizeCurrentStep(int64_t        step,
-                                      int            rank,
                                       double         totalPotentialEnergy,
                                       double         dihedralEnergy,
                                       gmx_wallcycle* wallCycle)
@@ -242,7 +262,6 @@ void GaMDRuntime::finalizeCurrentStep(int64_t        step,
     wallcycle_start(wallCycle, WallCycleCounter::GaMDFinalize);
     lastAccountedStep_ = step;
 
-    currentRank_ = rank;
     GMX_RELEASE_ASSERT(stepPlan_.step == step, "GaMD finalization must use the prepared step");
     stepResult_.potentialEnergy = totalPotentialEnergy;
     stepResult_.dihedralEnergy  = dihedralEnergy;
@@ -250,116 +269,87 @@ void GaMDRuntime::finalizeCurrentStep(int64_t        step,
     const GaMDForceOverrides& forceOverrides = diagnostics_.forceOverrides();
     if (forceOverrides.enabled)
     {
+        // 强制诊断直接采用配置的力权重和偏置能量，不更新统计量。
         const GaMDEnergyStatistics overrideStats{};
         stepResult_.scaleP = validateAndClampScale("total-potential",
                                                    forceOverrides.totalScale,
                                                    totalPotentialEnergy,
                                                    overrideStats,
                                                    step,
-                                                   rank,
                                                    &warnedPotentialScaleFloor_);
         stepResult_.scaleD = validateAndClampScale(
-                "dihedral", forceOverrides.dihedralScale, dihedralEnergy, overrideStats, step, rank, &warnedDihedralScaleFloor_);
+                "dihedral", forceOverrides.dihedralScale, dihedralEnergy, overrideStats, step, &warnedDihedralScaleFloor_);
         stepResult_.boostP = forceOverrides.potentialBoost;
         stepResult_.boostD = forceOverrides.dihedralBoost;
-        wallcycle_stop(wallCycle, WallCycleCounter::GaMDFinalize);
-        wallcycle_start(wallCycle, WallCycleCounter::GaMDOutput);
-        writeParameterLine(step, rank, true);
-        writeReweightLine(step, rank, true);
-        wallcycle_stop(wallCycle, WallCycleCounter::GaMDOutput);
-        return;
     }
-
-    const bool updateStat = (stepPlan_.bias.stage == GaMDStage::ConventionalStatistics
-                             || stepPlan_.bias.stage == GaMDStage::BoostStatistics);
-    stepResult_ = evaluateGaMDBias(biasParameters(), totalPotentialEnergy, dihedralEnergy);
-
-    if (stepPlan_.bias.stage >= GaMDStage::BoostPreparation)
+    else
     {
-        double totalEnergyForPotentialBoost = totalPotentialEnergy;
-        if (parameters_.boostType == 3)
-        {
-            totalEnergyForPotentialBoost += stepResult_.boostD;
-        }
-        if (!std::isfinite(stepResult_.boostP) || !std::isfinite(stepResult_.boostD))
-        {
-            GMX_THROW(SimulationInstabilityError(formatString(
-                    "Non-finite GaMD boost energy at step %" PRId64 ": boostP=%g boostD=%g.",
-                    step,
-                    stepResult_.boostP,
-                    stepResult_.boostD)));
-        }
-        stepResult_.scaleP = validateAndClampScale("total-potential",
-                                                   stepResult_.scaleP,
-                                                   totalEnergyForPotentialBoost,
-                                                   potentialStatistics_,
-                                                   step,
-                                                   rank,
-                                                   &warnedPotentialScaleFloor_);
-        stepResult_.scaleD = validateAndClampScale(
-                "dihedral", stepResult_.scaleD, dihedralEnergy, dihedralStatistics_, step, rank, &warnedDihedralScaleFloor_);
-    }
+        stepResult_ = evaluateClampedBias(step, totalPotentialEnergy, dihedralEnergy);
 
-    if (updateStat)
-    {
-        const bool updateAverageWindow    = (step % parameters_.averagingWindow == 0);
-        double     totalPotentialForStats = totalPotentialEnergy;
-        if (stepPlan_.bias.stage == GaMDStage::BoostStatistics)
+        const bool updateStat = (stepPlan_.bias.stage == GaMDStage::ConventionalStatistics
+                                 || stepPlan_.bias.stage == GaMDStage::BoostStatistics);
+        if (updateStat)
         {
-            // 保留原来的相加顺序，避免改变统计量的浮点舍入结果。
-            totalPotentialForStats = totalPotentialEnergy + stepResult_.boostP + stepResult_.boostD;
-        }
-
-        if (parameters_.boostType == 1 || parameters_.boostType == 3)
-        {
-            updateGaMDStatistics(totalPotentialForStats,
-                                 compat::make_not_null(&potentialStatistics_),
-                                 compat::make_not_null(&potentialWindowStatistics_));
-            if (updateAverageWindow)
+            const bool updateAverageWindow    = (step % parameters_.averagingWindow == 0);
+            double     totalPotentialForStats = totalPotentialEnergy;
+            if (stepPlan_.bias.stage == GaMDStage::BoostStatistics)
             {
-                finalizeWindowStatistics(compat::make_not_null(&potentialWindowStatistics_),
-                                         compat::make_not_null(&potentialStatistics_));
+                // 保留原来的相加顺序，避免改变统计量的浮点舍入结果。
+                totalPotentialForStats = totalPotentialEnergy + stepResult_.boostP + stepResult_.boostD;
             }
-        }
 
-        if (parameters_.boostType == 2 || parameters_.boostType == 3)
-        {
-            updateGaMDStatistics(dihedralEnergy,
-                                 compat::make_not_null(&dihedralStatistics_),
-                                 compat::make_not_null(&dihedralWindowStatistics_));
-            if (updateAverageWindow)
-            {
-                finalizeWindowStatistics(compat::make_not_null(&dihedralWindowStatistics_),
-                                         compat::make_not_null(&dihedralStatistics_));
-            }
-        }
-
-        const bool updateBiasParameters = (stepPlan_.bias.stage == GaMDStage::ConventionalStatistics
-                                           && step == parameters_.conventionalEnd)
-                                          || stepPlan_.bias.stage == GaMDStage::BoostStatistics;
-        if (updateBiasParameters)
-        {
             if (parameters_.boostType == 1 || parameters_.boostType == 3)
             {
-                calculateThresholdAndForceConstant(parameters_.potentialMode,
-                                                   parameters_.potentialSigmaLimit,
-                                                   compat::make_not_null(&potentialStatistics_));
+                updateGaMDStatistics(totalPotentialForStats,
+                                     compat::make_not_null(&potentialStatistics_),
+                                     compat::make_not_null(&potentialWindowStatistics_));
+                if (updateAverageWindow)
+                {
+                    finalizeWindowStatistics(compat::make_not_null(&potentialWindowStatistics_),
+                                             compat::make_not_null(&potentialStatistics_));
+                }
             }
+
             if (parameters_.boostType == 2 || parameters_.boostType == 3)
             {
-                calculateThresholdAndForceConstant(parameters_.dihedralMode,
-                                                   parameters_.dihedralSigmaLimit,
-                                                   compat::make_not_null(&dihedralStatistics_));
+                updateGaMDStatistics(dihedralEnergy,
+                                     compat::make_not_null(&dihedralStatistics_),
+                                     compat::make_not_null(&dihedralWindowStatistics_));
+                if (updateAverageWindow)
+                {
+                    finalizeWindowStatistics(compat::make_not_null(&dihedralWindowStatistics_),
+                                             compat::make_not_null(&dihedralStatistics_));
+                }
+            }
+
+            const bool updateBiasParameters = (stepPlan_.bias.stage == GaMDStage::ConventionalStatistics
+                                               && step == parameters_.conventionalEnd)
+                                              || stepPlan_.bias.stage == GaMDStage::BoostStatistics;
+            if (updateBiasParameters)
+            {
+                if (parameters_.boostType == 1 || parameters_.boostType == 3)
+                {
+                    calculateThresholdAndForceConstant(parameters_.potentialMode,
+                                                       parameters_.potentialSigmaLimit,
+                                                       compat::make_not_null(&potentialStatistics_));
+                }
+                if (parameters_.boostType == 2 || parameters_.boostType == 3)
+                {
+                    calculateThresholdAndForceConstant(parameters_.dihedralMode,
+                                                       parameters_.dihedralSigmaLimit,
+                                                       compat::make_not_null(&dihedralStatistics_));
+                }
             }
         }
     }
 
     wallcycle_stop(wallCycle, WallCycleCounter::GaMDFinalize);
     wallcycle_start(wallCycle, WallCycleCounter::GaMDOutput);
+    // 强制诊断已关闭缓冲输出，所以每一步都在这里即时写出。
     if (!bufferedProductionOutputEnabled() || stepPlan_.bias.stage != GaMDStage::Production)
     {
-        writeParameterLine(step, rank, true);
-        writeReweightLine(step, rank, true);
+        writeParameterLine(step, true);
+        writeReweightRecord(step, stepResult_, true);
     }
     wallcycle_stop(wallCycle, WallCycleCounter::GaMDOutput);
 }
@@ -367,7 +357,6 @@ void GaMDRuntime::finalizeCurrentStep(int64_t        step,
 void GaMDRuntime::writeBufferedProductionOutput(ArrayRef<const int64_t> deferredSteps,
                                                 ArrayRef<const std::array<real, F_NRE>> deferredEnergySamples,
                                                 int64_t        currentStep,
-                                                int            rank,
                                                 gmx_wallcycle* wallCycle)
 {
     if (!bufferedProductionOutputEnabled())
@@ -397,33 +386,14 @@ void GaMDRuntime::writeBufferedProductionOutput(ArrayRef<const int64_t> deferred
         }
         const float dihedralEnergy = gaMDDihedralEnergy(sample.data());
 
-        GaMDStepResult record = evaluateGaMDBias(biasParameters(), potentialEnergy, dihedralEnergy);
-        double         totalEnergyForP = potentialEnergy;
-        if (parameters_.boostType == 3)
-        {
-            totalEnergyForP += record.boostD;
-        }
-        record.scaleP = validateAndClampScale("total-potential",
-                                              record.scaleP,
-                                              totalEnergyForP,
-                                              potentialStatistics_,
-                                              deferredSteps[sampleIndex],
-                                              rank,
-                                              &warnedPotentialScaleFloor_);
-        record.scaleD = validateAndClampScale("dihedral",
-                                              record.scaleD,
-                                              dihedralEnergy,
-                                              dihedralStatistics_,
-                                              deferredSteps[sampleIndex],
-                                              rank,
-                                              &warnedDihedralScaleFloor_);
-
-        writeParameterLine(deferredSteps[sampleIndex], rank, false);
-        writeReweightRecord(deferredSteps[sampleIndex], rank, record, false);
+        const GaMDStepResult record =
+                evaluateClampedBias(deferredSteps[sampleIndex], potentialEnergy, dihedralEnergy);
+        writeParameterLine(deferredSteps[sampleIndex], false);
+        writeReweightRecord(deferredSteps[sampleIndex], record, false);
     }
 
-    writeParameterLine(currentStep, rank, false);
-    writeReweightLine(currentStep, rank, false);
+    writeParameterLine(currentStep, false);
+    writeReweightRecord(currentStep, stepResult_, false);
     if ((parameterFile_ != nullptr
          && (std::fflush(parameterFile_.get()) != 0 || std::ferror(parameterFile_.get()) != 0))
         || (reweightFile_ != nullptr

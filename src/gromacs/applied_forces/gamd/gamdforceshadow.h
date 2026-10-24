@@ -93,29 +93,28 @@ public:
      * recomputation of the dihedral forces and virial with the device results.
      * Always keeps the host reference of the corrected forces.
      */
-    void captureBeforeGpuCorrection(int64_t                            step,
-                                    const InteractionDefinitions&      interactionDefinitions,
-                                    const matrix                       box,
-                                    ArrayRefWithPadding<RVec>          coordinates,
-                                    ArrayRef<const RVec>               forces,
-                                    int                                numLocalAtoms,
-                                    ArrayRef<const real>               freeEnergyParameters,
-                                    t_forcerec*                        forceRecord,
-                                    t_nrnb*                            operationCounter,
-                                    const StepWorkload&                stepWork,
-                                    real                               totalScale,
-                                    real                               dihedralCorrectionScale,
-                                    const std::array<real, DIM * DIM>& deviceDihedralVirial,
-                                    GpuEventSynchronizer*              rawForcesReady,
-                                    GaMDGpuExecutor*                   gpuExecutor,
-                                    const MDLogger&                    logger);
+    void captureBeforeGpuCorrection(int64_t                       step,
+                                    const InteractionDefinitions& interactionDefinitions,
+                                    const matrix                  box,
+                                    ArrayRefWithPadding<RVec>     coordinates,
+                                    ArrayRef<const RVec>          forces,
+                                    int                           numLocalAtoms,
+                                    ArrayRef<const real>          freeEnergyParameters,
+                                    t_forcerec*                   forceRecord,
+                                    t_nrnb*                       operationCounter,
+                                    const StepWorkload&           stepWork,
+                                    real                          totalScale,
+                                    real                          dihedralCorrectionScale,
+                                    const tensor                  deviceDihedralVirial,
+                                    GpuEventSynchronizer*         rawForcesReady,
+                                    GaMDGpuExecutor*              gpuExecutor,
+                                    const MDLogger&               logger);
     //! Compares the corrected device forces with the reference and writes the requested final forces.
     void compareAfterGpuCorrection(int64_t                 step,
                                    const StepWorkload&     stepWork,
                                    StatePropagatorDataGpu* stateGpu,
                                    GaMDGpuExecutor*        gpuExecutor,
-                                   GaMDDiagnostics*        diagnostics,
-                                   bool                    isMainRank);
+                                   GaMDDiagnostics*        diagnostics);
     //! Keeps the raw CPU forces until the one-time correction comparison has run.
     void captureBeforeCpuCorrection(ArrayRef<const RVec> forces);
     /*! \brief Compares the CPU-path dihedral and corrected forces with the device once each.

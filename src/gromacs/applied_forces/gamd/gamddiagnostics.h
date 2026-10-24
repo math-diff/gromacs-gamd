@@ -66,10 +66,7 @@ void validateGaMDGpuShadowEnergy(const MDLogger&       logger,
                                  const GaMDStepResult& reference,
                                  const GaMDStepResult& candidate);
 //! Compares finite CPU/GPU virial tensors and logs the maximum error.
-void validateGaMDGpuShadowVirial(const MDLogger&                    logger,
-                                 int64_t                            step,
-                                 const tensor                       reference,
-                                 const std::array<real, DIM * DIM>& candidate);
+void validateGaMDGpuShadowVirial(const MDLogger& logger, int64_t step, const tensor reference, const tensor candidate);
 
 //! Compare shadow forces and reject non-finite or out-of-tolerance results.
 void validateGaMDGpuShadowForces(const MDLogger&      logger,
@@ -110,12 +107,11 @@ public:
     void dumpDihedralForces(int64_t              step,
                             ArrayRef<const RVec> rawForces,
                             double               forceWeight,
-                            bool                 isMainRank,
                             ArrayRef<const int>  globalAtomIndices = {});
     //! Rejects an unfulfilled selected-step snapshot.
-    void finishDihedralStep(int64_t step, bool isMainRank);
+    void finishDihedralStep(int64_t step);
     //! Writes the selected final-force buffer in its current atom order.
-    void dumpFinalForces(int64_t step, ArrayRef<const RVec> forces, bool isMainRank);
+    void dumpFinalForces(int64_t step, ArrayRef<const RVec> forces);
     //! Whether a final-force snapshot file was requested.
     bool finalForceOutputRequested() const { return finalForceFile_ != nullptr; }
 
@@ -124,10 +120,8 @@ public:
     //! Whether GMX_GAMD_GPU_ENERGY_SHADOW requests the GPU energy shadow.
     bool gpuEnergyShadowRequested() const { return gpuEnergyShadowRequested_; }
 
-    //! Logs resident host-staging conditions once on the main rank.
-    void logResidentEnergy(bool useBufferedOutput, bool isMainRank);
-    //! Returns true once when workload diagnostics are requested.
-    bool shouldPrintGpuWorkloadDiagnostics();
+    //! Logs the resident host-staging conditions; the MD loop calls it on its first step.
+    void logResidentEnergy();
 
 private:
     MDLogger logger_;
@@ -148,11 +142,8 @@ private:
     int         finalForceBegin_ = 0;
     int         finalForceCount_ = -1;
 
-    bool residentEnergyMessagePrinted_  = false;
-    bool gpuWorkloadDiagnosticsEnabled_ = false;
-    bool gpuWorkloadDiagnosticsPrinted_ = false;
-    bool gpuDihedralShadowRequested_    = false;
-    bool gpuEnergyShadowRequested_      = false;
+    bool gpuDihedralShadowRequested_ = false;
+    bool gpuEnergyShadowRequested_   = false;
 };
 
 //! \}

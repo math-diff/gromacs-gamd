@@ -291,10 +291,7 @@ void validateGaMDGpuShadowEnergy(const MDLogger&       logger,
     }
 }
 
-void validateGaMDGpuShadowVirial(const MDLogger&                    logger,
-                                 int64_t                            step,
-                                 const tensor                       reference,
-                                 const std::array<real, DIM * DIM>& candidate)
+void validateGaMDGpuShadowVirial(const MDLogger& logger, int64_t step, const tensor reference, const tensor candidate)
 {
     double maxAbsoluteError = 0.0;
     for (int rowIndex = 0; rowIndex < DIM; ++rowIndex)
@@ -302,7 +299,7 @@ void validateGaMDGpuShadowVirial(const MDLogger&                    logger,
         for (int columnIndex = 0; columnIndex < DIM; ++columnIndex)
         {
             const double referenceValue = reference[rowIndex][columnIndex];
-            const double candidateValue = candidate[rowIndex * DIM + columnIndex];
+            const double candidateValue = candidate[rowIndex][columnIndex];
             const double difference     = candidateValue - referenceValue;
             // 每个分量都检查，避免 std::max 把 NaN 隐藏在有限的最大误差后面。
             if (!std::isfinite(referenceValue) || !std::isfinite(candidateValue)
@@ -357,8 +354,8 @@ void validateGaMDGpuShadowForces(const MDLogger&      logger,
                     static_cast<double>(reference[comparison.worstAtom][comparison.worstComponent]),
                     static_cast<double>(candidate[comparison.worstAtom][comparison.worstComponent]));
 
-    if (!std::isfinite(comparison.maxAbsoluteError) || !std::isfinite(comparison.rmsError)
-        || comparison.maxAbsoluteError > maxAbsoluteTolerance || comparison.rmsError > rmsTolerance)
+    // 比较函数已拒绝非有限分量，这里只比较容差。
+    if (comparison.maxAbsoluteError > maxAbsoluteTolerance || comparison.rmsError > rmsTolerance)
     {
         GMX_THROW(SimulationInstabilityError(formatString(
                 "GaMD GPU %s shadow forces exceed provisional mixed-precision tolerances "
@@ -438,7 +435,6 @@ GaMDDiagnostics::GaMDDiagnostics()
                                                 &dihedralForceFilename_);
     finalForceFile_    = openGaMDDiagnosticFile(
             "GMX_GAMD_FORCE_DEBUG_FILE", "# step atom fx fy fz |f|\n", &finalForceFilename_);
-    gpuWorkloadDiagnosticsEnabled_ = std::getenv("GMX_GAMD_GPU_DIAGNOSTICS") != nullptr;
     // GPU 影子开关也只在这里读取；runner 和 GPU executor 都向本对象查询。
     gpuDihedralShadowRequested_ = std::getenv("GMX_GAMD_GPU_DIH_SHADOW") != nullptr;
     gpuEnergyShadowRequested_   = std::getenv("GMX_GAMD_GPU_ENERGY_SHADOW") != nullptr;
@@ -489,10 +485,9 @@ bool GaMDDiagnostics::dihedralForceOutputRequested(const int64_t step) const
 void GaMDDiagnostics::dumpDihedralForces(const int64_t        step,
                                          ArrayRef<const RVec> rawForces,
                                          const double         forceWeight,
-                                         const bool           isMainRank,
                                          ArrayRef<const int>  globalAtomIndices)
 {
-    if (!isMainRank || !dihedralForceOutputRequested(step))
+    if (!dihedralForceOutputRequested(step))
     {
         return;
     }
@@ -508,10 +503,10 @@ void GaMDDiagnostics::dumpDihedralForces(const int64_t        step,
     dihedralForceWrittenStep_ = step;
 }
 
-void GaMDDiagnostics::finishDihedralStep(const int64_t step, const bool isMainRank)
+void GaMDDiagnostics::finishDihedralStep(const int64_t step)
 {
     // 到达了请求的步号却没有样本时，不能把空文件当成有效诊断结果。
-    if (isMainRank && dihedralForceOutputRequested(step))
+    if (dihedralForceOutputRequested(step))
     {
         GMX_THROW(InternalError(
                 formatString("No GaMD dihedral force snapshot was produced at step %lld for '%s'.",
@@ -520,9 +515,9 @@ void GaMDDiagnostics::finishDihedralStep(const int64_t step, const bool isMainRa
     }
 }
 
-void GaMDDiagnostics::dumpFinalForces(const int64_t step, const ArrayRef<const RVec> forces, const bool isMainRank)
+void GaMDDiagnostics::dumpFinalForces(const int64_t step, const ArrayRef<const RVec> forces)
 {
-    if (finalForceFile_ == nullptr || !isMainRank || step != finalForceStep_)
+    if (finalForceFile_ == nullptr || step != finalForceStep_)
     {
         return;
     }
@@ -530,35 +525,15 @@ void GaMDDiagnostics::dumpFinalForces(const int64_t step, const ArrayRef<const R
             finalForceFile_.get(), finalForceFilename_, step, forces, finalForceBegin_, finalForceCount_, 1.0, {});
 }
 
-void GaMDDiagnostics::logResidentEnergy(const bool useBufferedOutput, const bool isMainRank)
+void GaMDDiagnostics::logResidentEnergy()
 {
-    if (!isMainRank || residentEnergyMessagePrinted_)
-    {
-        return;
-    }
-    residentEnergyMessagePrinted_  = true;
-    const char* hostStagingOutputs = "GaMD output, ";
-    if (useBufferedOutput)
-    {
-        hostStagingOutputs = "standard energy/";
-    }
+    // resident 模式总是缓冲 GaMD 文本输出，所以只在标准能量和日志步回传主机。
     GMX_LOG(logger_.info)
             .asParagraph()
-            .appendTextFormatted(
+            .appendText(
                     "[GaMD GPU INFO] Device-resident production energy enabled; host staging "
-                    "is retained for %slog, checkpoint, adaptive-stage, diagnostic, and "
-                    "full-history steps.\n",
-                    hostStagingOutputs);
-}
-
-bool GaMDDiagnostics::shouldPrintGpuWorkloadDiagnostics()
-{
-    if (!gpuWorkloadDiagnosticsEnabled_ || gpuWorkloadDiagnosticsPrinted_)
-    {
-        return false;
-    }
-    gpuWorkloadDiagnosticsPrinted_ = true;
-    return true;
+                    "is retained for standard energy/log, checkpoint, adaptive-stage, diagnostic, "
+                    "and full-history steps.\n");
 }
 
 } // namespace gmx

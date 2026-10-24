@@ -105,7 +105,11 @@ must inspect the configured simulation log, normally ``run.log`` with
 ``-deffnm run``, for the successful comparison records.
 
 Internal parsing, I/O and numerical checks use the native input, file and
-simulation-instability exception types. The module's legacy MD entry points,
+simulation-instability exception types. In the GPU executor,
+``GMX_RELEASE_ASSERT`` guards only conditions whose violation would read or
+write out of bounds or silently corrupt data (history capacity, matching sample
+counts, the temperature-group layout, host/device copy sizes); call-order and
+mode preconditions use ``GMX_ASSERT``. The module's legacy MD entry points,
 the force-correction entry, diagnostic output callbacks, the GPU executor
 initialization and the GPU buffer binding entry contain exceptions with the
 existing fatal-error adapter. GPU buffer binding can be called after
@@ -170,12 +174,16 @@ local topology and stay at GPU listed-force buffer binding.
 GaMD is enabled only by the TPR flag. The execution mode (``Disabled``,
 ``CpuReference`` or ``GpuResident``) is the single source for whether and where
 GaMD runs; the force path receives the module pointer only when GaMD is
-enabled, so a non-null pointer means GaMD is active. ``GaMDDiagnostics`` reads
+enabled, so a non-null pointer means GaMD is active. Because the selector
+rejects PP domain decomposition, GaMD code runs only on the single PP rank,
+which is the main rank; module interfaces take no rank or main-rank argument. ``GaMDDiagnostics`` reads
 every diagnostic environment variable once, and the GPU executor receives the
 shadow switches through its constructor. GPU-shadow combinations that a
 CPU-update run cannot support are rejected when the executor is created.
-The current-step correction entry performs energy accounting, then calls the
-separate CPU or GPU sequence in ``gamdexecution.cpp``.
+The current-step correction entry performs energy accounting, derives the two
+force weights once from the host result, then calls the separate CPU or GPU
+sequence in ``gamdexecution.cpp``. The live GPU correction reads the device
+bias state; the host weights scale the host virial and feed the shadow.
 ``sim_util.cpp`` retains the call at the original force-processing boundary.
 The CPU dihedral helper in ``gamddihedralforces.cpp`` reuses the native bonded
 kernels and overwrites its output buffers completely. The module owns the

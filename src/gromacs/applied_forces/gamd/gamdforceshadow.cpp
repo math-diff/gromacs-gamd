@@ -68,10 +68,10 @@ void GaMDForceShadow::captureBeforeGpuCorrection(int64_t step,
                                                  const StepWorkload&       stepWork,
                                                  const real                totalScale,
                                                  const real                dihedralCorrectionScale,
-                                                 const std::array<real, DIM * DIM>& deviceDihedralVirial,
-                                                 GpuEventSynchronizer* rawForcesReady,
-                                                 GaMDGpuExecutor*      gpuExecutor,
-                                                 const MDLogger&       logger)
+                                                 const tensor              deviceDihedralVirial,
+                                                 GpuEventSynchronizer*     rawForcesReady,
+                                                 GaMDGpuExecutor*          gpuExecutor,
+                                                 const MDLogger&           logger)
 {
     // 只有本步施加二面角修正时，才用 CPU 重算的二面角力和维里对照设备结果。
     if (stepWork.stageGpuEnergyAndVirialToHost && dihedralCorrectionScale != 0.0)
@@ -147,8 +147,7 @@ void GaMDForceShadow::compareAfterGpuCorrection(const int64_t           step,
                                                 const StepWorkload&     stepWork,
                                                 StatePropagatorDataGpu* stateGpu,
                                                 GaMDGpuExecutor*        gpuExecutor,
-                                                GaMDDiagnostics*        diagnostics,
-                                                const bool              isMainRank)
+                                                GaMDDiagnostics*        diagnostics)
 {
     // 上面的等待和设备修正已各消费一次缩减力事件，把预期消费次数恢复为 1。
     if (stepWork.useGpuFBufferOps)
@@ -167,7 +166,7 @@ void GaMDForceShadow::compareAfterGpuCorrection(const int64_t           step,
                                 correctedForces_,
                                 0.005,
                                 0.0001);
-    diagnostics->dumpFinalForces(step, correctedForces_, isMainRank);
+    diagnostics->dumpFinalForces(step, correctedForces_);
 }
 
 void GaMDForceShadow::captureBeforeCpuCorrection(ArrayRef<const RVec> forces)

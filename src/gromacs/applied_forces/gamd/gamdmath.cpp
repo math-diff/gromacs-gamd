@@ -59,15 +59,9 @@ void calculateThresholdAndForceConstant(int                                     
     }
 
     // 保留原来的上下界选择和回退条件，避免重构改变平衡阶段的参数。
-    if (thresholdMode == 1)
-    {
-        statistics->threshold                = statistics->maximum;
-        const double normalizedForceConstant = (sigmaLimit / statistics->deviation)
-                                               * (statistics->maximum - statistics->minimum)
-                                               / (statistics->maximum - statistics->average);
-        statistics->k0 = std::min(1.0, normalizedForceConstant);
-    }
-    else if (thresholdMode == 2)
+    // iE=2 先尝试上界阈值；候选值不在 (0, 1] 内时，和 iE=1 一样使用下界阈值。
+    bool useUpperThreshold = false;
+    if (thresholdMode == 2)
     {
         const double upperForceConstant = (1.0 - sigmaLimit / statistics->deviation)
                                           * (statistics->maximum - statistics->minimum)
@@ -77,15 +71,16 @@ void calculateThresholdAndForceConstant(int                                     
             statistics->k0 = upperForceConstant;
             statistics->threshold =
                     statistics->minimum + (statistics->maximum - statistics->minimum) / statistics->k0;
+            useUpperThreshold = true;
         }
-        else
-        {
-            statistics->threshold                = statistics->maximum;
-            const double normalizedForceConstant = (sigmaLimit / statistics->deviation)
-                                                   * (statistics->maximum - statistics->minimum)
-                                                   / (statistics->maximum - statistics->average);
-            statistics->k0 = std::min(1.0, normalizedForceConstant);
-        }
+    }
+    if (!useUpperThreshold)
+    {
+        statistics->threshold                = statistics->maximum;
+        const double normalizedForceConstant = (sigmaLimit / statistics->deviation)
+                                               * (statistics->maximum - statistics->minimum)
+                                               / (statistics->maximum - statistics->average);
+        statistics->k0 = std::min(1.0, normalizedForceConstant);
     }
     statistics->forceConstant = statistics->k0 / std::max(1e-6, statistics->maximum - statistics->minimum);
 }

@@ -99,7 +99,7 @@ public:
     void subscribeToPreProcessingNotifications(MDModulesNotifiers* notifiers) override;
 
     //! Prepares the immutable work description for one step.
-    const GaMDStepPlan& prepareStep(int64_t step, int rank, bool pressureCouplingThisStep = false);
+    const GaMDStepPlan& prepareStep(int64_t step, bool pressureCouplingThisStep = false);
     //! Returns the host result for the current step.
     const GaMDStepResult& stepResult() const;
     //! Returns the current bias parameters shared by the CPU and GPU evaluators.
@@ -131,7 +131,6 @@ public:
     GaMDForceShadow* forceShadow();
     //! Updates host statistics and the host step result from current raw energies.
     void finalizeCurrentStep(int64_t        step,
-                             int            rank,
                              double         totalPotentialEnergy,
                              double         dihedralEnergy,
                              gmx_wallcycle* wallCycle = nullptr);
@@ -145,16 +144,13 @@ public:
     void writeBufferedProductionOutput(ArrayRef<const int64_t> deferredSteps,
                                        ArrayRef<const std::array<real, F_NRE>> deferredEnergySamples,
                                        int64_t        currentStep,
-                                       int            rank,
                                        gmx_wallcycle* wallCycle = nullptr);
     //! Mirrors the GROMACS checkpoint decision for this step.
     void setCheckpointingThisStep(bool checkpointingThisStep);
     //! Writes restart state before standard energy buffers are reset.
     void writeRestartState(int64_t step);
-    //! Warns once when the requested run cannot reach production.
-    void warnIfRunTooShort(int64_t initStep, int64_t numSteps, int rank);
-    //! Resets this instance for an independent unit-test scenario.
-    void resetStateForTesting();
+    //! Warns when the requested run cannot reach production; called on the first MD step.
+    void warnIfRunTooShort(int64_t initStep, int64_t numSteps);
 
 private:
     std::unique_ptr<GaMDDiagnostics>          diagnostics_;
@@ -163,9 +159,6 @@ private:
     std::unique_ptr<GaMDGpuExecutor>          gpuExecutor_;
     std::unique_ptr<GaMDForceShadow>          forceShadow_;
 };
-
-//! Constructs the built-in GaMD module.
-std::unique_ptr<GaMDMDModule> createGaMDModule();
 
 //! \}
 //! \endcond

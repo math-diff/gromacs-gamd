@@ -76,7 +76,7 @@ public:
     Impl() :
         densityFitting_(DensityFittingModuleInfo::create()),
         field_(createElectricFieldModule()),
-        gamd_(createGaMDModule()),
+        gamd_(std::make_unique<GaMDMDModule>()),
         imd_(createInteractiveMolecularDynamicsModule()),
         qmmm_(QMMMModuleInfo::create()),
         swapCoordinates_(createSwapCoordinatesModule()),

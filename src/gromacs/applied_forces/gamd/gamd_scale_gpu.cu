@@ -60,7 +60,7 @@ __global__ void gamdProductionScaleKernel(float*                   gm_gamdState,
     if (blockIdx.x == 0 && threadIdx.x == 0)
     {
         GaMDStepResult result;
-        if (forceOverrides.enabled && parameters.boostType != 0)
+        if (forceOverrides.enabled)
         {
             // CPU 和 CUDA 共用诊断配置，让力、维里和输出都读取同一份结果。
             result.scaleP = forceOverrides.totalScale;
@@ -89,16 +89,9 @@ void launchGamdProductionScaleKernel(DeviceBuffer<float>       gamdState,
                                      const GaMDForceOverrides& forceOverrides,
                                      const DeviceStream&       deviceStream)
 {
+    // 默认启动配置就是单线程：1 个块、1 个线程、无共享内存。
     KernelLaunchConfig config;
-    config.blockSize[0]     = 1;
-    config.blockSize[1]     = 1;
-    config.blockSize[2]     = 1;
-    config.gridSize[0]      = 1;
-    config.gridSize[1]      = 1;
-    config.gridSize[2]      = 1;
-    config.sharedMemorySize = 0;
-
-    auto       kernel = gamdProductionScaleKernel;
+    auto               kernel = gamdProductionScaleKernel;
     const auto kernelArgs =
             prepareGpuKernelArguments(kernel, config, &gamdState, &parameters, &forceOverrides);
     launchGpuKernel(kernel, config, deviceStream, nullptr, "Evaluate GaMD production scale", kernelArgs);

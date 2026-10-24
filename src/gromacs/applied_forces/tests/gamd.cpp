@@ -196,7 +196,7 @@ Index countNumericRows(const std::filesystem::path& path)
 class GaMDTest : public ::testing::Test
 {
 protected:
-    GaMDMDModule gaMDModule_;
+    std::unique_ptr<GaMDMDModule> gaMDModule_ = std::make_unique<GaMDMDModule>();
 };
 
 const std::string c_validGaMDRestart =
@@ -252,7 +252,7 @@ TEST_F(GaMDTest, NativeReaderPreservesAttachedRestartComments)
         std::ofstream input("gamd.in", std::ios::app);
         input << "debug 0#input comment\n";
     }
-    const GaMDStepPlan& plan = gaMDModule_.prepareStep(0, 0);
+    const GaMDStepPlan& plan = gaMDModule_->prepareStep(0);
     EXPECT_EQ(plan.bias.stage, GaMDStage::Production);
     EXPECT_DOUBLE_EQ(plan.bias.thresholdP, 10.0);
 }
@@ -269,7 +269,7 @@ TEST_F(GaMDTest, RuntimeInputErrorsUseProjectExceptions)
     }
     GaMDDiagnostics diagnostics;
     GaMDRuntime     runtime(diagnostics);
-    EXPECT_THROW_GMX(runtime.prepareStep(0, 0, false), InvalidInputError);
+    EXPECT_THROW_GMX(runtime.prepareStep(0, false), InvalidInputError);
 }
 
 TEST(GaMDDiagnosticsTest, RequestedOutputOpenErrorsAreReported)
@@ -324,13 +324,12 @@ TEST(GaMDDiagnosticsTest, DihedralSnapshotIsWeightedOrderedAndWrittenOnce)
         const std::array<int, 3>  topologyIndices = { 2, 0, 1 };
         EXPECT_FALSE(diagnostics.dihedralForceOutputRequested(6));
         EXPECT_TRUE(diagnostics.dihedralForceOutputRequested(7));
-        diagnostics.dumpDihedralForces(7, rawForces, 0.25, false, topologyIndices);
+        diagnostics.dumpDihedralForces(6, rawForces, 0.25, topologyIndices);
         EXPECT_TRUE(diagnostics.dihedralForceOutputRequested(7));
-        diagnostics.dumpDihedralForces(6, rawForces, 0.25, true, topologyIndices);
-        diagnostics.dumpDihedralForces(7, rawForces, 0.25, true, topologyIndices);
+        diagnostics.dumpDihedralForces(7, rawForces, 0.25, topologyIndices);
         EXPECT_FALSE(diagnostics.dihedralForceOutputRequested(7));
-        diagnostics.dumpDihedralForces(7, rawForces, 0.5, true, topologyIndices);
-        diagnostics.finishDihedralStep(7, true);
+        diagnostics.dumpDihedralForces(7, rawForces, 0.5, topologyIndices);
+        diagnostics.finishDihedralStep(7);
         EXPECT_EQ(rawForces[0][XX], 4);
         EXPECT_EQ(rawForces[2][ZZ], 12);
     }
@@ -361,7 +360,7 @@ TEST(GaMDDiagnosticsTest, MissingRequestedDihedralSnapshotIsRejected)
     gmxSetenv("GMX_GAMD_DIH_FORCE_DEBUG_STEP", "7", 1);
     {
         GaMDDiagnostics diagnostics;
-        EXPECT_THROW_GMX(diagnostics.finishDihedralStep(7, true), InternalError);
+        EXPECT_THROW_GMX(diagnostics.finishDihedralStep(7), InternalError);
     }
     gmxUnsetenv("GMX_GAMD_DIH_FORCE_DEBUG_FILE");
     gmxUnsetenv("GMX_GAMD_DIH_FORCE_DEBUG_STEP");
@@ -379,13 +378,13 @@ TEST(GaMDDiagnosticsTest, DihedralOutputStagesOnlyTheRequestedStep)
     {
         GaMDMDModule module;
         module.setBufferedProductionOutputEnabled(true);
-        module.prepareStep(6, 0);
+        module.prepareStep(6);
         EXPECT_FALSE(module.requiresHostEnergyThisStep(6));
-        module.prepareStep(7, 0);
+        module.prepareStep(7);
         EXPECT_TRUE(module.requiresHostEnergyThisStep(7));
         const std::array<RVec, 1> forces = { RVec(1, 2, 3) };
-        module.diagnostics().dumpDihedralForces(7, forces, 1.0, true);
-        module.prepareStep(8, 0);
+        module.diagnostics().dumpDihedralForces(7, forces, 1.0);
+        module.prepareStep(8);
         EXPECT_FALSE(module.requiresHostEnergyThisStep(8));
     }
     gmxUnsetenv("GMX_GAMD_DIH_FORCE_DEBUG_FILE");
@@ -405,7 +404,7 @@ TEST(GaMDDiagnosticsTest, FinalForceSnapshotKeepsValuesAndClampsCount)
     {
         GaMDDiagnostics           diagnostics;
         const std::array<RVec, 3> forces = { RVec(4, 0, 0), RVec(0, 8, 0), RVec(0, 0, 12) };
-        diagnostics.dumpFinalForces(7, forces, true);
+        diagnostics.dumpFinalForces(7, forces);
     }
     gmxUnsetenv("GMX_GAMD_FORCE_DEBUG_FILE");
     gmxUnsetenv("GMX_GAMD_FORCE_DEBUG_STEP");
@@ -448,19 +447,19 @@ TEST(GaMDDiagnosticsTest, NonFiniteEnergyStateIsRejected)
 
 TEST(GaMDDiagnosticsTest, NonFiniteVirialComponentsAreRejected)
 {
-    tensor                      reference     = {};
-    std::array<real, DIM * DIM> candidate     = {};
-    const std::array<real, 3>   invalidValues = { std::numeric_limits<real>::quiet_NaN(),
-                                                  std::numeric_limits<real>::infinity(),
-                                                  -std::numeric_limits<real>::infinity() };
+    tensor                    reference     = {};
+    tensor                    candidate     = {};
+    const std::array<real, 3> invalidValues = { std::numeric_limits<real>::quiet_NaN(),
+                                                std::numeric_limits<real>::infinity(),
+                                                -std::numeric_limits<real>::infinity() };
     for (Index valueIndex = 0; valueIndex < ssize(invalidValues); ++valueIndex)
     {
         for (int componentIndex = 0; componentIndex < DIM * DIM; ++componentIndex)
         {
-            candidate[componentIndex] = invalidValues[valueIndex];
+            candidate[componentIndex / DIM][componentIndex % DIM] = invalidValues[valueIndex];
             EXPECT_THROW_GMX(validateGaMDGpuShadowVirial(MDLogger{}, 1, reference, candidate),
                              SimulationInstabilityError);
-            candidate[componentIndex]                             = 0;
+            candidate[componentIndex / DIM][componentIndex % DIM] = 0;
             reference[componentIndex / DIM][componentIndex % DIM] = invalidValues[valueIndex];
             EXPECT_THROW_GMX(validateGaMDGpuShadowVirial(MDLogger{}, 1, reference, candidate),
                              SimulationInstabilityError);
@@ -489,9 +488,9 @@ TEST(GaMDDiagnosticsTest, NonFiniteForcesAndExcessiveDifferencesAreRejected)
     candidateEnergy.potentialEnergy = 1;
     EXPECT_THROW_GMX(validateGaMDGpuShadowEnergy(MDLogger{}, 1, GaMDStepResult{}, candidateEnergy),
                      SimulationInstabilityError);
-    tensor                      referenceVirial = {};
-    std::array<real, DIM * DIM> candidateVirial = {};
-    candidateVirial.back()                      = 1;
+    tensor referenceVirial  = {};
+    tensor candidateVirial  = {};
+    candidateVirial[ZZ][ZZ] = 1;
     EXPECT_THROW_GMX(validateGaMDGpuShadowVirial(MDLogger{}, 1, referenceVirial, candidateVirial),
                      SimulationInstabilityError);
 }
@@ -505,9 +504,9 @@ TEST(GaMDDiagnosticsTest, FiniteShadowsWithinExistingTolerancesAreAccepted)
     candidateEnergy.scaleD -= 0.00001;
     candidateEnergy.boostP = 0.05;
     validateGaMDGpuShadowEnergy(MDLogger{}, 1, GaMDStepResult{}, candidateEnergy);
-    tensor                      referenceVirial = {};
-    std::array<real, DIM * DIM> candidateVirial = {};
-    candidateVirial.back()                      = 0.005_real;
+    tensor referenceVirial  = {};
+    tensor candidateVirial  = {};
+    candidateVirial[ZZ][ZZ] = 0.005_real;
     validateGaMDGpuShadowVirial(MDLogger{}, 1, referenceVirial, candidateVirial);
     const std::array<RVec, 1> referenceForces = { RVec(0, 0, 0) };
     const std::array<RVec, 1> candidateForces = { RVec(0.0001_real, 0, 0) };
@@ -545,15 +544,15 @@ TEST_F(GaMDTest, FreshInputRejectsStageAndRunLengthOverflow)
                  "ntcmdprep 0\nntcmd 9223372036854775806\n"
                  "ntebprep 0\nnteb 2\nntave 1\n";
     }
-    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0), "64-bit");
+    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_->prepareStep(0), "64-bit");
     {
         std::ofstream input("gamd.in");
         input << "igamd 1\niE 1\niEP 1\nreweight_nst 50\nsigma0P 6\n"
                  "ntcmdprep 0\nntcmd 2\nntebprep 0\nnteb 2\nntave 1\n";
     }
-    gaMDModule_.prepareStep(0, 0);
+    gaMDModule_->prepareStep(0);
     GMX_EXPECT_DEATH_IF_SUPPORTED(
-            gaMDModule_.warnIfRunTooShort(std::numeric_limits<int64_t>::max() - 1, 2, 0), "64-bit");
+            gaMDModule_->warnIfRunTooShort(std::numeric_limits<int64_t>::max() - 1, 2), "64-bit");
 }
 
 TEST_F(GaMDTest, RestartRejectsInvalidStageCounters)
@@ -574,7 +573,7 @@ TEST_F(GaMDTest, RestartRejectsInvalidStageCounters)
         const auto  parameterEnd   = restart.find('\n', parameterStart);
         restart.replace(parameterStart, parameterEnd - parameterStart, invalidParameters[caseIndex]);
         writeGaMDProductionInput(restart);
-        GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0), "invalid");
+        GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_->prepareStep(0), "invalid");
     }
 }
 
@@ -589,7 +588,7 @@ TEST_F(GaMDTest, ProductionRestartMayIgnoreZeroStageInput)
         std::ofstream input("gamd.in", std::ios::app);
         input << "ntcmdprep 0\nntcmd 0\nntebprep 0\nnteb 0\nntave 0\n";
     }
-    const GaMDStepPlan& plan = gaMDModule_.prepareStep(0, 0);
+    const GaMDStepPlan& plan = gaMDModule_->prepareStep(0);
     EXPECT_EQ(plan.bias.stage, GaMDStage::Production);
     EXPECT_DOUBLE_EQ(plan.bias.thresholdP, 10.0);
 }
@@ -609,9 +608,9 @@ TEST_F(GaMDTest, StageTransitionsPreserveNumericOutput)
     const std::array<int, 10> expectedStages = { 1, 1, 1, 2, 2, 3, 3, 4, 4, 5 };
     for (Index stepIndex = 0; stepIndex < ssize(expectedStages); ++stepIndex)
     {
-        const GaMDStepPlan& plan = gaMDModule_.prepareStep(stepIndex, 0);
+        const GaMDStepPlan& plan = gaMDModule_->prepareStep(stepIndex);
         EXPECT_EQ(static_cast<int>(plan.bias.stage), expectedStages[stepIndex]);
-        gaMDModule_.finalizeCurrentStep(stepIndex, 0, stepIndex, 0);
+        gaMDModule_->finalizeCurrentStep(stepIndex, stepIndex, 0);
     }
     const auto rows = readNumericRows("gamd-para.dat");
     ASSERT_EQ(rows.size(), 7U);
@@ -692,41 +691,41 @@ TEST_F(GaMDTest, ForceOverrideSnapshotGovernsStagingAndHostResult)
             fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory workingDirectory(directory);
     writeGaMDProductionInput(c_validGaMDRestart);
-    gaMDModule_.setBufferedProductionOutputEnabled(true);
+    gaMDModule_->setBufferedProductionOutputEnabled(true);
     gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP", "0.5", 1);
     gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_SCALED", "1.0", 1);
     gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_BOOSTP", "4.0", 1);
     gmxSetenv("GMX_GAMD_FORCE_OVERRIDE_BOOSTD", "2.0", 1);
-    EXPECT_TRUE(gaMDModule_.prepareStep(0, 0).requiresHostEnergy);
-    EXPECT_FALSE(gaMDModule_.bufferedProductionOutputEnabled());
+    EXPECT_TRUE(gaMDModule_->prepareStep(0).requiresHostEnergy);
+    EXPECT_FALSE(gaMDModule_->bufferedProductionOutputEnabled());
 
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP");
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALED");
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_BOOSTP");
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_BOOSTD");
-    gaMDModule_.finalizeCurrentStep(0, 0, 1000.0, 200.0);
-    EXPECT_DOUBLE_EQ(gaMDModule_.stepResult().scaleP, 0.5);
-    EXPECT_DOUBLE_EQ(gaMDModule_.stepResult().scaleD, 1.0);
-    EXPECT_DOUBLE_EQ(gaMDModule_.stepResult().totalBoost(), 6.0);
-    EXPECT_DOUBLE_EQ(gaMDModule_.stepResult().potentialEnergy, 1000.0);
-    EXPECT_DOUBLE_EQ(gaMDModule_.stepResult().dihedralEnergy, 200.0);
-    EXPECT_TRUE(gaMDModule_.prepareStep(1, 0).requiresHostEnergy);
+    gaMDModule_->finalizeCurrentStep(0, 1000.0, 200.0);
+    EXPECT_DOUBLE_EQ(gaMDModule_->stepResult().scaleP, 0.5);
+    EXPECT_DOUBLE_EQ(gaMDModule_->stepResult().scaleD, 1.0);
+    EXPECT_DOUBLE_EQ(gaMDModule_->stepResult().totalBoost(), 6.0);
+    EXPECT_DOUBLE_EQ(gaMDModule_->stepResult().potentialEnergy, 1000.0);
+    EXPECT_DOUBLE_EQ(gaMDModule_->stepResult().dihedralEnergy, 200.0);
+    EXPECT_TRUE(gaMDModule_->prepareStep(1).requiresHostEnergy);
 }
 
 TEST(GaMDModuleOwnershipTest, DiagnosticsAndDihedralBuffersAreInstanceOwned)
 {
     LoggerTestHelper firstLog;
     LoggerTestHelper secondLog;
-    firstLog.expectEntryMatchingRegex(MDLogger::LogLevel::Info, "GaMD output, log");
+    // 每个模块只写进自己的日志目标。
+    firstLog.expectEntryMatchingRegex(MDLogger::LogLevel::Info, "standard energy/log");
     secondLog.expectEntryMatchingRegex(MDLogger::LogLevel::Info, "standard energy/log");
     GaMDMDModule firstModule;
     GaMDMDModule secondModule;
 
     firstModule.diagnostics().setLogger(firstLog.logger());
     secondModule.diagnostics().setLogger(secondLog.logger());
-    firstModule.diagnostics().logResidentEnergy(false, true);
-    firstModule.diagnostics().logResidentEnergy(false, true);
-    secondModule.diagnostics().logResidentEnergy(true, true);
+    firstModule.diagnostics().logResidentEnergy();
+    secondModule.diagnostics().logResidentEnergy();
 
     firstModule.cpuDihedralForceBuffers().forces.resize(1);
     EXPECT_TRUE(secondModule.cpuDihedralForceBuffers().forces.empty());
@@ -756,7 +755,6 @@ TEST_F(GaMDTest, Stage4PotentialStatisticsUseBoostedTotalPotential)
             fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
-    gaMDModule_.resetStateForTesting();
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP");
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALED");
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_BOOSTP");
@@ -777,7 +775,7 @@ TEST_F(GaMDTest, Stage4PotentialStatisticsUseBoostedTotalPotential)
         output << "sigma0P 6.0\n";
     }
 
-    gaMDModule_.setCheckpointingThisStep(false);
+    gaMDModule_->setCheckpointingThisStep(false);
 
     constexpr double c_step1Potential = 0.0;
     constexpr double c_step2Potential = 10.0;
@@ -785,17 +783,17 @@ TEST_F(GaMDTest, Stage4PotentialStatisticsUseBoostedTotalPotential)
     constexpr double c_step4Potential = 0.0;
     constexpr double c_dihedralEnergy = 0.0;
 
-    gaMDModule_.prepareStep(1, 0);
-    gaMDModule_.finalizeCurrentStep(1, 0, c_step1Potential, c_dihedralEnergy);
+    gaMDModule_->prepareStep(1);
+    gaMDModule_->finalizeCurrentStep(1, c_step1Potential, c_dihedralEnergy);
 
-    gaMDModule_.prepareStep(2, 0);
-    gaMDModule_.finalizeCurrentStep(2, 0, c_step2Potential, c_dihedralEnergy);
+    gaMDModule_->prepareStep(2);
+    gaMDModule_->finalizeCurrentStep(2, c_step2Potential, c_dihedralEnergy);
 
-    gaMDModule_.prepareStep(3, 0);
-    gaMDModule_.finalizeCurrentStep(3, 0, c_step3Potential, c_dihedralEnergy);
+    gaMDModule_->prepareStep(3);
+    gaMDModule_->finalizeCurrentStep(3, c_step3Potential, c_dihedralEnergy);
 
-    gaMDModule_.prepareStep(4, 0);
-    gaMDModule_.finalizeCurrentStep(4, 0, c_step4Potential, c_dihedralEnergy);
+    gaMDModule_->prepareStep(4);
+    gaMDModule_->finalizeCurrentStep(4, c_step4Potential, c_dihedralEnergy);
 
     const auto columns = readLastNumericColumns("gamd-para.dat");
     ASSERT_GE(columns.size(), 10U);
@@ -814,7 +812,6 @@ TEST_F(GaMDTest, CheckpointReplayDoesNotDuplicateTextOutputForSavedStep)
             fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
-    gaMDModule_.resetStateForTesting();
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP");
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALED");
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_BOOSTP");
@@ -837,19 +834,19 @@ TEST_F(GaMDTest, CheckpointReplayDoesNotDuplicateTextOutputForSavedStep)
 
     constexpr double c_dihedralEnergy = 0.0;
 
-    gaMDModule_.setCheckpointingThisStep(false);
-    gaMDModule_.prepareStep(1, 0);
-    gaMDModule_.finalizeCurrentStep(1, 0, 0.0, c_dihedralEnergy);
-    gaMDModule_.prepareStep(2, 0);
-    gaMDModule_.finalizeCurrentStep(2, 0, 10.0, c_dihedralEnergy);
-    gaMDModule_.prepareStep(3, 0);
-    gaMDModule_.finalizeCurrentStep(3, 0, 0.0, c_dihedralEnergy);
+    gaMDModule_->setCheckpointingThisStep(false);
+    gaMDModule_->prepareStep(1);
+    gaMDModule_->finalizeCurrentStep(1, 0.0, c_dihedralEnergy);
+    gaMDModule_->prepareStep(2);
+    gaMDModule_->finalizeCurrentStep(2, 10.0, c_dihedralEnergy);
+    gaMDModule_->prepareStep(3);
+    gaMDModule_->finalizeCurrentStep(3, 0.0, c_dihedralEnergy);
 
-    gaMDModule_.prepareStep(4, 0);
-    gaMDModule_.setCheckpointingThisStep(true);
-    gaMDModule_.writeRestartState(4);
-    gaMDModule_.finalizeCurrentStep(4, 0, 0.0, c_dihedralEnergy);
-    gaMDModule_.setCheckpointingThisStep(false);
+    gaMDModule_->prepareStep(4);
+    gaMDModule_->setCheckpointingThisStep(true);
+    gaMDModule_->writeRestartState(4);
+    gaMDModule_->finalizeCurrentStep(4, 0.0, c_dihedralEnergy);
+    gaMDModule_->setCheckpointingThisStep(false);
 
     const Index paraRowsAfterCheckpoint     = countNumericRows("gamd-para.dat");
     const Index reweightRowsAfterCheckpoint = countNumericRows("gamd-reweight.dat");
@@ -866,17 +863,17 @@ TEST_F(GaMDTest, CheckpointReplayDoesNotDuplicateTextOutputForSavedStep)
 
     // Simulate an abrupt stop after text output advanced beyond the last
     // committed checkpoint, including a torn final record.
-    gaMDModule_.prepareStep(5, 0);
-    gaMDModule_.finalizeCurrentStep(5, 0, 0.0, c_dihedralEnergy);
-    gaMDModule_.prepareStep(6, 0);
-    gaMDModule_.finalizeCurrentStep(6, 0, 0.0, c_dihedralEnergy);
+    gaMDModule_->prepareStep(5);
+    gaMDModule_->finalizeCurrentStep(5, 0.0, c_dihedralEnergy);
+    gaMDModule_->prepareStep(6);
+    gaMDModule_->finalizeCurrentStep(6, 0.0, c_dihedralEnergy);
 
     // Simulate interruption after GaMD committed a newer restart but before
     // GROMACS replaced the older .cpt. The rotated previous restart must keep
     // the older checkpoint recoverable.
-    gaMDModule_.setCheckpointingThisStep(true);
-    gaMDModule_.writeRestartState(6);
-    gaMDModule_.setCheckpointingThisStep(false);
+    gaMDModule_->setCheckpointingThisStep(true);
+    gaMDModule_->writeRestartState(6);
+    gaMDModule_->setCheckpointingThisStep(false);
     ASSERT_TRUE(std::filesystem::exists("gamd-restart-prev.dat"));
     {
         std::ofstream paraOutput("gamd-para.dat", std::ios::app);
@@ -887,15 +884,15 @@ TEST_F(GaMDTest, CheckpointReplayDoesNotDuplicateTextOutputForSavedStep)
     EXPECT_GT(countNumericRows("gamd-para.dat"), paraRowsAfterCheckpoint);
     EXPECT_GT(countNumericRows("gamd-reweight.dat"), reweightRowsAfterCheckpoint);
 
-    gaMDModule_.resetStateForTesting();
-    gaMDModule_.prepareStep(4, 0);
-    gaMDModule_.finalizeCurrentStep(4, 0, 0.0, c_dihedralEnergy);
+    gaMDModule_ = std::make_unique<GaMDMDModule>();
+    gaMDModule_->prepareStep(4);
+    gaMDModule_->finalizeCurrentStep(4, 0.0, c_dihedralEnergy);
 
     EXPECT_EQ(countNumericRows("gamd-para.dat"), paraRowsAfterCheckpoint);
     EXPECT_EQ(countNumericRows("gamd-reweight.dat"), reweightRowsAfterCheckpoint);
 
-    gaMDModule_.prepareStep(5, 0);
-    gaMDModule_.finalizeCurrentStep(5, 0, 0.0, c_dihedralEnergy);
+    gaMDModule_->prepareStep(5);
+    gaMDModule_->finalizeCurrentStep(5, 0.0, c_dihedralEnergy);
 
     EXPECT_EQ(countNumericRows("gamd-para.dat"), paraRowsAfterCheckpoint + 1);
     EXPECT_EQ(countNumericRows("gamd-reweight.dat"), reweightRowsAfterCheckpoint + 1);
@@ -932,11 +929,11 @@ TEST_F(GaMDTest, IndependentModuleInstancesDoNotShareStepResults)
     }
 
     GaMDMDModule secondModule;
-    gaMDModule_.prepareStep(1, 0);
-    gaMDModule_.finalizeCurrentStep(1, 0, 12.0, 3.0);
-    secondModule.prepareStep(1, 0);
+    gaMDModule_->prepareStep(1);
+    gaMDModule_->finalizeCurrentStep(1, 12.0, 3.0);
+    secondModule.prepareStep(1);
 
-    EXPECT_DOUBLE_EQ(12.0, gaMDModule_.stepResult().potentialEnergy);
+    EXPECT_DOUBLE_EQ(12.0, gaMDModule_->stepResult().potentialEnergy);
     EXPECT_DOUBLE_EQ(0.0, secondModule.stepResult().potentialEnergy);
     EXPECT_DOUBLE_EQ(1.0, secondModule.stepResult().scaleP);
 }
@@ -948,7 +945,6 @@ TEST_F(GaMDTest, ResidentProductionEnergyStagesOnlyForHostConsumers)
             fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
-    gaMDModule_.resetStateForTesting();
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP");
     {
         std::ofstream output("gamd.in");
@@ -965,22 +961,22 @@ TEST_F(GaMDTest, ResidentProductionEnergyStagesOnlyForHostConsumers)
         output << "sigma0P 6.0\n";
     }
 
-    gaMDModule_.setCheckpointingThisStep(false);
-    gaMDModule_.prepareStep(2, 0);
-    EXPECT_TRUE(gaMDModule_.requiresHostEnergyThisStep(2));
+    gaMDModule_->setCheckpointingThisStep(false);
+    gaMDModule_->prepareStep(2);
+    EXPECT_TRUE(gaMDModule_->requiresHostEnergyThisStep(2));
 
-    gaMDModule_.prepareStep(49, 0);
-    EXPECT_FALSE(gaMDModule_.requiresHostEnergyThisStep(49));
+    gaMDModule_->prepareStep(49);
+    EXPECT_FALSE(gaMDModule_->requiresHostEnergyThisStep(49));
 
     // 输出节奏本身不要求暂存：只有 resident 路径查询这个结果，而它总是缓冲生产文本输出。
-    gaMDModule_.prepareStep(50, 0);
-    EXPECT_FALSE(gaMDModule_.requiresHostEnergyThisStep(50));
+    gaMDModule_->prepareStep(50);
+    EXPECT_FALSE(gaMDModule_->requiresHostEnergyThisStep(50));
 
     // 与 md.cpp 相同的顺序：先记录检查点决定，再准备这一步。
-    gaMDModule_.setCheckpointingThisStep(true);
-    gaMDModule_.prepareStep(51, 0);
-    EXPECT_TRUE(gaMDModule_.requiresHostEnergyThisStep(51));
-    gaMDModule_.setCheckpointingThisStep(false);
+    gaMDModule_->setCheckpointingThisStep(true);
+    gaMDModule_->prepareStep(51);
+    EXPECT_TRUE(gaMDModule_->requiresHostEnergyThisStep(51));
+    gaMDModule_->setCheckpointingThisStep(false);
 }
 
 TEST_F(GaMDTest, BufferedProductionOutputDefersTextCadenceButNotCheckpointing)
@@ -990,7 +986,6 @@ TEST_F(GaMDTest, BufferedProductionOutputDefersTextCadenceButNotCheckpointing)
             fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
-    gaMDModule_.resetStateForTesting();
     gmxUnsetenv("GMX_GAMD_FORCE_OVERRIDE_SCALEP");
     {
         std::ofstream output("gamd.in");
@@ -1007,17 +1002,17 @@ TEST_F(GaMDTest, BufferedProductionOutputDefersTextCadenceButNotCheckpointing)
         output << "sigma0P 6.0\n";
     }
 
-    gaMDModule_.setCheckpointingThisStep(false);
-    gaMDModule_.setBufferedProductionOutputEnabled(true);
-    gaMDModule_.prepareStep(50, 0);
-    EXPECT_TRUE(gaMDModule_.bufferedProductionOutputEnabled());
-    EXPECT_FALSE(gaMDModule_.requiresHostEnergyThisStep(50));
+    gaMDModule_->setCheckpointingThisStep(false);
+    gaMDModule_->setBufferedProductionOutputEnabled(true);
+    gaMDModule_->prepareStep(50);
+    EXPECT_TRUE(gaMDModule_->bufferedProductionOutputEnabled());
+    EXPECT_FALSE(gaMDModule_->requiresHostEnergyThisStep(50));
 
-    gaMDModule_.setCheckpointingThisStep(true);
-    gaMDModule_.prepareStep(51, 0);
-    EXPECT_TRUE(gaMDModule_.requiresHostEnergyThisStep(51));
-    gaMDModule_.setCheckpointingThisStep(false);
-    gaMDModule_.setBufferedProductionOutputEnabled(false);
+    gaMDModule_->setCheckpointingThisStep(true);
+    gaMDModule_->prepareStep(51);
+    EXPECT_TRUE(gaMDModule_->requiresHostEnergyThisStep(51));
+    gaMDModule_->setCheckpointingThisStep(false);
+    gaMDModule_->setBufferedProductionOutputEnabled(false);
 }
 
 TEST_F(GaMDTest, GaMDCpuUpdateSelectsCpuReference)
@@ -1208,7 +1203,6 @@ TEST_F(GaMDTest, IrestProductionCheckpointCanContinueWithoutDuplicateRows)
             fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
-    gaMDModule_.resetStateForTesting();
     {
         std::ofstream output("gamd.in");
         output << "igamd 1\n";
@@ -1226,19 +1220,19 @@ TEST_F(GaMDTest, IrestProductionCheckpointCanContinueWithoutDuplicateRows)
 
     for (long step = 1; step <= 4; step++)
     {
-        gaMDModule_.prepareStep(step, 0);
+        gaMDModule_->prepareStep(step);
         double potentialEnergy = 0.0;
         if (step == 2)
         {
             potentialEnergy = 10.0;
         }
-        gaMDModule_.finalizeCurrentStep(step, 0, potentialEnergy, 0.0);
+        gaMDModule_->finalizeCurrentStep(step, potentialEnergy, 0.0);
     }
-    gaMDModule_.setCheckpointingThisStep(true);
-    gaMDModule_.writeRestartState(4);
-    gaMDModule_.setCheckpointingThisStep(false);
+    gaMDModule_->setCheckpointingThisStep(true);
+    gaMDModule_->writeRestartState(4);
+    gaMDModule_->setCheckpointingThisStep(false);
 
-    gaMDModule_.resetStateForTesting();
+    gaMDModule_ = std::make_unique<GaMDMDModule>();
     std::filesystem::remove("gamd-para.dat");
     std::filesystem::remove("gamd-reweight.dat");
     {
@@ -1252,22 +1246,22 @@ TEST_F(GaMDTest, IrestProductionCheckpointCanContinueWithoutDuplicateRows)
         output << "sigma0P 6.0\n";
     }
 
-    gaMDModule_.prepareStep(0, 0);
-    gaMDModule_.finalizeCurrentStep(0, 0, 0.0, 0.0);
-    gaMDModule_.prepareStep(1, 0);
-    gaMDModule_.setCheckpointingThisStep(true);
-    gaMDModule_.writeRestartState(1);
-    gaMDModule_.finalizeCurrentStep(1, 0, 0.0, 0.0);
-    gaMDModule_.setCheckpointingThisStep(false);
+    gaMDModule_->prepareStep(0);
+    gaMDModule_->finalizeCurrentStep(0, 0.0, 0.0);
+    gaMDModule_->prepareStep(1);
+    gaMDModule_->setCheckpointingThisStep(true);
+    gaMDModule_->writeRestartState(1);
+    gaMDModule_->finalizeCurrentStep(1, 0.0, 0.0);
+    gaMDModule_->setCheckpointingThisStep(false);
 
     const Index paraRowsAtCheckpoint     = countNumericRows("gamd-para.dat");
     const Index reweightRowsAtCheckpoint = countNumericRows("gamd-reweight.dat");
     ASSERT_EQ(paraRowsAtCheckpoint, 1U);
     ASSERT_EQ(reweightRowsAtCheckpoint, 1U);
 
-    gaMDModule_.resetStateForTesting();
-    gaMDModule_.prepareStep(1, 0);
-    gaMDModule_.finalizeCurrentStep(1, 0, 0.0, 0.0);
+    gaMDModule_ = std::make_unique<GaMDMDModule>();
+    gaMDModule_->prepareStep(1);
+    gaMDModule_->finalizeCurrentStep(1, 0.0, 0.0);
 
     EXPECT_EQ(countNumericRows("gamd-para.dat"), paraRowsAtCheckpoint);
     EXPECT_EQ(countNumericRows("gamd-reweight.dat"), reweightRowsAtCheckpoint);
@@ -1283,7 +1277,7 @@ TEST_F(GaMDTest, RestartRenameFailurePreservesTheCurrentSnapshot)
 
     GaMDDiagnostics diagnostics;
     GaMDRuntime     runtime(diagnostics);
-    runtime.prepareStep(0, 0, false);
+    runtime.prepareStep(0, false);
     runtime.setCheckpointingThisStep(true);
 
     // 用非空目录阻止备份轮转，确认重命名失败不会丢掉原重启文件。
@@ -1335,7 +1329,7 @@ TEST_F(GaMDTest, RestartReconciliationPreservesOriginalAfterWriteFailure)
                 std::signal(SIGXFSZ, SIG_IGN);
                 GMX_RELEASE_ASSERT(setrlimit(RLIMIT_FSIZE, &fileSizeLimit) == 0,
                                    "Could not configure the test file-size limit");
-                gaMDModule_.prepareStep(65, 0);
+                gaMDModule_->prepareStep(65);
             },
             "Failed to flush and synchronize GaMD file");
     EXPECT_EQ(TextReader::readFileToString(reweightPath), originalOutput);
@@ -1358,27 +1352,26 @@ TEST_F(GaMDTest, RestartRejectsMalformedRecordsBeforeRestoringState)
     for (Index suffixIndex = 0; suffixIndex < ssize(suffixes); suffixIndex++)
     {
         writeGaMDProductionInput(c_validGaMDRestart + suffixes[suffixIndex]);
-        GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0), errors[suffixIndex]);
+        GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_->prepareStep(0), errors[suffixIndex]);
     }
     std::string trailing = c_validGaMDRestart;
     trailing.replace(
             trailing.find("version 3\n"), std::string("version 3\n").size(), "version 3 trailing\n");
     writeGaMDProductionInput(trailing);
-    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0), "Unexpected trailing token");
+    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_->prepareStep(0), "Unexpected trailing token");
 
     std::string missingFlag = c_validGaMDRestart;
     missingFlag.erase(missingFlag.find("production_restart 1\n"),
                       std::string("production_restart 1\n").size());
     writeGaMDProductionInput(missingFlag);
-    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0), "requires production_restart");
+    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_->prepareStep(0), "requires production_restart");
 
     std::string invalidFlag = c_validGaMDRestart;
     invalidFlag.replace(invalidFlag.find("production_restart 1"),
                         std::string("production_restart 1").size(),
                         "production_restart 2");
     writeGaMDProductionInput(invalidFlag);
-    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0),
-                                  "production_restart must be 0 or 1");
+    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_->prepareStep(0), "production_restart must be 0 or 1");
 }
 
 TEST_F(GaMDTest, RestartReadsAllSupportedVersions)
@@ -1404,8 +1397,8 @@ TEST_F(GaMDTest, RestartReadsAllSupportedVersions)
             restart.erase(restart.find("windowD 0 0 0\n"), std::string("windowD 0 0 0\n").size());
         }
         writeGaMDProductionInput(restart);
-        gaMDModule_.resetStateForTesting();
-        const GaMDStepPlan& plan = gaMDModule_.prepareStep(0, 0);
+        gaMDModule_              = std::make_unique<GaMDMDModule>();
+        const GaMDStepPlan& plan = gaMDModule_->prepareStep(0);
         EXPECT_EQ(plan.bias.stage, GaMDStage::Production);
         EXPECT_DOUBLE_EQ(plan.bias.thresholdP, 10.0);
     }
@@ -1422,18 +1415,18 @@ TEST_F(GaMDTest, RestartSelectsOnlyAValidatedMatchingSnapshot)
         std::ofstream previous("gamd-restart-prev.dat");
         previous << c_validGaMDRestart;
     }
-    const GaMDStepPlan& recovered = gaMDModule_.prepareStep(10, 0);
+    const GaMDStepPlan& recovered = gaMDModule_->prepareStep(10);
     EXPECT_EQ(recovered.bias.stage, GaMDStage::Production);
     EXPECT_DOUBLE_EQ(recovered.bias.thresholdP, 10.0);
 
     // 当前快照有效且匹配时，无关的旧备份不能阻止正常续跑。
-    gaMDModule_.resetStateForTesting();
+    gaMDModule_ = std::make_unique<GaMDMDModule>();
     writeGaMDProductionInput(c_validGaMDRestart);
     {
         std::ofstream previous("gamd-restart-prev.dat");
         previous << "corrupted backup\n";
     }
-    EXPECT_EQ(gaMDModule_.prepareStep(10, 0).bias.stage, GaMDStage::Production);
+    EXPECT_EQ(gaMDModule_->prepareStep(10).bias.stage, GaMDStage::Production);
 }
 
 TEST_F(GaMDTest, RestartRetains64BitCounters)
@@ -1454,9 +1447,9 @@ TEST_F(GaMDTest, RestartRetains64BitCounters)
     }
 
     // 超过 32 位的步数和窗口计数必须完整地读回并再次写出。
-    gaMDModule_.prepareStep(INT64_C(5000000000), 0);
-    gaMDModule_.setCheckpointingThisStep(true);
-    gaMDModule_.writeRestartState(INT64_C(5000000000));
+    gaMDModule_->prepareStep(INT64_C(5000000000));
+    gaMDModule_->setCheckpointingThisStep(true);
+    gaMDModule_->writeRestartState(INT64_C(5000000000));
 
     int64_t       restoredStep        = -1;
     int64_t       restoredWindowCount = -1;
@@ -1490,12 +1483,12 @@ TEST_F(GaMDTest, StrictInputRejectsMissingAndTrailingValues)
         std::ofstream input("gamd.in");
         input << "igamd\n";
     }
-    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0), "Missing or invalid value");
+    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_->prepareStep(0), "Missing or invalid value");
     {
         std::ofstream input("gamd.in");
         input << "igamd 1 unexpected\n";
     }
-    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0), "Unexpected trailing token");
+    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_->prepareStep(0), "Unexpected trailing token");
 }
 
 TEST_F(GaMDTest, StrictInputRejectsUnknownParameter)
@@ -1505,7 +1498,6 @@ TEST_F(GaMDTest, StrictInputRejectsUnknownParameter)
             fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
-    gaMDModule_.resetStateForTesting();
     {
         std::ofstream output("gamd.in");
         output << "igamd 1\n";
@@ -1521,7 +1513,7 @@ TEST_F(GaMDTest, StrictInputRejectsUnknownParameter)
         output << "misspelled_parameter 7\n";
     }
 
-    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0), "Unknown GaMD parameter");
+    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_->prepareStep(0), "Unknown GaMD parameter");
 }
 
 TEST_F(GaMDTest, StrictInputRejectsDuplicateParameter)
@@ -1531,14 +1523,13 @@ TEST_F(GaMDTest, StrictInputRejectsDuplicateParameter)
             fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
-    gaMDModule_.resetStateForTesting();
     {
         std::ofstream output("gamd.in");
         output << "igamd 1\n";
         output << "igamd 3\n";
     }
 
-    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0), "Duplicate GaMD parameter");
+    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_->prepareStep(0), "Duplicate GaMD parameter");
 }
 
 TEST_F(GaMDTest, StrictInputRejectsInvalidRange)
@@ -1548,7 +1539,6 @@ TEST_F(GaMDTest, StrictInputRejectsInvalidRange)
             fileManager.getOutputTempDirectory() / TestFileManager::getTestSpecificFileNameRoot();
     ScopedWorkingDirectory scopedWorkingDirectory(workDir);
 
-    gaMDModule_.resetStateForTesting();
     {
         std::ofstream output("gamd.in");
         output << "igamd 1\n";
@@ -1563,7 +1553,7 @@ TEST_F(GaMDTest, StrictInputRejectsInvalidRange)
         output << "sigma0P 6.0\n";
     }
 
-    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_.prepareStep(0, 0), "reweight_nst must be positive");
+    GMX_EXPECT_DEATH_IF_SUPPORTED(gaMDModule_->prepareStep(0), "reweight_nst must be positive");
 }
 
 } // namespace

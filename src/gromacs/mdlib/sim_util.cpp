@@ -1559,23 +1559,6 @@ void do_force(FILE*                         fplog,
 
     const bool useGpuGaMDShortRangeVirial = simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuResident
                                             && stepWork.computeVirial && stepWork.useGpuFBufferOps;
-    if (simulationWork.gamdExecutionMode == GaMDExecutionMode::GpuResident
-        && runScheduleWork.gaMDModule->diagnostics().shouldPrintGpuWorkloadDiagnostics())
-    {
-        GMX_LOG(runScheduleWork.gaMDModule->diagnostics().logger().info)
-                .asParagraph()
-                .appendTextFormatted(
-                        "[GaMD GPU diagnostics] cpuLocal=%d cpuListed=%d cpuBonded=%d special=%d "
-                        "freeEnergy=%d gpuFBufferOps=%d computeVirial=%d shortRangeVirial=%d\n",
-                        domainWork.haveCpuLocalForceWork,
-                        domainWork.haveCpuListedForceWork,
-                        domainWork.haveCpuBondedWork,
-                        domainWork.haveSpecialForces,
-                        domainWork.haveFreeEnergyWork,
-                        stepWork.useGpuFBufferOps,
-                        stepWork.computeVirial,
-                        useGpuGaMDShortRangeVirial);
-    }
 
     const bool pmeSendCoordinatesFromGpu =
             simulationWork.useGpuPmePpCommunication && !stepWork.doNeighborSearch;
@@ -2494,15 +2477,9 @@ void do_force(FILE*                         fplog,
             runScheduleWork.gaMDModule->gpuExecutor()->launchShortRangeVirialReduction();
             if (stepWork.stageGpuEnergyAndVirialToHost)
             {
-                std::array<real, DIM * DIM> shortRangeVirial = {};
-                runScheduleWork.gaMDModule->gpuExecutor()->copyShortRangeVirial(&shortRangeVirial);
-                for (int i = 0; i < DIM; ++i)
-                {
-                    for (int j = 0; j < DIM; ++j)
-                    {
-                        vir_force[i][j] += shortRangeVirial[i * DIM + j];
-                    }
-                }
+                tensor shortRangeVirial = { { 0 } };
+                runScheduleWork.gaMDModule->gpuExecutor()->copyShortRangeVirial(shortRangeVirial);
+                m_add(vir_force, shortRangeVirial, vir_force);
             }
         }
 

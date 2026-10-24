@@ -45,6 +45,7 @@
 #include <set>
 #include <string>
 
+#include "gromacs/math/units.h"
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/path.h"
 #include "gromacs/utility/strconvert.h"
@@ -103,7 +104,7 @@ std::string gaMDStageParameterError(const GaMDParameters& parameters)
     return {};
 }
 
-void GaMDRuntime::loadParameters(int rank)
+void GaMDRuntime::loadParameters()
 {
     if (parametersLoaded_)
     {
@@ -196,11 +197,11 @@ void GaMDRuntime::loadParameters(int rank)
             }
             else if (parameterName == "sigma0P")
             {
-                parameters_.potentialSigmaLimit = doubleFromString(value) * 4.184;
+                parameters_.potentialSigmaLimit = doubleFromString(value) * c_cal2Joule;
             }
             else if (parameterName == "sigma0D")
             {
-                parameters_.dihedralSigmaLimit = doubleFromString(value) * 4.184;
+                parameters_.dihedralSigmaLimit = doubleFromString(value) * c_cal2Joule;
             }
             else if (parameterName == "debug")
             {
@@ -278,11 +279,12 @@ void GaMDRuntime::loadParameters(int rank)
 
     const bool usesPotentialBoost = (parameters_.boostType == 1 || parameters_.boostType == 3);
     const bool usesDihedralBoost  = (parameters_.boostType == 2 || parameters_.boostType == 3);
+    // 上面已拒绝非有限值，这里只需检查是否为正。
     if (usesPotentialBoost)
     {
         requireParameter(providedParameters, "iEP");
         requireParameter(providedParameters, "sigma0P");
-        if (!std::isfinite(parameters_.potentialSigmaLimit) || parameters_.potentialSigmaLimit <= 0.0)
+        if (parameters_.potentialSigmaLimit <= 0.0)
         {
             GMX_THROW(InvalidInputError("GaMD parameter sigma0P must be finite and positive."));
         }
@@ -291,7 +293,7 @@ void GaMDRuntime::loadParameters(int rank)
     {
         requireParameter(providedParameters, "iED");
         requireParameter(providedParameters, "sigma0D");
-        if (!std::isfinite(parameters_.dihedralSigmaLimit) || parameters_.dihedralSigmaLimit <= 0.0)
+        if (parameters_.dihedralSigmaLimit <= 0.0)
         {
             GMX_THROW(InvalidInputError("GaMD parameter sigma0D must be finite and positive."));
         }
@@ -314,35 +316,32 @@ void GaMDRuntime::loadParameters(int rank)
 
     parametersLoaded_ = true;
 
-    if (rank == 0)
-    {
-        GMX_LOG(diagnostics_.logger().info)
-                .asParagraph()
-                .appendTextFormatted(
-                        "GaMD parameters loaded from gamd.in:\n"
-                        "igamd = %d, irest_gamd = %d, iE = %d, iEP = %d, iED = %d\n"
-                        "ntcmdprep = %" PRId64 ", ntcmd = %" PRId64 ", ntebprep = %" PRId64
-                        ", nteb = %" PRId64 ", ntave = %" PRId64
-                        "\n"
-                        "reweight_nst = %" PRId64 ", para_nst = %" PRId64
-                        "\n"
-                        "sigma0P = %.4f kJ/mol, sigma0D = %.4f kJ/mol, debug = %d",
-                        parameters_.boostType,
-                        parameters_.restartMode,
-                        parameters_.thresholdMode,
-                        parameters_.potentialMode,
-                        parameters_.dihedralMode,
-                        parameters_.conventionalPrepEnd,
-                        parameters_.conventionalEnd,
-                        parameters_.boostPrepLength,
-                        parameters_.boostLength,
-                        parameters_.averagingWindow,
-                        parameters_.reweightInterval,
-                        parameters_.parameterInterval,
-                        parameters_.potentialSigmaLimit,
-                        parameters_.dihedralSigmaLimit,
-                        debug_);
-    }
+    GMX_LOG(diagnostics_.logger().info)
+            .asParagraph()
+            .appendTextFormatted(
+                    "GaMD parameters loaded from gamd.in:\n"
+                    "igamd = %d, irest_gamd = %d, iE = %d, iEP = %d, iED = %d\n"
+                    "ntcmdprep = %" PRId64 ", ntcmd = %" PRId64 ", ntebprep = %" PRId64
+                    ", nteb = %" PRId64 ", ntave = %" PRId64
+                    "\n"
+                    "reweight_nst = %" PRId64 ", para_nst = %" PRId64
+                    "\n"
+                    "sigma0P = %.4f kJ/mol, sigma0D = %.4f kJ/mol, debug = %d",
+                    parameters_.boostType,
+                    parameters_.restartMode,
+                    parameters_.thresholdMode,
+                    parameters_.potentialMode,
+                    parameters_.dihedralMode,
+                    parameters_.conventionalPrepEnd,
+                    parameters_.conventionalEnd,
+                    parameters_.boostPrepLength,
+                    parameters_.boostLength,
+                    parameters_.averagingWindow,
+                    parameters_.reweightInterval,
+                    parameters_.parameterInterval,
+                    parameters_.potentialSigmaLimit,
+                    parameters_.dihedralSigmaLimit,
+                    debug_);
 }
 
 } // namespace gmx

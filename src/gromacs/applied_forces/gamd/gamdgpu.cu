@@ -46,29 +46,16 @@
 
 #include "gmxpre.h"
 
-#include <math_constants.h>
-
-#include <cassert>
-
 #include <algorithm>
 
 #include "gromacs/applied_forces/gamd/gamd_scale_gpu.h"
 #include "gromacs/applied_forces/gamd/gamdgpu_impl.h"
 #include "gromacs/applied_forces/gamd/gamdmath.h"
-#include "gromacs/gpu_utils/cuda_arch_utils.cuh"
 #include "gromacs/gpu_utils/cudautils.cuh"
 #include "gromacs/gpu_utils/device_stream.h"
 #include "gromacs/gpu_utils/devicebuffer.h"
 #include "gromacs/gpu_utils/gpueventsynchronizer.h"
-#include "gromacs/gpu_utils/typecasts_cuda_hip.h"
-#include "gromacs/gpu_utils/vectype_ops_cuda.h"
-#include "gromacs/listed_forces/listed_forces_gpu.h"
-#include "gromacs/math/units.h"
-#include "gromacs/mdlib/force_flags.h"
 #include "gromacs/mdlib/gpuforcereduction_impl_internal.h"
-#include "gromacs/mdtypes/interaction_const.h"
-#include "gromacs/mdtypes/simulation_workload.h"
-#include "gromacs/pbcutil/pbc_aiuc_cuda.cuh"
 #include "gromacs/timing/wallcycle.h"
 #include "gromacs/utility/gmxassert.h"
 
@@ -77,6 +64,47 @@ namespace gmx
 {
 namespace
 {
+
+/*! \internal \brief Returns the device energy that stands for one host F_* energy term.
+ *
+ * The short-range nonbonded and reciprocal terms come from their producers'
+ * buffers, all other terms from the listed-force energies, so that device sums
+ * follow the order of the host sum_epot().
+ */
+__device__ __forceinline__ float gamdDeviceEnergyTerm(const int    fType,
+                                                      const float* gm_nbLJEnergy,
+                                                      const float* gm_nbElecEnergy,
+                                                      const float* gm_pmeEnergy,
+                                                      const float* gm_listedEnergies)
+{
+    if (fType == F_COUL_SR)
+    {
+        return gm_nbElecEnergy[0];
+    }
+    if (fType == F_LJ)
+    {
+        return gm_nbLJEnergy[0];
+    }
+    if (fType == F_COUL_RECIP)
+    {
+        return gm_pmeEnergy[0];
+    }
+    return gm_listedEnergies[fType];
+}
+
+//! Writes a symmetric tensor stored as XX, XY, XZ, YY, YZ, ZZ as nine row-major components.
+__device__ __forceinline__ void writeSymmetricTensor(const float compact[6], float* gm_tensor)
+{
+    gm_tensor[XX * DIM + XX] = compact[0];
+    gm_tensor[XX * DIM + YY] = compact[1];
+    gm_tensor[XX * DIM + ZZ] = compact[2];
+    gm_tensor[YY * DIM + XX] = compact[1];
+    gm_tensor[YY * DIM + YY] = compact[3];
+    gm_tensor[YY * DIM + ZZ] = compact[4];
+    gm_tensor[ZZ * DIM + XX] = compact[2];
+    gm_tensor[ZZ * DIM + YY] = compact[4];
+    gm_tensor[ZZ * DIM + ZZ] = compact[5];
+}
 
 //! Copies PME energy and the symmetric virial into the GaMD staging layout.
 __global__ void stageGamdReciprocalEnergyKernel(const float* gm_virialAndEnergy, float* gm_destination)
@@ -128,16 +156,7 @@ __global__ void recordConstraintVirialKernel(const float* gm_lincsVirial,
             }
             compact[component] *= scaleFactor;
         }
-        float* sample         = gm_history + sampleIndex * DIM * DIM;
-        sample[XX * DIM + XX] = compact[0];
-        sample[XX * DIM + YY] = compact[1];
-        sample[XX * DIM + ZZ] = compact[2];
-        sample[YY * DIM + XX] = compact[1];
-        sample[YY * DIM + YY] = compact[3];
-        sample[YY * DIM + ZZ] = compact[4];
-        sample[ZZ * DIM + XX] = compact[2];
-        sample[ZZ * DIM + YY] = compact[4];
-        sample[ZZ * DIM + ZZ] = compact[5];
+        writeSymmetricTensor(compact, gm_history + sampleIndex * DIM * DIM);
     }
 }
 
@@ -224,16 +243,8 @@ __global__ void finalizeKineticHistoryKernel(const int    numGroups,
                                        0.5F * (gm_currentHalf[5] + gm_previousHalf[5]) };
         if (recordSample && sampleIndex < historyCapacity)
         {
-            float* history         = gm_history + sampleIndex * historyStride;
-            history[XX * DIM + XX] = fullCompact[0];
-            history[XX * DIM + YY] = fullCompact[1];
-            history[XX * DIM + ZZ] = fullCompact[2];
-            history[YY * DIM + XX] = fullCompact[1];
-            history[YY * DIM + YY] = fullCompact[3];
-            history[YY * DIM + ZZ] = fullCompact[4];
-            history[ZZ * DIM + XX] = fullCompact[2];
-            history[ZZ * DIM + YY] = fullCompact[4];
-            history[ZZ * DIM + ZZ] = fullCompact[5];
+            float* history = gm_history + sampleIndex * historyStride;
+            writeSymmetricTensor(fullCompact, history);
             for (int group = 0; group < numGroups; ++group)
             {
                 history[DIM * DIM + group] =
@@ -298,20 +309,8 @@ __global__ void reduceGamdRawEnergiesKernel(const float* gm_nbLJEnergy,
         {
             if (fType != F_DISRESVIOL && fType != F_ORIRESDEV)
             {
-                float energy = gm_listedEnergies[fType];
-                if (fType == F_COUL_SR)
-                {
-                    energy = gm_nbElecEnergy[0];
-                }
-                else if (fType == F_LJ)
-                {
-                    energy = gm_nbLJEnergy[0];
-                }
-                else if (fType == F_COUL_RECIP)
-                {
-                    energy = gm_pmeEnergy[0];
-                }
-                totalEnergy += energy;
+                totalEnergy += gamdDeviceEnergyTerm(
+                        fType, gm_nbLJEnergy, gm_nbElecEnergy, gm_pmeEnergy, gm_listedEnergies);
             }
         }
 
@@ -345,20 +344,8 @@ __global__ void recordGamdEnergySampleKernel(const float* gm_nbLJEnergy,
         }
         for (int fType = 0; fType < F_EPOT; ++fType)
         {
-            float energy = gm_listedEnergies[fType];
-            if (fType == F_COUL_SR)
-            {
-                energy = gm_nbElecEnergy[0];
-            }
-            else if (fType == F_LJ)
-            {
-                energy = gm_nbLJEnergy[0];
-            }
-            else if (fType == F_COUL_RECIP)
-            {
-                energy = gm_pmeEnergy[0];
-            }
-            sample[fType] = energy;
+            sample[fType] = gamdDeviceEnergyTerm(
+                    fType, gm_nbLJEnergy, gm_nbElecEnergy, gm_pmeEnergy, gm_listedEnergies);
         }
         sample[F_EPOT] = gm_gamdState[c_gaMDPotentialEnergy] + gm_gamdState[c_gaMDPotentialBoost]
                          + gm_gamdState[c_gaMDDihedralBoost];
@@ -515,41 +502,27 @@ void launchGaMDPmeEnergyStaging(DeviceBuffer<float>   source,
     GMX_ASSERT(destination != nullptr && readyEvent != nullptr,
                "GaMD reciprocal-energy staging requires output storage and an event");
 
+    // 默认启动配置就是单线程：1 个块、1 个线程、无共享内存。
     KernelLaunchConfig config;
-    config.blockSize[0]     = 1;
-    config.blockSize[1]     = 1;
-    config.blockSize[2]     = 1;
-    config.gridSize[0]      = 1;
-    config.gridSize[1]      = 1;
-    config.gridSize[2]      = 1;
-    config.sharedMemorySize = 0;
-
-    auto       kernel     = stageGamdReciprocalEnergyKernel;
+    auto               kernel     = stageGamdReciprocalEnergyKernel;
     const auto kernelArgs = prepareGpuKernelArguments(kernel, config, &source, &destination);
     launchGpuKernel(kernel, config, pmeStream, nullptr, "Stage GaMD reciprocal energy", kernelArgs);
     readyEvent->markEvent(pmeStream);
 }
 
 
-void GaMDGpuExecutor::Impl::recordUpdateConstraintVirial(DeviceBuffer<float> lincsVirial,
-                                                         const bool          haveLincs,
-                                                         DeviceBuffer<float> settleVirial,
-                                                         const bool          haveSettles,
-                                                         const real          scaleFactor)
+void GaMDGpuExecutor::Impl::recordConstraintVirial(DeviceBuffer<float> lincsVirial,
+                                                   const bool          haveLincs,
+                                                   DeviceBuffer<float> settleVirial,
+                                                   const bool          haveSettles,
+                                                   const real          scaleFactor)
 {
-    GMX_RELEASE_ASSERT(updateStream_ != nullptr,
-                       "GaMD constraint-virial history requested before initialization");
+    GMX_ASSERT(updateStream_ != nullptr,
+               "GaMD constraint-virial history requested before initialization");
 
+    // 默认启动配置就是单线程：1 个块、1 个线程、无共享内存。
     KernelLaunchConfig config;
-    config.blockSize[0]     = 1;
-    config.blockSize[1]     = 1;
-    config.blockSize[2]     = 1;
-    config.gridSize[0]      = 1;
-    config.gridSize[1]      = 1;
-    config.gridSize[2]      = 1;
-    config.sharedMemorySize = 0;
-
-    auto       kernel     = recordConstraintVirialKernel;
+    auto               kernel     = recordConstraintVirialKernel;
     const auto kernelArgs = prepareGpuKernelArguments(kernel,
                                                       config,
                                                       &lincsVirial,
@@ -563,11 +536,11 @@ void GaMDGpuExecutor::Impl::recordUpdateConstraintVirial(DeviceBuffer<float> lin
     launchGpuKernel(kernel, config, *updateStream_, nullptr, "Record deferred constraint virial", kernelArgs);
 }
 
-void GaMDGpuExecutor::Impl::recordUpdateKineticEnergy(const bool recordSample)
+void GaMDGpuExecutor::Impl::recordKineticEnergy(const bool recordSample)
 {
-    GMX_RELEASE_ASSERT(updateStream_ != nullptr && updateVelocities_ != nullptr
-                               && d_updateMasses_ != nullptr && d_updateTemperatureGroups_ != nullptr,
-                       "GaMD kinetic history requires bound update buffers");
+    GMX_ASSERT(updateStream_ != nullptr && updateVelocities_ != nullptr
+                       && d_updateMasses_ != nullptr && d_updateTemperatureGroups_ != nullptr,
+               "GaMD kinetic history requires bound update buffers");
     if (updateNumAtoms_ == 0)
     {
         return;
@@ -601,16 +574,9 @@ void GaMDGpuExecutor::Impl::recordUpdateKineticEnergy(const bool recordSample)
                     "Accumulate GaMD GPU kinetic energy",
                     kineticArgs);
 
+    // 收尾内核单线程运行，默认启动配置就是 1 个块、1 个线程、无共享内存。
     KernelLaunchConfig finalizeConfig;
-    finalizeConfig.blockSize[0]     = 1;
-    finalizeConfig.blockSize[1]     = 1;
-    finalizeConfig.blockSize[2]     = 1;
-    finalizeConfig.gridSize[0]      = 1;
-    finalizeConfig.gridSize[1]      = 1;
-    finalizeConfig.gridSize[2]      = 1;
-    finalizeConfig.sharedMemorySize = 0;
-
-    auto       finalizeKernel = finalizeKineticHistoryKernel;
+    auto               finalizeKernel = finalizeKineticHistoryKernel;
     const auto finalizeArgs   = prepareGpuKernelArguments(finalizeKernel,
                                                         finalizeConfig,
                                                         &updateNumTemperatureGroups_,
@@ -628,11 +594,11 @@ void GaMDGpuExecutor::Impl::recordUpdateKineticEnergy(const bool recordSample)
                     finalizeArgs);
 }
 
-std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::Impl::takePreviousHalfStepKineticEnergy()
+std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::Impl::previousHalfStepKineticEnergy()
 {
-    GMX_RELEASE_ASSERT(updateStream_ != nullptr && updateVelocities_ != nullptr
-                               && d_updateMasses_ != nullptr && d_updateTemperatureGroups_ != nullptr,
-                       "GaMD previous half-step kinetic state requires bound update buffers");
+    GMX_ASSERT(updateStream_ != nullptr && updateVelocities_ != nullptr
+                       && d_updateMasses_ != nullptr && d_updateTemperatureGroups_ != nullptr,
+               "GaMD previous half-step kinetic state requires bound update buffers");
     clearDeviceBufferAsync(
             &d_updateGroupHalfKineticTensor_, 0, updateNumTemperatureGroups_ * DIM * DIM, *updateStream_);
 
@@ -679,7 +645,7 @@ std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::Impl::takePreviousHalf
     return tensors;
 }
 
-void GaMDGpuExecutor::Impl::finishGamdDihedralBuffers()
+void GaMDGpuExecutor::Impl::finishBondedForceAccumulation()
 {
     GMX_ASSERT(dihedralBufferEnabled(), "GaMD dihedral buffers requested while disabled");
     GMX_ASSERT(d_gamdDihedralForcesNbnxn_ != nullptr && d_gamdDihedralForcesState_ != nullptr
@@ -712,22 +678,22 @@ void GaMDGpuExecutor::Impl::finishGamdDihedralBuffers()
     wallcycle_stop(wallCycleCounters_, WallCycleCounter::LaunchGpuPp);
 }
 
-DeviceBuffer<float> GaMDGpuExecutor::Impl::gamdPmeEnergyStagingBuffer()
+DeviceBuffer<float> GaMDGpuExecutor::Impl::pmeEnergyStagingBuffer()
 {
     GMX_ASSERT(energyEnabled(), "GaMD device energy requested while disabled");
     return d_gamdPmeEnergy_;
 }
 
-GpuEventSynchronizer* GaMDGpuExecutor::Impl::gamdPmeEnergyReadyEvent()
+GpuEventSynchronizer* GaMDGpuExecutor::Impl::pmeEnergyReadyEvent()
 {
     GMX_ASSERT(gamdPmeEnergyReadyEvent_ != nullptr,
                "GaMD PME energy event requested while device energy is disabled");
     return gamdPmeEnergyReadyEvent_.get();
 }
 
-void GaMDGpuExecutor::Impl::launchGamdEnergyReduction(const GaMDBiasParameters& parameters,
-                                                      const GaMDForceOverrides& forceOverrides,
-                                                      bool                      recordEnergySample)
+void GaMDGpuExecutor::Impl::launchEnergyReduction(const GaMDBiasParameters& parameters,
+                                                  const GaMDForceOverrides& forceOverrides,
+                                                  bool                      recordEnergySample)
 {
     GMX_ASSERT(energyEnabled(), "GaMD device energy requested while disabled");
     GMX_ASSERT(shortRangeLennardJonesEnergy_ != nullptr && shortRangeElectrostaticEnergy_ != nullptr
@@ -737,16 +703,9 @@ void GaMDGpuExecutor::Impl::launchGamdEnergyReduction(const GaMDBiasParameters& 
 
     gamdPmeEnergyReadyEvent_->enqueueWaitEvent(deviceStream_);
 
+    // 两个内核都单线程运行，默认启动配置就是 1 个块、1 个线程、无共享内存。
     KernelLaunchConfig config;
-    config.blockSize[0]     = 1;
-    config.blockSize[1]     = 1;
-    config.blockSize[2]     = 1;
-    config.gridSize[0]      = 1;
-    config.gridSize[1]      = 1;
-    config.gridSize[2]      = 1;
-    config.sharedMemorySize = 0;
-
-    auto       kernel     = reduceGamdRawEnergiesKernel;
+    auto               kernel     = reduceGamdRawEnergiesKernel;
     const auto kernelArgs = prepareGpuKernelArguments(kernel,
                                                       config,
                                                       &shortRangeLennardJonesEnergy_,
@@ -758,9 +717,9 @@ void GaMDGpuExecutor::Impl::launchGamdEnergyReduction(const GaMDBiasParameters& 
     launchGamdProductionScaleKernel(d_gamdState_, parameters, forceOverrides, deviceStream_);
     if (recordEnergySample)
     {
-        GMX_RELEASE_ASSERT(useGpuResidentGaMD_ && d_gamdEnergyHistory_ != nullptr
-                                   && d_gamdEnergyHistoryCount_ != nullptr,
-                           "Deferred GaMD energy history requested while disabled");
+        GMX_ASSERT(useGpuResidentGaMD_ && d_gamdEnergyHistory_ != nullptr
+                           && d_gamdEnergyHistoryCount_ != nullptr,
+                   "Deferred GaMD energy history requested while disabled");
 
         auto       historyKernel     = recordGamdEnergySampleKernel;
         const auto historyKernelArgs = prepareGpuKernelArguments(historyKernel,
@@ -788,7 +747,7 @@ void GaMDGpuExecutor::Impl::launchGamdEnergyReduction(const GaMDBiasParameters& 
     }
 }
 
-GaMDStepResult GaMDGpuExecutor::Impl::gamdDiagnosticState()
+GaMDStepResult GaMDGpuExecutor::Impl::energyDiagnostics()
 {
     GMX_ASSERT(gamdEnergyShadowDiagnosticsEnabled_,
                "GaMD device energy diagnostics requested while disabled");
@@ -802,7 +761,7 @@ GaMDStepResult GaMDGpuExecutor::Impl::gamdDiagnosticState()
 
 std::vector<std::array<real, F_NRE>> GaMDGpuExecutor::Impl::takeGamdEnergyHistory()
 {
-    GMX_RELEASE_ASSERT(useGpuResidentGaMD_, "Deferred GaMD energy history requested while disabled");
+    GMX_ASSERT(useGpuResidentGaMD_, "Deferred GaMD energy history requested while disabled");
     copyFromDeviceBuffer(h_gamdEnergyHistoryCount_.data(),
                          &d_gamdEnergyHistoryCount_,
                          0,
@@ -835,21 +794,14 @@ std::vector<std::array<real, F_NRE>> GaMDGpuExecutor::Impl::takeGamdEnergyHistor
     return samples;
 }
 
-void GaMDGpuExecutor::Impl::recordGamdForceVirialSample()
+void GaMDGpuExecutor::Impl::recordForceVirialSample()
 {
-    GMX_RELEASE_ASSERT(useGpuResidentGaMD_ && d_gamdForceVirialHistory_ != nullptr,
-                       "Deferred GaMD force-virial history requested while disabled");
+    GMX_ASSERT(useGpuResidentGaMD_ && d_gamdForceVirialHistory_ != nullptr,
+               "Deferred GaMD force-virial history requested while disabled");
 
+    // 默认启动配置就是单线程：1 个块、1 个线程、无共享内存。
     KernelLaunchConfig config;
-    config.blockSize[0]     = 1;
-    config.blockSize[1]     = 1;
-    config.blockSize[2]     = 1;
-    config.gridSize[0]      = 1;
-    config.gridSize[1]      = 1;
-    config.gridSize[2]      = 1;
-    config.sharedMemorySize = 0;
-
-    auto       kernel     = recordGamdForceVirialSampleKernel;
+    auto               kernel     = recordGamdForceVirialSampleKernel;
     const auto kernelArgs = prepareGpuKernelArguments(kernel,
                                                       config,
                                                       &d_gamdShortRangeVirial_,
@@ -864,8 +816,7 @@ void GaMDGpuExecutor::Impl::recordGamdForceVirialSample()
 
 std::vector<std::array<real, DIM * DIM>> GaMDGpuExecutor::Impl::takeGamdForceVirialHistory(const int numSamples)
 {
-    GMX_RELEASE_ASSERT(useGpuResidentGaMD_,
-                       "Deferred GaMD force-virial history requested while disabled");
+    GMX_ASSERT(useGpuResidentGaMD_, "Deferred GaMD force-virial history requested while disabled");
     GMX_RELEASE_ASSERT(numSamples >= 0 && numSamples <= sc_historyCapacity,
                        "Deferred GaMD force-virial sample count is out of range");
     if (numSamples == 0)
@@ -895,7 +846,6 @@ void GaMDGpuExecutor::Impl::launchGamdVirialReductionKernel(DeviceBuffer<Float3>
                                                             DeviceBuffer<float>* virial,
                                                             const char*          kernelName)
 {
-    GMX_ASSERT(virial != nullptr, "GaMD virial reduction requires an output buffer");
     clearDeviceBufferAsync(virial, 0, DIM * DIM, deviceStream_);
 
     constexpr int      c_virialThreadsPerBlock = 256;
@@ -919,7 +869,7 @@ void GaMDGpuExecutor::Impl::launchGamdVirialReductionKernel(DeviceBuffer<Float3>
     launchGpuKernel(virialKernel, virialConfig, deviceStream_, nullptr, kernelName, virialKernelArgs);
 }
 
-void GaMDGpuExecutor::Impl::launchGamdShortRangeVirialReduction()
+void GaMDGpuExecutor::Impl::launchShortRangeVirialReduction()
 {
     GMX_ASSERT(useGpuResidentGaMD_, "GaMD short-range virial reduction requested while disabled");
     wallcycle_start_nocount(wallCycleCounters_, WallCycleCounter::LaunchGpuPp);
@@ -930,14 +880,11 @@ void GaMDGpuExecutor::Impl::launchGamdShortRangeVirialReduction()
     wallcycle_stop(wallCycleCounters_, WallCycleCounter::LaunchGpuPp);
 }
 
-void GaMDGpuExecutor::Impl::launchGamdForceCorrectionKernel(DeviceBuffer<Float3> forces,
-                                                            real                 totalScale,
-                                                            real dihedralCorrectionScale,
+void GaMDGpuExecutor::Impl::launchGamdForceCorrectionKernel(DeviceBuffer<Float3>  forces,
                                                             GpuEventSynchronizer* rawForcesReady)
 {
     GMX_ASSERT(useGpuResidentGaMD_, "GaMD GPU force correction requested while disabled");
-    GMX_ASSERT(!useGpuResidentGaMD_ || d_gamdState_ != nullptr,
-               "GaMD device scale requested without device state storage");
+    GMX_ASSERT(d_gamdState_ != nullptr, "GaMD device scale requested without device state storage");
     rawForcesReady->enqueueWaitEvent(deviceStream_);
 
     constexpr int      c_threadsPerBlock = 256;
@@ -950,14 +897,18 @@ void GaMDGpuExecutor::Impl::launchGamdForceCorrectionKernel(DeviceBuffer<Float3>
     config.gridSize[2]      = 1;
     config.sharedMemorySize = 0;
 
-    auto       kernel     = gamdForceCorrectionKernel;
-    const auto kernelArgs = prepareGpuKernelArguments(kernel,
+    // 实际修正读取设备上的偏置状态；主机缩放参数只供影子内核使用，这里传入不会被读取的中性值。
+    const float unusedTotalScale              = 1.0F;
+    const float unusedDihedralCorrectionScale = 0.0F;
+    const bool  useDeviceScale                = true;
+    auto        kernel                        = gamdForceCorrectionKernel;
+    const auto  kernelArgs                    = prepareGpuKernelArguments(kernel,
                                                       config,
                                                       &gamdStateForceSize_,
-                                                      &totalScale,
-                                                      &dihedralCorrectionScale,
+                                                      &unusedTotalScale,
+                                                      &unusedDihedralCorrectionScale,
                                                       &d_gamdState_,
-                                                      &useGpuResidentGaMD_,
+                                                      &useDeviceScale,
                                                       &d_gamdDihedralForcesState_,
                                                       &forces);
     launchGpuKernel(kernel, config, deviceStream_, nullptr, "GaMD in-place force correction", kernelArgs);
